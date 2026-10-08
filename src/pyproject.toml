@@ -1,0 +1,24 @@
+[project]
+name = "pairo-loops"
+version = "0.1.0"
+description = "Codex wrapper for building agentic systems for development"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aiosqlite>=0.20,<1",
+    "mcp",
+    "openai-codex",
+    "textual>=8.2.8,<9",
+    "pytest"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["pairo*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
