@@ -1,97 +1,42 @@
-"""Run planner and developer agents on one asyncio event loop."""
+"""Run the four example agents on one asyncio event loop."""
 
 import asyncio
 from pathlib import Path
 import sys
 
-from pairo.mcp.github import get_github_mcp_server
-
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from pairo import  run_agents
-from pairo.core import (
-    Agent,
-    AgentConfiguration,
-    ApprovalMode,
-    CodexAgentClient,
-    ReasoningEffort,
-    Sandbox,
-    WebSearchMode,
-)
+from agents.developer.developer import get_developer
+from agents.intern.intern import get_intern
+from agents.planner.planner import get_planner
+from agents.product_owner.product_owner import get_product_owner
+from pairo import run_agents
 from pairo.core.events import EventPipeline
-from pairo.core.mcp.mcp_http_wrapper import MCPHttpWrapper
-from pairo.ui import SqliteSessionRepository, TextualPermissionRequester
-from pairo.core.mcp.servers import MCPServer
 from pairo.mcp.chatroom import Chatroom
-
+from pairo.mcp.github import get_github_mcp_server
+from pairo.ui import SqliteSessionRepository
 
 
 async def run_async() -> None:
     pipeline = EventPipeline()
     repository = SqliteSessionRepository()
-    
     chatroom = Chatroom(port=8081)
-    servers : list[MCPServer] = [
-        chatroom.as_http_mcp_server(),
-        get_github_mcp_server()
-        ]
-        
-    planner = Agent(
-        name="planner",
-        event_pipeline=pipeline,
-        client=CodexAgentClient(),
-        config=AgentConfiguration(
-            approval_mode=ApprovalMode.USER,
-            permission_requester=TextualPermissionRequester(pipeline, repository),
-            model="gpt-5.6-sol",
-            workspace=SOURCE_ROOT,
-            reasoning_effort=ReasoningEffort.HIGH,
-            sandbox=Sandbox.READ_ONLY,
-            web_search=WebSearchMode.CACHED,
-            mcp_servers=servers
-        ),
-    )
-    
-    
-    developer = Agent (
-        name="developer",
-        event_pipeline=pipeline,
-        client=CodexAgentClient(),
-        config=AgentConfiguration(
-            sandbox=Sandbox.WORKSPACE_WRITE,
-            approval_mode=ApprovalMode.USER,
-            permission_requester=TextualPermissionRequester(pipeline, repository),
-            workspace=SOURCE_ROOT,
-            model="gpt-5.6-terra",
-            reasoning_effort=ReasoningEffort.LOW,
-            web_search=WebSearchMode.DISABLED,
-            mcp_servers=servers,
-        ),
-    )
-    
-    documenter = Agent (
-        name="documenter",
-        event_pipeline=pipeline,
-        client=CodexAgentClient(),
-        config=AgentConfiguration(
-            sandbox=Sandbox.WORKSPACE_WRITE,
-            approval_mode=ApprovalMode.USER,
-            permission_requester=TextualPermissionRequester(pipeline, repository),
-            workspace=SOURCE_ROOT,
-            model="gpt-5.6-terra",
-            reasoning_effort=ReasoningEffort.LOW,
-            web_search=WebSearchMode.DISABLED,
-            mcp_servers=servers,
-        )
-    )
-    
-    chatroom.add_chatroom("main", [planner, developer, documenter])
+    servers = [chatroom.as_http_mcp_server(), get_github_mcp_server()]
+
+    agents = [
+        get_product_owner(pipeline, repository, servers),
+        get_planner(pipeline, repository, servers),
+        get_developer(pipeline, repository, servers),
+        get_intern(pipeline, repository, servers),
+    ]
+    chatroom.add_chatroom("main", agents)
     await chatroom.boot_up()
-    
-    await run_agents((planner, developer, documenter), pipeline, repository)
-    await chatroom.close()
+    try:
+        await run_agents(agents, pipeline, repository)
+    finally:
+        await chatroom.close()
 
 
 def run() -> None:

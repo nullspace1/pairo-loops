@@ -324,8 +324,8 @@ class AgentSidebar(Vertical):
             ("Workspace", config.workspace),
             ("Approval mode", self._enum_value(config.approval_mode)),
             ("Web search", self._enum_value(config.web_search)),
-            ("Prompt", config.prompt or "Not set"),
-            ("Developer instructions", config.instructions or "Not set"),
+            ("Prompt", config.base_instructions or "Not set"),
+            ("Developer instructions", config.developer_instructions or "Not set"),
         )
         servers = self.agent.configured_mcp_servers
         return values + (

@@ -475,10 +475,10 @@ class CodexAgentClient:
         return ThreadStartParams(
             approval_policy=cls._approval_policy(),
             approvals_reviewer=cls._reviewer(config),
-            base_instructions=config.prompt,
+            base_instructions=config.base_instructions,
             config=cls._codex_config(config, agent_name=agent_name) or None,
             cwd=str(config.workspace),
-            developer_instructions=config.instructions,
+            developer_instructions=config.developer_instructions,
             model=config.model,
             sandbox=CodexSandboxMode(config.sandbox.value),
         )
@@ -493,10 +493,10 @@ class CodexAgentClient:
             thread_id=thread_id,
             approval_policy=cls._approval_policy(),
             approvals_reviewer=cls._reviewer(config),
-            base_instructions=config.prompt,
+            base_instructions=config.base_instructions,
             config=cls._codex_config(config) or None,
             cwd=str(config.workspace),
-            developer_instructions=config.instructions,
+            developer_instructions=config.developer_instructions,
             model=config.model,
             sandbox=CodexSandboxMode(config.sandbox.value),
         )

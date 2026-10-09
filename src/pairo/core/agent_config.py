@@ -96,8 +96,8 @@ class AgentConfiguration(BaseModel):
     sandbox: SandboxMode
     workspace: Path
     model: str
-    prompt: str | None = None
-    instructions: str | None = None
+    base_instructions: str | None = None
+    developer_instructions: str | None = None
     reasoning_effort: ReasoningEffort | None = None
     web_search: WebSearchMode | None = None
     approval_mode: ApprovalMode = ApprovalMode.AUTO

@@ -88,7 +88,7 @@ class Agent:
 
     @property
     def prompt(self) -> str | None:
-        return self._configuration.prompt
+        return self._configuration.base_instructions
 
     @property
     def configuration(self) -> AgentConfiguration:

@@ -35,8 +35,8 @@ def test_configuration_defaults_are_explicit_and_isolated(tmp_path: Path) -> Non
 
     assert first.workspace == tmp_path.resolve()
     assert first.model == "model"
-    assert first.prompt is None
-    assert first.instructions is None
+    assert first.base_instructions is None
+    assert first.developer_instructions is None
     assert first.reasoning_effort is None
     assert first.web_search is None
     assert first.approval_mode is ApprovalMode.AUTO
