@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, ItemsView, KeysView, ValuesView
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
+from dataclasses import dataclass
 from enum import Enum
 import json
 from pathlib import Path
 from shutil import copytree
 from threading import Event, Lock
 from typing import Literal, cast
+from uuid import UUID
 
 from openai_codex.client import CodexClient
 from openai_codex.generated.v2_all import (
@@ -35,15 +37,12 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import JsonObject as CodexJsonObject
 from openai_codex.models import JsonValue as CodexJsonValue
 from openai_codex.models import Notification
-from pydantic import ConfigDict
+from pydantic import ConfigDict, JsonValue
 
-from ..agent_config import (
-    AgentConfiguration,
-    ApprovalMode,
-    JsonObject,
-    JsonValue,
-)
-from ..agent_server import MCP_AGENT_NAME_HEADER, SessionIdentifier, SessionNotification
+from ..agent.agent import Agent
+from ..agent.approval_mode import ApprovalMode
+from ..agent.json_object import JsonObject
+from .client import MCP_AGENT_ID_HEADER, SessionIdentifier, SessionNotification
 from ..events import (
     ClientActivityCompleted,
     ClientActivityProgress,
@@ -90,40 +89,46 @@ class _TurnStreamState:
             self._identifier = identifier
 
 
+@dataclass(frozen=True, slots=True)
+class _SessionContext:
+    agent_id: UUID
+    permission_requester: PermissionRequester | None
+    identifier: CodexSessionIdentifier
+
+
 class CodexAgentClient:
     """Translate neutral operations and models to the synchronous Codex SDK."""
 
     def __init__(self) -> None:
-        self._permission_requester: PermissionRequester | None = None
-        self._permission_identifier: CodexSessionIdentifier | None = None
-        self._permission_identifier_lock = Lock()
         self._client: CodexClient | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._close_lock = asyncio.Lock()
-        self._notification_executor: ThreadPoolExecutor | None = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="codex-notifications",
-        )
+        self._client_lock = asyncio.Lock()
+        self._closed = False
+        self._session_contexts: dict[str, _SessionContext] = {}
+        self._session_context_lock = Lock()
         self._turn_streams: dict[str, _TurnStreamState] = {}
 
     async def new_session(
         self,
-        configuration: AgentConfiguration,
-        agent_name: str,
+        agent: Agent,
     ) -> SessionIdentifier:
+        configuration = agent.snapshot()
         await self._apply_configuration(configuration)
         client = await self._ensure_client()
         response = await asyncio.to_thread(
             client.thread_start,
-            self._thread_start_params(configuration, agent_name),
+            self._thread_start_params(configuration),
         )
-        return CodexSessionIdentifier(thread_id=response.thread.id)
+        identifier = CodexSessionIdentifier(thread_id=response.thread.id)
+        self._register_session(configuration, identifier)
+        return identifier
 
     async def restore_session(
         self,
-        configuration: AgentConfiguration,
+        agent: Agent,
         identifier_json: JsonObject,
     ) -> SessionIdentifier:
+        configuration = agent.snapshot()
         await self._apply_configuration(configuration)
         identifier = CodexSessionIdentifier.model_validate(identifier_json)
         client = await self._ensure_client()
@@ -132,9 +137,11 @@ class CodexAgentClient:
             identifier.thread_id,
             self._thread_resume_params(configuration, identifier.thread_id),
         )
-        return identifier.model_copy(
+        restored = identifier.model_copy(
             update={"thread_id": response.thread.id, "turn_id": None}
         )
+        self._register_session(configuration, restored)
+        return restored
 
     async def start(
         self,
@@ -142,9 +149,7 @@ class CodexAgentClient:
         message: str,
     ) -> SessionIdentifier:
         identifier = self._identifier(session)
-        # The SDK can request approval while turn_start is still blocked. Use the
-        # persisted pre-turn identifier until Codex returns the new turn ID.
-        self._set_permission_identifier(identifier)
+        self._require_session_context(identifier.thread_id)
         client = await self._ensure_client()
         response = await asyncio.to_thread(
             client.turn_start,
@@ -152,7 +157,7 @@ class CodexAgentClient:
             message,
         )
         updated = identifier.model_copy(update={"turn_id": response.turn.id})
-        self._set_permission_identifier(updated)
+        self._update_session_identifier(updated)
         return updated
 
     async def steer(
@@ -172,7 +177,7 @@ class CodexAgentClient:
         stream = self._turn_streams.get(identifier.thread_id)
         if stream is not None:
             stream.update(updated)
-        self._set_permission_identifier(updated)
+        self._update_session_identifier(updated)
         return updated
 
     async def interrupt(self, session: SessionIdentifier) -> SessionIdentifier:
@@ -191,9 +196,7 @@ class CodexAgentClient:
     ) -> AsyncIterator[SessionNotification]:
         identifier = self._active_identifier(session)
         client = await self._ensure_client()
-        executor = self._notification_executor
-        if executor is None:
-            raise RuntimeError("The Codex client is closed.")
+        self._require_session_context(identifier.thread_id)
         if identifier.thread_id in self._turn_streams:
             raise RuntimeError("A notification stream is already active for this session.")
         stream = _TurnStreamState(identifier)
@@ -231,7 +234,10 @@ class CodexAgentClient:
             except BaseException as error:
                 enqueue(error)
 
-        reader = loop.run_in_executor(executor, read_turn)
+        # Each active turn needs an independent blocking reader. The default
+        # executor can grow beyond one worker, unlike the former single-agent
+        # executor which serialized every agent's notifications.
+        reader = loop.run_in_executor(None, read_turn)
         terminal_received = False
         try:
             while True:
@@ -250,7 +256,7 @@ class CodexAgentClient:
                     else current
                 )
                 stream.update(updated)
-                self._set_permission_identifier(None if terminal_received else updated)
+                self._update_session_identifier(updated)
                 yield SessionNotification(session=updated, event=event)
                 if terminal_received:
                     return
@@ -273,73 +279,64 @@ class CodexAgentClient:
             if self._turn_streams.get(identifier.thread_id) is stream:
                 self._turn_streams.pop(identifier.thread_id, None)
 
-    async def close(self, session: SessionIdentifier) -> None:
-        self._identifier(session)
-        async with self._close_lock:
+    async def close(self) -> None:
+        async with self._client_lock:
+            if self._closed:
+                return
+            self._closed = True
             if self._client is not None:
                 client, self._client = self._client, None
                 await asyncio.to_thread(client.close)
-            self._set_permission_identifier(None)
-            if self._notification_executor is not None:
-                executor, self._notification_executor = (
-                    self._notification_executor,
-                    None,
-                )
-                await asyncio.to_thread(
-                    executor.shutdown,
-                    wait=True,
-                    cancel_futures=True,
-                )
+            with self._session_context_lock:
+                self._session_contexts.clear()
 
     async def _ensure_client(self) -> CodexClient:
         if self._client is not None:
             return self._client
-        self._loop = asyncio.get_running_loop()
-        client = CodexClient(
-            approval_handler=(
-                self._route_permission
-                if self._permission_requester is not None
-                else None
-            )
-        )
-        await asyncio.to_thread(client.start)
-        await asyncio.to_thread(client.initialize)
-        self._client = client
-        return client
+        async with self._client_lock:
+            if self._client is not None:
+                return self._client
+            if self._closed:
+                raise RuntimeError("The Codex client is closed.")
+            self._loop = asyncio.get_running_loop()
+            client = CodexClient(approval_handler=self._route_permission)
+            try:
+                await asyncio.to_thread(client.start)
+                await asyncio.to_thread(client.initialize)
+            except BaseException:
+                with suppress(Exception):
+                    await asyncio.to_thread(client.close)
+                raise
+            self._client = client
+            return client
 
     def _route_permission(
         self,
         method: str,
         params: CodexJsonObject | None,
     ) -> CodexJsonObject:
-        requester = self._permission_requester
-        identifier = self._get_permission_identifier()
-        if requester is None or self._loop is None or identifier is None:
+        thread_id = self._permission_thread_id(params)
+        context = self._session_context(thread_id) if thread_id is not None else None
+        if context is None or context.permission_requester is None or self._loop is None:
             return {"decision": "decline"}
         request = translate_permission_request(
             method,
             params,
-            identifier.model_dump(mode="json"),
+            context.identifier.model_dump(mode="json"),
         )
         if request is None:
             return {"decision": "decline"}
         future = asyncio.run_coroutine_threadsafe(
-            requester.request(request),
+            context.permission_requester.request(request),
             self._loop,
         )
         return translate_permission_decision(request, future.result())
 
-    async def _apply_configuration(self, configuration: AgentConfiguration) -> None:
-        requester = configuration.permission_requester
-        if self._client is not None and requester is not self._permission_requester:
-            raise RuntimeError(
-                "A running Codex client cannot change its permission requester."
-            )
-        self._permission_requester = requester
-        if configuration.skill_folder is not None:
+    async def _apply_configuration(self, configuration: Agent) -> None:
+        for skill_folder in configuration.skill_folders:
             await asyncio.to_thread(
                 self._install_skills,
-                configuration.skill_folder,
+                skill_folder,
                 configuration.workspace,
             )
 
@@ -351,16 +348,44 @@ class CodexAgentClient:
             raise ValueError("skill_folder cannot contain the destination directory.")
         copytree(skill_folder, destination, dirs_exist_ok=True)
 
-    def _set_permission_identifier(
-        self,
-        identifier: CodexSessionIdentifier | None,
-    ) -> None:
-        with self._permission_identifier_lock:
-            self._permission_identifier = identifier
+    def _register_session(self, agent: Agent, identifier: CodexSessionIdentifier) -> None:
+        context = _SessionContext(
+            agent_id=agent.id,
+            permission_requester=agent.permission_requester,
+            identifier=identifier,
+        )
+        with self._session_context_lock:
+            self._session_contexts[identifier.thread_id] = context
 
-    def _get_permission_identifier(self) -> CodexSessionIdentifier | None:
-        with self._permission_identifier_lock:
-            return self._permission_identifier
+    def _update_session_identifier(self, identifier: CodexSessionIdentifier) -> None:
+        with self._session_context_lock:
+            current = self._session_contexts.get(identifier.thread_id)
+            if current is None:
+                raise ValueError(
+                    f"Codex session '{identifier.thread_id}' is not registered."
+                )
+            self._session_contexts[identifier.thread_id] = _SessionContext(
+                agent_id=current.agent_id,
+                permission_requester=current.permission_requester,
+                identifier=identifier,
+            )
+
+    def _require_session_context(self, thread_id: str) -> _SessionContext:
+        context = self._session_context(thread_id)
+        if context is None:
+            raise ValueError(f"Codex session '{thread_id}' is not registered.")
+        return context
+
+    def _session_context(self, thread_id: str) -> _SessionContext | None:
+        with self._session_context_lock:
+            return self._session_contexts.get(thread_id)
+
+    @staticmethod
+    def _permission_thread_id(params: CodexJsonObject | None) -> str | None:
+        if params is None:
+            return None
+        value = params.get("threadId")
+        return value if isinstance(value, str) and value else None
 
     async def _translate_notification(
         self,
@@ -469,14 +494,13 @@ class CodexAgentClient:
     @classmethod
     def _thread_start_params(
         cls,
-        config: AgentConfiguration,
-        agent_name: str,
+        config: Agent,
     ) -> ThreadStartParams:
         return ThreadStartParams(
             approval_policy=cls._approval_policy(),
             approvals_reviewer=cls._reviewer(config),
             base_instructions=config.base_instructions,
-            config=cls._codex_config(config, agent_name=agent_name) or None,
+            config=cls._codex_config(config) or None,
             cwd=str(config.workspace),
             developer_instructions=config.developer_instructions,
             model=config.model,
@@ -486,7 +510,7 @@ class CodexAgentClient:
     @classmethod
     def _thread_resume_params(
         cls,
-        config: AgentConfiguration,
+        config: Agent,
         thread_id: str,
     ) -> ThreadResumeParams:
         return ThreadResumeParams(
@@ -502,7 +526,7 @@ class CodexAgentClient:
         )
 
     @staticmethod
-    def _reviewer(config: AgentConfiguration) -> ApprovalsReviewer:
+    def _reviewer(config: Agent) -> ApprovalsReviewer:
         return (
             ApprovalsReviewer.user
             if config.approval_mode is ApprovalMode.USER
@@ -525,9 +549,7 @@ class CodexAgentClient:
 
     @staticmethod
     def _codex_config(
-        config: AgentConfiguration,
-        *,
-        agent_name: str | None = None,
+        config: Agent,
     ) -> CodexJsonObject:
         result: CodexJsonObject = {}
         if config.reasoning_effort is not None:
@@ -545,10 +567,9 @@ class CodexAgentClient:
                     }
                     if server.env:
                         connection["env_http_headers"] = dict(server.env)
-                    if agent_name is not None:
-                        connection["http_headers"] = {
-                            MCP_AGENT_NAME_HEADER: agent_name,
-                        }
+                    connection["http_headers"] = {
+                        MCP_AGENT_ID_HEADER: str(config.id),
+                    }
                 else:
                     connection = {
                         "command": server.command,
@@ -557,8 +578,7 @@ class CodexAgentClient:
                     }
                     if server.env:
                         connection["env"] = dict(server.env)
-                    if agent_name is not None:
-                        connection.setdefault("env", {})[MCP_AGENT_NAME_HEADER] = agent_name
+                    connection.setdefault("env", {})[MCP_AGENT_ID_HEADER] = str(config.id)
                 if server.permissions is not None:
                     permissions = server.permissions
                     if permissions.default_tools_approval_mode is not None:

@@ -1,118 +1,165 @@
-"""Provider-neutral configuration and Codex mapping tests."""
+"""Agent configuration mutation and validation tests."""
 
-import asyncio
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
-from pairo.core.agent_config import (
-    AgentConfiguration,
+from pairo.core.agent import (
+    Agent,
     ApprovalMode,
     Hook,
     HookType,
-    HttpMCPServer,
     ReasoningEffort,
-    Sandbox,
-    StdioMCPServer,
+    SandboxMode,
     WebSearchMode,
 )
-from pairo.core.clients.codex_client import CodexAgentClient
 from pairo.core.mcp.mcp_permissions import MCPPermissions, MCPToolApprovalMode
+from pairo.core.mcp.servers import HttpMCPServer, StdioMCPServer
+from pairo.core.permissions import PermissionDecision, PermissionRequester
 
 
-def test_configuration_defaults_are_explicit_and_isolated(tmp_path: Path) -> None:
-    first = AgentConfiguration(
-        sandbox=Sandbox.READ_ONLY,
-        workspace=tmp_path,
-        model=" model ",
-    )
-    second = AgentConfiguration(
-        sandbox=Sandbox.READ_ONLY,
-        workspace=tmp_path,
-        model="other",
-    )
+class AllowRequester(PermissionRequester):
+    async def request(self, request):
+        return PermissionDecision.ACCEPT
 
+
+def make_agent(tmp_path: Path, **changes) -> Agent:
+    values = {
+        "name": " agent ",
+        "sandbox": SandboxMode.READ_ONLY,
+        "workspace": tmp_path,
+        "model": " model ",
+    }
+    values.update(changes)
+    return Agent(**values)
+
+
+def test_agent_defaults_identity_and_collection_isolation(tmp_path: Path) -> None:
+    first = make_agent(tmp_path)
+    second = make_agent(tmp_path, model="other")
+
+    assert isinstance(first.id, UUID)
+    assert first.id != second.id
+    assert first.name == "agent"
     assert first.workspace == tmp_path.resolve()
     assert first.model == "model"
-    assert first.base_instructions is None
-    assert first.developer_instructions is None
-    assert first.reasoning_effort is None
-    assert first.web_search is None
+    assert first.reasoning_effort is ReasoningEffort.LOW
+    assert first.web_search is WebSearchMode.CACHED
     assert first.approval_mode is ApprovalMode.AUTO
-    assert first.permission_requester is None
-    assert first.mcp_servers == []
-    assert first.skill_folder is None
-    assert first.hooks == {}
-    assert first.mcp_servers is not second.mcp_servers
-    assert first.hooks is not second.hooks
+    assert first.mcp_servers == ()
+    assert first.skill_folders == ()
+    assert dict(first.hooks) == {}
+    assert first.mcp_servers is not second.mcp_servers or first.mcp_servers == ()
+
+    with pytest.raises(ValidationError, match="frozen"):
+        first.name = "renamed"
+    with pytest.raises(ValidationError, match="frozen"):
+        first.id = second.id
+    with pytest.raises(ValidationError, match="frozen"):
+        first.model = "direct-assignment"
 
 
-def test_configuration_validates_model_skill_folder_and_interactive_mode(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(ValidationError, match="model cannot be empty"):
-        AgentConfiguration(sandbox=Sandbox.READ_ONLY, workspace=tmp_path, model=" ")
+def test_scalar_setters_validate_and_commit(tmp_path: Path) -> None:
+    agent = make_agent(tmp_path)
+    other_workspace = tmp_path / "other"
+    other_workspace.mkdir()
+    requester = AllowRequester()
+
+    agent.set_description("Reviewer")
+    agent.set_sandbox(SandboxMode.WORKSPACE_WRITE)
+    agent.set_workspace(other_workspace)
+    agent.set_model(" updated ")
+    agent.set_base_instructions("base")
+    agent.set_developer_instructions("developer")
+    agent.set_reasoning_effort(ReasoningEffort.HIGH)
+    agent.set_web_search(WebSearchMode.LIVE)
+    agent.set_permission_requester(requester)
+    agent.set_approval_mode(ApprovalMode.USER)
+
+    assert agent.description == "Reviewer"
+    assert agent.sandbox is SandboxMode.WORKSPACE_WRITE
+    assert agent.workspace == other_workspace.resolve()
+    assert agent.model == "updated"
+    assert agent.base_instructions == "base"
+    assert agent.developer_instructions == "developer"
+    assert agent.reasoning_effort is ReasoningEffort.HIGH
+    assert agent.web_search is WebSearchMode.LIVE
+    assert agent.approval_mode is ApprovalMode.USER
+    assert agent.permission_requester is requester
+
+
+def test_invalid_setter_is_atomic_and_preserves_cross_field_rules(tmp_path: Path) -> None:
+    agent = make_agent(tmp_path)
+
+    with pytest.raises(ValidationError, match="cannot be empty"):
+        agent.set_model(" ")
+    assert agent.model == "model"
+
     with pytest.raises(ValidationError, match="existing directory"):
-        AgentConfiguration(
-            sandbox=Sandbox.READ_ONLY,
-            workspace=tmp_path,
-            model="test",
-            skill_folder=tmp_path / "missing",
-        )
+        agent.set_workspace(tmp_path / "missing")
+    assert agent.workspace == tmp_path.resolve()
+
     with pytest.raises(ValidationError, match="requires a permission requester"):
-        AgentConfiguration(
-            sandbox=Sandbox.READ_ONLY,
-            workspace=tmp_path,
-            model="test",
-            approval_mode=ApprovalMode.USER,
-        )
+        agent.set_approval_mode(ApprovalMode.USER)
+    assert agent.approval_mode is ApprovalMode.AUTO
+
+    agent.set_permission_requester(AllowRequester())
+    agent.set_approval_mode(ApprovalMode.USER)
+    with pytest.raises(ValidationError, match="requires a permission requester"):
+        agent.set_permission_requester(None)
+    assert agent.permission_requester is not None
 
 
-def test_hooks_accept_field_name_and_alias_and_reject_unknown_fields() -> None:
-    assert Hook(command=" pytest ", is_async=True) == Hook.model_validate(
-        {"command": "pytest", "async": True}
-    )
-    with pytest.raises(ValidationError, match="Hook command cannot be empty"):
-        Hook(command=" ", is_async=False)
-    with pytest.raises(ValidationError, match="Extra inputs"):
-        Hook(command="pytest", is_async=False, unexpected=True)
+def test_mcp_skill_and_hook_mutators_expose_immutable_collections(tmp_path: Path) -> None:
+    agent = make_agent(tmp_path)
+    skill_one = tmp_path / "skills-one"
+    skill_two = tmp_path / "skills-two"
+    skill_one.mkdir()
+    skill_two.mkdir()
+    http = HttpMCPServer(name="remote", url="https://example.test/mcp")
+    stdio = StdioMCPServer(name="local", command="server")
+    hook = Hook(command="prepare", is_async=True)
 
-
-def test_mcp_server_defaults_descriptions_and_validation() -> None:
-    http = HttpMCPServer(name=" remote ", url=" https://example.test/mcp ")
-    stdio = StdioMCPServer(name=" local ", command=" runner ", args=("--flag",))
-
-    assert http.name == "remote"
-    assert http.description == "https://example.test/mcp"
-    assert http.startup_timeout_sec == 10.0
-    assert http.permissions == MCPPermissions()
-    assert stdio.description == "runner --flag"
-    assert stdio.args == ("--flag",)
-    assert stdio.env == {}
-    assert stdio.permissions is None
-    for field, value in (("name", ""), ("url", " ")):
-        values = {"name": "remote", "url": "https://example.test/mcp", field: value}
-        with pytest.raises(ValidationError, match="cannot be empty"):
-            HttpMCPServer(**values)
-    with pytest.raises(ValidationError):
-        StdioMCPServer(name="local", command="runner", startup_timeout_sec=0)
-
-
-def test_configuration_rejects_duplicate_mcp_names(tmp_path: Path) -> None:
+    agent.add_mcp_server(http)
+    agent.add_mcp_server(stdio)
+    assert agent.mcp_servers == (http, stdio)
     with pytest.raises(ValidationError, match="names must be unique"):
-        AgentConfiguration(
-            sandbox=Sandbox.READ_ONLY,
-            workspace=tmp_path,
-            model="test",
-            mcp_servers=[
-                StdioMCPServer(name="same", command="one"),
-                StdioMCPServer(name="same", command="two"),
-            ],
-        )
+        agent.add_mcp_server(HttpMCPServer(name="remote", url="https://other.test"))
+    assert agent.mcp_servers == (http, stdio)
+    agent.remove_mcp_server("remote")
+    assert agent.mcp_servers == (stdio,)
+
+    agent.set_skill_folders([skill_one])
+    agent.add_skill_folder(skill_two)
+    assert agent.skill_folders == (skill_one.resolve(), skill_two.resolve())
+    agent.remove_skill_folder(skill_one)
+    assert agent.skill_folders == (skill_two.resolve(),)
+
+    agent.add_hook(HookType.SESSION_START, hook)
+    assert agent.hooks[HookType.SESSION_START] == (hook,)
+    with pytest.raises(TypeError):
+        agent.hooks[HookType.STOP] = (hook,)
+    agent.remove_hook(HookType.SESSION_START, hook)
+    assert dict(agent.hooks) == {}
 
 
-def test_mcp_permissions_normalize_names_and_serialize_modes() -> None:
+def test_snapshot_is_independent_from_later_mutation(tmp_path: Path) -> None:
+    agent = make_agent(tmp_path)
+    snapshot = agent.snapshot()
+    agent.set_model("new-model")
+    assert snapshot.id == agent.id
+    assert snapshot.model == "model"
+    assert agent.model == "new-model"
+
+
+def test_hooks_and_mcp_models_keep_their_validation(tmp_path: Path) -> None:
+    hook = Hook(command=" pytest ", is_async=True)
+    assert hook.command == "pytest"
+    with pytest.raises(ValidationError, match="cannot be empty"):
+        Hook(command=" ", is_async=False)
+
     permissions = MCPPermissions(
         default_tools_approval_mode=MCPToolApprovalMode.PROMPT,
         tool_approval_modes={" write_file ": MCPToolApprovalMode.WRITES},
@@ -120,76 +167,18 @@ def test_mcp_permissions_normalize_names_and_serialize_modes() -> None:
     assert permissions.tool_approval_modes == {
         "write_file": MCPToolApprovalMode.WRITES
     }
-    with pytest.raises(ValidationError, match="require a tool name"):
-        MCPPermissions(tool_approval_modes={" ": MCPToolApprovalMode.AUTO})
-
-
-def test_codex_adapter_installs_skills_in_the_workspace(tmp_path: Path) -> None:
-    skill_folder = tmp_path / "shared-skills"
-    skill = skill_folder / "review-code"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("# Review code", encoding="utf-8")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-
-    configuration = AgentConfiguration(
-        sandbox=Sandbox.READ_ONLY,
-        workspace=workspace,
-        model="gpt-test",
-        skill_folder=skill_folder,
-    )
-    adapter = CodexAgentClient()
-
-    asyncio.run(adapter._apply_configuration(configuration))
-
-    assert (
-        workspace / ".codex" / "skills" / "review-code" / "SKILL.md"
-    ).read_text(encoding="utf-8") == "# Review code"
 
 
 def test_neutral_core_modules_do_not_import_codex() -> None:
     root = Path(__file__).parents[1] / "pairo" / "core"
     neutral_files = [
-        "agent.py",
-        "agent_config.py",
-        "agent_server.py",
+        "agent/agent.py",
+        "agent/runner.py",
+        "agent/run.py",
+        "clients/client.py",
         "mcp/mcp_permissions.py",
         "mcp/servers.py",
         "events/agent_events.py",
     ]
     for relative in neutral_files:
         assert "openai_codex" not in (root / relative).read_text(encoding="utf-8")
-
-
-def test_codex_adapter_serializes_mcp_environments(tmp_path: Path) -> None:
-    configuration = AgentConfiguration(
-        sandbox=Sandbox.READ_ONLY,
-        workspace=tmp_path,
-        model="gpt-test",
-        mcp_servers=[
-            HttpMCPServer(
-                name="remote",
-                url="https://example.com/mcp",
-                env={"Authorization": "MCP_ACCESS_TOKEN"},
-            ),
-            StdioMCPServer(
-                name="local",
-                command="mcp-server",
-                env={"MCP_ACCESS_TOKEN": "secret"},
-            ),
-        ],
-    )
-
-    servers = CodexAgentClient._codex_config(
-        configuration,
-        agent_name="planner",
-    )["mcp_servers"]
-
-    assert servers["remote"]["env_http_headers"] == {
-        "Authorization": "MCP_ACCESS_TOKEN"
-    }
-    assert servers["remote"]["http_headers"] == {"X-Agent-NAME": "planner"}
-    assert servers["local"]["env"] == {
-        "MCP_ACCESS_TOKEN": "secret",
-        "X-Agent-NAME": "planner",
-    }

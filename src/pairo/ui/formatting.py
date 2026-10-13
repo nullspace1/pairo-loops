@@ -1,10 +1,11 @@
 """Convert completed neutral events into transcript entries."""
 
 from dataclasses import dataclass
+from uuid import UUID
 
 from pydantic import BaseModel
 
-from pairo.core.agent_config import JsonObject
+from pairo.core.agent import JsonObject
 from pairo.core.events import (
     AgentError,
     AgentEvent,
@@ -22,7 +23,7 @@ from .presentation import CompletedActivityPresenter
 
 @dataclass(frozen=True, slots=True)
 class RoutedTranscriptEntry:
-    agent_name: str
+    agent_id: UUID
     session_name: str
     entry: TranscriptEntry
 
@@ -36,7 +37,7 @@ class CompletedEventFormatter:
     def format(self, event: BaseModel) -> RoutedTranscriptEntry | None:
         if isinstance(event, MessageSent):
             return RoutedTranscriptEntry(
-                event.agent_name,
+                event.agent_id,
                 event.session_name,
                 TranscriptEntry(
                     event.source,
@@ -47,7 +48,7 @@ class CompletedEventFormatter:
             )
         if isinstance(event, AgentError):
             return RoutedTranscriptEntry(
-                event.agent_name,
+                event.agent_id,
                 event.session_name,
                 TranscriptEntry(
                     "system",
@@ -58,7 +59,7 @@ class CompletedEventFormatter:
             )
         if isinstance(event, NetworkMessageSent):
             return RoutedTranscriptEntry(
-                event.recipient_name,
+                event.recipient_id,
                 event.session_name,
                 TranscriptEntry(
                     "network",
@@ -73,7 +74,7 @@ class CompletedEventFormatter:
         ):
             presentation = self._activity_presenter.present(event.payload.activity)
             return RoutedTranscriptEntry(
-                event.agent_name,
+                event.agent_id,
                 event.session_name,
                 TranscriptEntry(
                     "activity",

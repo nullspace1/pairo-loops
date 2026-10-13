@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
+from uuid import UUID
 
 import aiosqlite
 
-from pairo.core.agent_config import JsonObject
+from pairo.core.agent import JsonObject
 
 from .models import (
     EventDetailLevel,
@@ -47,47 +48,47 @@ class SqliteSessionRepository:
 
     async def save_session(
         self,
-        agent_name: str,
+        agent_id: UUID,
         session_name: str,
         identifier: JsonObject,
     ) -> SessionMetadata:
-        agent_name = self._require_value(agent_name, "agent_name")
         session_name = self._require_value(session_name, "session_name")
+        encoded_agent_id = str(agent_id)
         connection = await self._connect()
         timestamp = self._timestamp()
         encoded = json.dumps(identifier, sort_keys=True, separators=(",", ":"))
         await connection.execute(
             """
             INSERT INTO sessions (
-                agent_name, session_name, identifier_json,
+                agent_id, session_name, identifier_json,
                 created_at, last_updated_at
             ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(agent_name, session_name) DO UPDATE SET
+            ON CONFLICT(agent_id, session_name) DO UPDATE SET
                 identifier_json = excluded.identifier_json,
                 last_updated_at = excluded.last_updated_at
             """,
-            (agent_name, session_name, encoded, timestamp, timestamp),
+            (encoded_agent_id, session_name, encoded, timestamp, timestamp),
         )
         await connection.commit()
-        return await self.get_session(agent_name, session_name)
+        return await self.get_session(agent_id, session_name)
 
     async def append_entry(
         self,
-        agent_name: str,
+        agent_id: UUID,
         session_name: str,
         entry: TranscriptEntry,
     ) -> None:
         connection = await self._connect()
-        await self._require_registered(agent_name, session_name)
+        await self._require_registered(agent_id, session_name)
         timestamp = self._timestamp()
         await connection.execute(
             """
             INSERT INTO transcript_entries (
-                agent_name, session_name, role, content, detail_level, created_at
+                agent_id, session_name, role, content, detail_level, created_at
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                agent_name,
+                str(agent_id),
                 session_name,
                 entry.role,
                 entry.content,
@@ -99,27 +100,27 @@ class SqliteSessionRepository:
             """
             UPDATE sessions
             SET last_message_at = ?, last_updated_at = ?
-            WHERE agent_name = ? AND session_name = ?
+            WHERE agent_id = ? AND session_name = ?
             """,
-            (timestamp, timestamp, agent_name, session_name),
+            (timestamp, timestamp, str(agent_id), session_name),
         )
         await connection.commit()
 
     async def entries_for(
         self,
-        agent_name: str,
+        agent_id: UUID,
         session_name: str,
     ) -> tuple[TranscriptEntry, ...]:
         connection = await self._connect()
-        await self._require_registered(agent_name, session_name)
+        await self._require_registered(agent_id, session_name)
         cursor = await connection.execute(
             """
             SELECT role, content, detail_level
             FROM transcript_entries
-            WHERE agent_name = ? AND session_name = ?
+            WHERE agent_id = ? AND session_name = ?
             ORDER BY entry_order ASC
             """,
-            (agent_name, session_name),
+            (str(agent_id), session_name),
         )
         rows = await cursor.fetchall()
         return tuple(
@@ -134,23 +135,23 @@ class SqliteSessionRepository:
 
     async def get_session(
         self,
-        agent_name: str,
+        agent_id: UUID,
         session_name: str,
     ) -> SessionMetadata:
-        row = await self._session_row(agent_name, session_name)
+        row = await self._session_row(agent_id, session_name)
         return self._metadata_from(row)
 
-    async def sessions_for(self, agent_name: str) -> tuple[SessionMetadata, ...]:
+    async def sessions_for(self, agent_id: UUID) -> tuple[SessionMetadata, ...]:
         connection = await self._connect()
         cursor = await connection.execute(
             """
-            SELECT agent_name, session_name, identifier_json, created_at,
+            SELECT agent_id, session_name, identifier_json, created_at,
                    last_message_at, last_updated_at
             FROM sessions
-            WHERE agent_name = ?
+            WHERE agent_id = ?
             ORDER BY session_order ASC
             """,
-            (agent_name,),
+            (str(agent_id),),
         )
         return tuple(self._metadata_from(row) for row in await cursor.fetchall())
 
@@ -162,7 +163,7 @@ class SqliteSessionRepository:
         encoded = json.dumps(identifier, sort_keys=True, separators=(",", ":"))
         cursor = await connection.execute(
             """
-            SELECT agent_name, session_name, identifier_json, created_at,
+            SELECT agent_id, session_name, identifier_json, created_at,
                    last_message_at, last_updated_at
             FROM sessions
             WHERE identifier_json = ?
@@ -206,55 +207,55 @@ class SqliteSessionRepository:
             """
             CREATE TABLE IF NOT EXISTS sessions (
                 session_order INTEGER PRIMARY KEY AUTOINCREMENT,
-                agent_name TEXT NOT NULL CHECK (length(agent_name) > 0),
+                agent_id TEXT NOT NULL CHECK (length(agent_id) > 0),
                 session_name TEXT NOT NULL CHECK (length(session_name) > 0),
                 identifier_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 last_message_at TEXT,
                 last_updated_at TEXT NOT NULL,
-                UNIQUE (agent_name, session_name)
+                UNIQUE (agent_id, session_name)
             );
 
             CREATE TABLE IF NOT EXISTS transcript_entries (
                 entry_order INTEGER PRIMARY KEY AUTOINCREMENT,
-                agent_name TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
                 session_name TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 detail_level TEXT NOT NULL
                     CHECK (detail_level IN ('normal', 'debug')),
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (agent_name, session_name)
-                    REFERENCES sessions (agent_name, session_name)
+                FOREIGN KEY (agent_id, session_name)
+                    REFERENCES sessions (agent_id, session_name)
                     ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS transcript_session_order
-                ON transcript_entries (agent_name, session_name, entry_order);
+                ON transcript_entries (agent_id, session_name, entry_order);
             """
         )
         await connection.commit()
 
-    async def _session_row(self, agent_name: str, session_name: str) -> sqlite3.Row:
+    async def _session_row(self, agent_id: UUID, session_name: str) -> sqlite3.Row:
         connection = await self._connect()
         cursor = await connection.execute(
             """
-            SELECT agent_name, session_name, identifier_json, created_at,
+            SELECT agent_id, session_name, identifier_json, created_at,
                    last_message_at, last_updated_at
             FROM sessions
-            WHERE agent_name = ? AND session_name = ?
+            WHERE agent_id = ? AND session_name = ?
             """,
-            (agent_name, session_name),
+            (str(agent_id), session_name),
         )
         row = await cursor.fetchone()
         if row is None:
             raise SessionNotFoundError(
-                f"Session '{session_name}' is not registered for agent '{agent_name}'."
+                f"Session '{session_name}' is not registered for agent '{agent_id}'."
             )
         return row
 
-    async def _require_registered(self, agent_name: str, session_name: str) -> None:
-        await self._session_row(agent_name, session_name)
+    async def _require_registered(self, agent_id: UUID, session_name: str) -> None:
+        await self._session_row(agent_id, session_name)
 
     def _timestamp(self) -> str:
         value = self._clock()
@@ -276,7 +277,7 @@ class SqliteSessionRepository:
             raise ValueError("Stored session identifier must be a JSON object.")
         last_message = row["last_message_at"]
         return SessionMetadata(
-            agent_name=row["agent_name"],
+            agent_id=UUID(row["agent_id"]),
             session_name=row["session_name"],
             identifier=identifier,
             created_at=datetime.fromisoformat(row["created_at"]),

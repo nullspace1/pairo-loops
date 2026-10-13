@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Iterable
+from uuid import UUID
 
 from rich.text import Text
 from textual import on
@@ -14,9 +15,9 @@ from textual.events import MouseScrollDown, MouseScrollUp
 from textual.message import Message
 from textual.widgets import Button, Input, Select, Static
 
+from pairo.core.agent import Agent, Runner
 from pairo.core.events import PermissionRequest
 
-from .commands import ChatAgent
 from .models import EventDetailLevel, SessionMetadata, TranscriptEntry
 from .presentation import PermissionRequestPresenter
 from .session_repository import SessionNotFoundError, SessionRepository
@@ -220,14 +221,22 @@ class AgentSidebar(Vertical):
     _SESSION_INFORMATION = "session"
 
     class SessionSelected(Message):
-        def __init__(self, agent_name: str, session_name: str) -> None:
+        def __init__(self, agent_id: UUID, session_name: str) -> None:
             super().__init__()
-            self.agent_name = agent_name
+            self.agent_id = agent_id
             self.session_name = session_name
 
-    def __init__(self, agent: ChatAgent, repository: SessionRepository, detail_level: EventDetailLevel, **kwargs: object) -> None:
+    def __init__(
+        self,
+        agent: Agent,
+        runner: Runner,
+        repository: SessionRepository,
+        detail_level: EventDetailLevel,
+        **kwargs: object,
+    ) -> None:
         super().__init__(**kwargs)
         self.agent = agent
+        self._runner = runner
         self._repository = repository
         self._detail_level = detail_level
         self._session_snapshot: object | None = None
@@ -264,23 +273,23 @@ class AgentSidebar(Vertical):
     def select_session(self, event: Button.Pressed) -> None:
         if event.button.name is not None:
             event.stop()
-            self.post_message(self.SessionSelected(self.agent.name, event.button.name))
+            self.post_message(self.SessionSelected(self.agent.id, event.button.name))
 
     async def refresh_data(self) -> None:
         await self._refresh_information_fields()
-        generating = self.agent.is_generating
+        generating = self._runner.is_generating(self.agent.id)
         self.query_one(".session-switch-note", Static).update(
             "Finish or interrupt the current response to switch sessions."
             if generating else "Select a session to resume it."
         )
         sessions = sorted(
-            await self._repository.sessions_for(self.agent.name),
+            await self._repository.sessions_for(self.agent.id),
             key=lambda session: session.last_updated_at,
             reverse=True,
         )
         snapshot = (
             generating,
-            self.agent.session_name,
+            self._runner.session_name(self.agent.id),
             tuple((session.session_name, session.last_updated_at) for session in sessions),
         )
         if snapshot == self._session_snapshot:
@@ -292,10 +301,13 @@ class AgentSidebar(Vertical):
             Button(
                 session.session_name,
                 name=session.session_name,
-                disabled=generating or session.session_name == self.agent.session_name,
+                disabled=(
+                    generating
+                    or session.session_name == self._runner.session_name(self.agent.id)
+                ),
                 classes=(
                     "session-button current-session"
-                    if session.session_name == self.agent.session_name
+                    if session.session_name == self._runner.session_name(self.agent.id)
                     else "session-button"
                 ),
             )
@@ -314,10 +326,18 @@ class AgentSidebar(Vertical):
         await self.query_one(".sidebar-information", SidebarFieldGroup).set_fields(fields)
 
     def _agent_fields(self) -> tuple[tuple[str, object], ...]:
-        config = self.agent.configuration
+        config = self.agent
         values = (
             ("Name", self.agent.name),
-            ("State", getattr(self.agent.state, "value", self.agent.state)),
+            ("ID", self.agent.id),
+            (
+                "State",
+                getattr(
+                    self._runner.state(self.agent.id),
+                    "value",
+                    self._runner.state(self.agent.id),
+                ),
+            ),
             ("Model", config.model),
             ("Reasoning", self._enum_value(config.reasoning_effort)),
             ("Sandbox", self._enum_value(config.sandbox)),
@@ -327,18 +347,18 @@ class AgentSidebar(Vertical):
             ("Prompt", config.base_instructions or "Not set"),
             ("Developer instructions", config.developer_instructions or "Not set"),
         )
-        servers = self.agent.configured_mcp_servers
+        servers = self.agent.mcp_servers
         return values + (
-            tuple((f"MCP server: {server.name}", server.endpoint) for server in servers)
+            tuple((f"MCP server: {server.name}", server.description) for server in servers)
             if servers else (("MCP servers", "None configured"),)
         )
 
     async def _current_session_fields(self) -> tuple[tuple[str, object], ...]:
-        session_name = self.agent.session_name
+        session_name = self._runner.session_name(self.agent.id)
         if session_name is None:
             return (("Session", "No session selected."),)
         try:
-            session = await self._repository.get_session(self.agent.name, session_name)
+            session = await self._repository.get_session(self.agent.id, session_name)
         except SessionNotFoundError:
             return (("Name", session_name),)
         return (
@@ -376,11 +396,19 @@ class AgentChatPane(Vertical):
             super().__init__()
             self.detail_level = detail_level
 
-    def __init__(self, agent: ChatAgent, repository: SessionRepository, detail_level: EventDetailLevel, **kwargs: object) -> None:
+    def __init__(
+        self,
+        agent: Agent,
+        runner: Runner,
+        repository: SessionRepository,
+        detail_level: EventDetailLevel,
+        **kwargs: object,
+    ) -> None:
         super().__init__(**kwargs)
         self.agent = agent
-        self.agent_name = agent.name
-        self.session_name = agent.session_name
+        self._runner = runner
+        self.agent_id = agent.id
+        self.session_name = runner.session_name(agent.id)
         self._repository = repository
         self._detail_level = detail_level
         self._permission_cards: dict[tuple[str, str], PermissionRequestCard] = {}
@@ -398,12 +426,18 @@ class AgentChatPane(Vertical):
                         allow_blank=False,
                         classes="detail-filter",
                     )
-            yield AgentSidebar(self.agent, self._repository, self._detail_level, classes="agent-sidebar")
+            yield AgentSidebar(
+                self.agent,
+                self._runner,
+                self._repository,
+                self._detail_level,
+                classes="agent-sidebar",
+            )
 
     async def on_mount(self) -> None:
         if self.session_name is not None:
             try:
-                entries = await self._repository.entries_for(self.agent_name, self.session_name)
+                entries = await self._repository.entries_for(self.agent_id, self.session_name)
             except SessionNotFoundError:
                 return
             await self.transcript.replace_entries(entries)
@@ -435,10 +469,10 @@ class AgentChatPane(Vertical):
         entry_position = None
         if pending_key is not None:
             existing_entries = await self._repository.entries_for(
-                self.agent_name, session_name
+                self.agent_id, session_name
             )
             entry_position = len(existing_entries)
-        await self._repository.append_entry(self.agent_name, session_name, entry)
+        await self._repository.append_entry(self.agent_id, session_name, entry)
         if pending_key is not None and entry_position is not None:
             self._pending_permission_positions[pending_key] = entry_position
         if session_name == self.session_name:
@@ -447,7 +481,7 @@ class AgentChatPane(Vertical):
 
     async def select_session(self, session_name: str) -> None:
         self.session_name = session_name
-        entries = await self._repository.entries_for(self.agent_name, session_name)
+        entries = await self._repository.entries_for(self.agent_id, session_name)
         await self.transcript.replace_entries(
             entries,
             inline_permission_cards=self._pending_permission_cards(session_name),

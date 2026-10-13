@@ -1,30 +1,12 @@
 # Pairo Loops
 
 Pairo Loops is an asyncio-native orchestration layer and Textual interface for
-provider-neutral development agents. The generic runtime depends on the
-`AgentClient` protocol; Codex-specific thread IDs, turn IDs, SDK models, and
-wire formats are isolated in `CodexAgentClient`.
+provider-neutral development agents. `Agent` stores an agent's identity and
+configuration, `Runner` owns conversations, and one `AgentClient` handles
+provider sessions for every agent.
 
-## Architecture
-
-See the [feature and configuration reference](docs/feature-reference.md) for
-the implemented component and execution-flow map, Python/Textual/MCP test
-surfaces, operational constraints, complete default-value and enum inventory,
-and current behavior mismatches.
-
-- `Agent` owns user-visible session names, async message flow, and opaque
-  `SessionIdentifier` values.
-- `AgentClient` creates, restores, starts, steers, interrupts, and observes
-  provider sessions asynchronously.
-- `CodexAgentClient` validates Codex identifiers and maps neutral
-  configuration, MCP servers, permissions, and events to the Codex SDK.
-- `AgentConfiguration` carries the agent's permission requester. The Textual
-  requester resolves each opaque identifier through the session repository,
-  so UI routing does not require binding an agent to the requester.
-- `EventPipeline` provides ordered async publication and one-shot
-  subscriptions.
-- `SqliteSessionRepository` persists transcripts and opaque identifier JSON
-  through `aiosqlite`.
+See the [feature reference](src/docs/feature-reference.md) for the component
+map, conversation lifecycle, public interfaces, and operational constraints.
 
 ## Setup
 
@@ -43,15 +25,7 @@ Authenticate the local Codex CLI before starting Codex-backed agents.
 ```python
 import asyncio
 
-from pairo import (
-    Agent,
-    AgentConfiguration,
-    ApprovalMode,
-    CodexAgentClient,
-    HttpMCPServer,
-    Sandbox,
-    run_agents,
-)
+from pairo import Agent, ApprovalMode, CodexAgentClient, Runner, SandboxMode, run_agents
 from pairo.core.events import EventPipeline
 from pairo.ui import SqliteSessionRepository, TextualPermissionRequester
 
@@ -62,83 +36,62 @@ async def main() -> None:
     permissions = TextualPermissionRequester(pipeline, repository)
     agent = Agent(
         name="reviewer",
-        config=AgentConfiguration(
-            sandbox=Sandbox.WORKSPACE_WRITE,
-            workspace=".",
-            model="gpt-5.6",
-            approval_mode=ApprovalMode.USER,
-            permission_requester=permissions,
-            mcp_servers=(
-                HttpMCPServer(name="docs", url="https://example.com/mcp"),
-            ),
-        ),
-        client=CodexAgentClient(),
-        event_pipeline=pipeline,
+        sandbox=SandboxMode.WORKSPACE_WRITE,
+        workspace=".",
+        model="gpt-5.6",
+        approval_mode=ApprovalMode.USER,
+        permission_requester=permissions,
     )
-    await run_agents([agent], pipeline, repository)
+    client = CodexAgentClient()
+    runner = Runner([agent], pipeline, client)
+    await run_agents(runner, repository)
 
 
 asyncio.run(main())
 ```
 
-## Codex skills and hooks
+## Configuration and conversations
 
-Set `skill_folder` to a directory containing skill directories. Before a Codex
-session starts, Pairo copies its contents to `<workspace>/.codex/skills`.
-Configure lifecycle commands with `HookType` and `Hook`:
+Each Agent receives an immutable UUID in `agent.id`. Names are immutable display
+labels and do not need to be unique; Runner operations and events use the agent
+ID. Other configuration is changed through validated setters such as
+`set_model`, `set_workspace`, and `set_approval_mode`; use
+`set_*`, `add_*`, and `remove_*` methods for MCP servers, skill folders, and
+hooks. Collection properties are immutable views. Each successful update is
+validated atomically, including cross-field approval and permission-requester
+requirements.
 
-```python
-from pairo import Hook, HookType
+Packaged MCP implementations receive the agents they should configure and add
+their server configuration directly. For example,
+`add_github_mcp_server(agents)` and `context7(agents, api_key, timeout)` attach
+their stdio configuration, while `Chatroom.add_chatroom(name, runner, agents)`
+attaches the chatroom HTTP configuration and registers the room membership.
 
-configuration = AgentConfiguration(
-    # Other required settings...
-    skill_folder="./shared-skills",
-    hooks={
-        HookType.SESSION_START: [
-            Hook(command="prepare-workspace", is_async=True),
-        ],
-    },
-)
-```
+`Runner` is the entry point for creating, restoring, switching, messaging,
+waiting on, and interrupting conversations. `new_session(agent)` and
+`restore_session(agent, identifier_json)` receive the Agent directly. The
+client snapshots its configuration at session creation or restoration, so
+later Agent updates apply to subsequent sessions only.
 
-## Local MCP servers
+Configure multiple skill folders with `agent.add_skill_folder(path)`. Codex
+merges folders into `<workspace>/.codex/skills` in order; later folders
+override earlier files with the same name. Configure lifecycle commands with
+`Hook` and `HookType`, adding and removing entries through the Agent methods.
 
-`MCPHttpWrapper` runs an MCP Python server with streamable HTTP and provides the
-matching configuration object:
-
-```python
-from pairo import MCPHttpLogLevel, MCPHttpWrapper
-
-class LocalMCP(MCPHttpWrapper):
-    def build_mcp_server(self):
-        return local_mcp_server
-
-
-wrapper = LocalMCP(
-    port=8765,
-    startup_timeout_sec=10,
-    log_level=MCPHttpLogLevel.INFO,
-)
-await wrapper.boot_up()
-configuration = AgentConfiguration(
-    # Other required settings...
-    mcp_servers=(wrapper.as_http_mcp_server(),),
-)
-
-# Shutdown with the rest of the application.
-await wrapper.close()
-```
+`run_agents(runner, repository)` starts initial conversations, launches the
+Textual UI, and closes the Runner, repository, and event pipeline when the
+application exits.
 
 ## Sessions
 
-Session names are application-owned identities. Provider identifiers are opaque
-Pydantic models and are persisted as JSON without being interpreted outside
-their client adapter.
+Session names are application-owned identities. Provider identifiers are
+opaque `SessionIdentifier` values and are persisted as JSON without being
+interpreted outside the provider client.
 
 - `/session new [NAME]` creates a session. Without a name, the UI chooses the
   lowest unused `Conversation N`.
 - `/session switch NAME` restores or selects a known session.
-- `/sessions` lists persisted sessions.
+- `/sessions` lists persisted and loaded sessions.
 - `/interrupt` interrupts the active generation.
 
 The SQLite schema is intentionally new and does not migrate the former thread
@@ -146,18 +99,10 @@ schema.
 
 ## Permission approvals
 
-When an agent needs permission, the prompt appears inline in that agent's active
-session transcript. The complete request remains visible above its approval
-buttons, and several outstanding requests can be answered independently. Once
-answered, the card remains as a compact Approved once, Approved for session, or
-Denied decision record while the plain-text
-request and answer are retained in session history. Replayed history therefore
-never exposes stale approval controls.
-
-New transcript items scroll the transcript to the latest item after Textual has
-laid them out. Long ordinary messages keep their own scroll area; pointer-wheel
-events over a message or approval card stay there instead of spilling into the
-surrounding transcript.
+Permission prompts appear inline in the agent's active session. Outstanding
+requests can be answered independently; completed cards remain as decision
+records in session history. Replayed history does not expose stale approval
+controls.
 
 ## Tests
 

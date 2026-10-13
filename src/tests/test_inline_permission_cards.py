@@ -1,5 +1,7 @@
 """Focused unit coverage for the live-only inline approval state."""
 
+from uuid import uuid4
+
 from pairo.core.events import PermissionRequest
 from pairo.core.permissions import PermissionRequestType
 from pairo.ui.presentation import permission_request_history_content
@@ -7,10 +9,13 @@ from pairo.ui.models import EventDetailLevel, TranscriptEntry
 from pairo.ui.widgets import AgentChatPane, PermissionRequestCard
 
 
+AGENT_ID = uuid4()
+
+
 def _request(request_id: str = "request-1") -> PermissionRequest:
     return PermissionRequest(
         request_id=request_id,
-        agent_name="reviewer",
+        agent_id=AGENT_ID,
         session_name="Conversation 1",
         request_type=PermissionRequestType.COMMAND_EXECUTION,
         request={"command": "echo " + "long-command " * 50},

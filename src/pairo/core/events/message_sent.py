@@ -1,6 +1,7 @@
 """Completed agent text output."""
 
 from pydantic import BaseModel, ConfigDict, field_validator
+from uuid import UUID
 
 
 class MessageSent(BaseModel):
@@ -8,7 +9,7 @@ class MessageSent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    agent_name: str
+    agent_id: UUID
     session_name: str
     message: str
     source: str = "user"

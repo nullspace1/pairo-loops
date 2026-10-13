@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from uuid import UUID
 
 from pydantic import BaseModel
 from textual import on
 from textual.app import App, ComposeResult
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import Footer, Header, Input, TabbedContent, TabPane
 
+from pairo.core.agent import Runner
 from pairo.core.events import (
     AgentError,
     AgentEvent,
@@ -21,7 +23,7 @@ from pairo.core.events import (
     SessionUpdated,
 )
 
-from .commands import AgentCommandController, ChatAgent
+from .commands import AgentCommandController
 from .formatting import CompletedEventFormatter
 from .models import (
     EventDetailLevel,
@@ -101,47 +103,44 @@ class AgentChatApp(App[None]):
 
     def __init__(
         self,
-        agents: Sequence[ChatAgent],
-        event_pipeline: EventPipeline,
+        runner: Runner,
         session_repository: SessionRepository | None = None,
     ) -> None:
         super().__init__()
-        if not agents:
-            raise ValueError("AgentChatApp requires at least one agent.")
-        agents_by_name = {agent.name: agent for agent in agents}
-        if len(agents_by_name) != len(agents):
-            raise ValueError("Agent names must be unique.")
-        self._agents = agents_by_name
-        self._event_pipeline = event_pipeline
+        agents_by_id = dict(runner.agents)
+        self._runner = runner
+        self._agents = agents_by_id
+        self._event_pipeline = runner.pipeline
         self._owns_repository = session_repository is None
         self.session_repository = session_repository or SqliteSessionRepository()
         self.history = self.session_repository
         self._formatter = CompletedEventFormatter()
         self._detail_level = EventDetailLevel.NORMAL
         self._controller = AgentCommandController(
-            agents_by_name,
-            event_pipeline,
+            runner,
             self.session_repository,
         )
         self._pane_ids = {
-            agent.name: f"agent-chat-{index}" for index, agent in enumerate(agents)
+            agent.id: f"agent-chat-{index}"
+            for index, agent in enumerate(agents_by_id.values())
         }
         self.chats = {
-            agent.name: AgentChatPane(
+            agent.id: AgentChatPane(
                 agent,
+                runner,
                 self.session_repository,
                 self._detail_level,
                 id=f"chat-content-{index}",
             )
-            for index, agent in enumerate(agents)
+            for index, agent in enumerate(agents_by_id.values())
         }
 
     def compose(self) -> ComposeResult:
         yield Header()
         with TabbedContent(initial=next(iter(self._pane_ids.values())), id="agent-tabs"):
-            for agent_name, pane_id in self._pane_ids.items():
-                with TabPane(agent_name, id=pane_id):
-                    yield self.chats[agent_name]
+            for agent_id, pane_id in self._pane_ids.items():
+                with TabPane(self._agents[agent_id].name, id=pane_id):
+                    yield self.chats[agent_id]
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -179,7 +178,7 @@ class AgentChatApp(App[None]):
     async def show_pipeline_event(self, message: PipelineEventReceived) -> None:
         event = message.event
         if isinstance(event, PermissionRequest):
-            pane = self.chats.get(event.agent_name)
+            pane = self.chats.get(event.agent_id)
             if pane is not None:
                 # Persist the request for history, but render the richer card only live.
                 await pane.append(
@@ -195,8 +194,8 @@ class AgentChatApp(App[None]):
                 await pane.enqueue_permission(event)
             return
         routed = self._formatter.format(event)
-        if routed is not None and routed.agent_name in self.chats:
-            await self.chats[routed.agent_name].append(
+        if routed is not None and routed.agent_id in self.chats:
+            await self.chats[routed.agent_id].append(
                 routed.session_name,
                 routed.entry,
             )
@@ -210,7 +209,7 @@ class AgentChatApp(App[None]):
         if pane is None:
             return
         try:
-            outcome = await self._controller.execute(pane.agent_name, message.value)
+            outcome = await self._controller.execute(pane.agent_id, message.value)
         except (KeyError, RuntimeError, ValueError) as error:
             await self._append_to_current(
                 pane,
@@ -230,7 +229,7 @@ class AgentChatApp(App[None]):
     @on(PermissionRequestCard.Decided)
     async def answer_permission(self, message: PermissionRequestCard.Decided) -> None:
         request = message.request
-        pane = self.chats.get(request.agent_name)
+        pane = self.chats.get(request.agent_id)
         if pane is None:
             return
         try:
@@ -266,10 +265,10 @@ class AgentChatApp(App[None]):
 
     @on(AgentSidebar.SessionSelected)
     async def select_sidebar_session(self, message: AgentSidebar.SessionSelected) -> None:
-        pane = self.chats[message.agent_name]
+        pane = self.chats[message.agent_id]
         try:
             selected = await self._controller.select_session(
-                message.agent_name,
+                message.agent_id,
                 message.session_name,
             )
             await pane.select_session(selected)
@@ -299,17 +298,19 @@ class AgentChatApp(App[None]):
         for pane in self.chats.values():
             await pane.set_detail_level(message.detail_level)
 
-    def select_agent(self, agent_name: str) -> None:
+    def select_agent(self, agent_id: UUID) -> None:
         tabs = self.query_one("#agent-tabs", TabbedContent)
-        tabs.active = self._pane_ids[agent_name]
-        self.chats[agent_name].input.focus()
+        tabs.active = self._pane_ids[agent_id]
+        self.chats[agent_id].input.focus()
 
     def _active_chat(self) -> AgentChatPane:
         tabs = self.query_one("#agent-tabs", TabbedContent)
-        agent_name = next(
-            name for name, pane_id in self._pane_ids.items() if pane_id == tabs.active
+        agent_id = next(
+            configured_id
+            for configured_id, pane_id in self._pane_ids.items()
+            if pane_id == tabs.active
         )
-        return self.chats[agent_name]
+        return self.chats[agent_id]
 
     async def _append_to_current(
         self,
@@ -322,20 +323,23 @@ class AgentChatApp(App[None]):
 
     async def _save_session(self, event: SessionUpdated) -> None:
         await self.session_repository.save_session(
-            event.agent_name,
+            event.agent_id,
             event.session_name,
             event.identifier,
         )
 
     async def _refresh_sidebars(self) -> None:
         for pane in self.chats.values():
-            await pane.refresh_sidebar()
+            try:
+                await pane.refresh_sidebar()
+            except NoMatches:
+                # A timer tick can race with Textual unmounting a chat pane.
+                continue
 
 
 async def run_ui(
-    agents: Sequence[ChatAgent],
-    event_pipeline: EventPipeline,
+    runner: Runner,
     session_repository: SessionRepository | None = None,
 ) -> None:
-    await AgentChatApp(agents, event_pipeline, session_repository).run_async()
+    await AgentChatApp(runner, session_repository).run_async()
     

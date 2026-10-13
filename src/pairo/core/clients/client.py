@@ -7,14 +7,12 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from .agent_config import AgentConfiguration, JsonObject
-from .events.agent_events import ClientEvent
+from pairo.core.agent.agent import Agent
+from pairo.core.agent.json_object import JsonObject
+from pairo.core.agent.session_identifier import SessionIdentifier
+from ..events.agent_events import ClientEvent
 
 
-class SessionIdentifier(BaseModel):
-    """Opaque provider state; generic code may only serialize it."""
-
-    model_config = ConfigDict(extra="allow", frozen=True)
 
 
 class SessionNotification(BaseModel):
@@ -23,18 +21,17 @@ class SessionNotification(BaseModel):
     session: SessionIdentifier
     event: ClientEvent
     
-MCP_AGENT_NAME_HEADER = "X-Agent-NAME"
+MCP_AGENT_ID_HEADER = "X-Agent-ID"
 
 
 class AgentClient(Protocol):
     async def new_session(
         self,
-        configuration: AgentConfiguration,
-        agent_name: str,
+        agent: Agent,
     ) -> SessionIdentifier: ...
 
     async def restore_session(
-        self, configuration: AgentConfiguration, identifier_json: JsonObject
+        self, agent: Agent, identifier_json: JsonObject
     ) -> SessionIdentifier: ...
 
     async def start(self, session: SessionIdentifier, message: str) -> SessionIdentifier: ...
@@ -47,7 +44,12 @@ class AgentClient(Protocol):
         self, session: SessionIdentifier
     ) -> AsyncIterator[SessionNotification]: ...
 
-    async def close(self, session: SessionIdentifier) -> None: ...
+    async def close(self) -> None: ...
 
 
-__all__ = ["AgentClient", "SessionIdentifier", "SessionNotification"]
+__all__ = [
+    "AgentClient",
+    "MCP_AGENT_ID_HEADER",
+    "SessionIdentifier",
+    "SessionNotification",
+]

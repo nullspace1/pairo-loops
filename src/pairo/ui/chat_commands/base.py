@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 if TYPE_CHECKING:
     from ..commands import AgentCommandController, CommandOutcome
@@ -16,7 +17,7 @@ class SlashCommand(ABC):
     async def invoke(
         self,
         controller: AgentCommandController,
-        agent_name: str,
+        agent_id: UUID,
         argument: str,
     ) -> CommandOutcome:
         """Execute with the owning controller and parsed argument."""

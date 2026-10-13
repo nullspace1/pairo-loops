@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from ..commands import CommandOutcome
 from ..models import EventDetailLevel, TranscriptEntry
@@ -15,10 +16,15 @@ if TYPE_CHECKING:
 class SessionsCommand(SlashCommand):
     name = "/sessions"
 
-    async def invoke(self, controller: AgentCommandController, agent_name: str, argument: str) -> CommandOutcome:
-        sessions = await controller.session_repository.sessions_for(agent_name)
+    async def invoke(
+        self,
+        controller: AgentCommandController,
+        agent_id: UUID,
+        argument: str,
+    ) -> CommandOutcome:
+        sessions = await controller.session_repository.sessions_for(agent_id)
         known = ", ".join(session.session_name for session in sessions)
-        current = controller.agents[agent_name].session_name or "none"
+        current = controller.runner.session_name(agent_id) or "none"
         return CommandOutcome(
             TranscriptEntry(
                 "system",

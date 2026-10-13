@@ -1,16 +1,20 @@
 """Tests for approval prompts written for people rather than SDK payloads."""
 
 import pytest
+from uuid import uuid4
 
 from pairo.core.events import PermissionRequest
 from pairo.core.permissions import PermissionRequestType
 from pairo.ui.presentation import PermissionRequestPresenter
 
 
+AGENT_ID = uuid4()
+
+
 def test_command_approval_prioritizes_command_location_and_reason() -> None:
     request = PermissionRequest(
         request_id="approval-1",
-        agent_name="developer",
+        agent_id=AGENT_ID,
         session_name="Session 1",
         request_type=PermissionRequestType.COMMAND_EXECUTION,
         request={
@@ -37,7 +41,7 @@ def test_command_approval_prioritizes_command_location_and_reason() -> None:
 def test_command_approval_keeps_unexpected_user_relevant_details() -> None:
     request = PermissionRequest(
         request_id="approval-2",
-        agent_name="developer",
+        agent_id=AGENT_ID,
         session_name="Session 1",
         request_type=PermissionRequestType.COMMAND_EXECUTION,
         request={"command": "npm test", "timeoutMs": 30_000},
@@ -51,7 +55,7 @@ def test_command_approval_keeps_unexpected_user_relevant_details() -> None:
 def test_file_change_approval_prioritizes_files_changes_and_reason() -> None:
     request = PermissionRequest(
         request_id="approval-3",
-        agent_name="developer",
+        agent_id=AGENT_ID,
         session_name="Session 1",
         request_type=PermissionRequestType.FILE_CHANGE,
         request={
@@ -82,7 +86,7 @@ def test_file_change_approval_describes_a_single_path_and_rationale(
 ) -> None:
     request = PermissionRequest(
         request_id="approval-4",
-        agent_name="developer",
+        agent_id=AGENT_ID,
         session_name="Session 1",
         request_type=PermissionRequestType.FILE_CHANGE,
         request={"path": "pairo/ui/app.py", rationale_field: "Clarify the approval."},
@@ -97,7 +101,7 @@ def test_file_change_approval_describes_a_single_path_and_rationale(
 def test_file_change_approval_formats_structured_changes_and_hides_identifiers() -> None:
     request = PermissionRequest(
         request_id="approval-5",
-        agent_name="developer",
+        agent_id=AGENT_ID,
         session_name="Session 1",
         request_type=PermissionRequestType.FILE_CHANGE,
         request={
@@ -127,7 +131,7 @@ def test_file_change_approval_formats_structured_changes_and_hides_identifiers()
 def test_file_change_approval_explains_missing_optional_details() -> None:
     request = PermissionRequest(
         request_id="approval-6",
-        agent_name="developer",
+        agent_id=AGENT_ID,
         session_name="Session 1",
         request_type=PermissionRequestType.FILE_CHANGE,
         request={"threadId": "internal-thread"},

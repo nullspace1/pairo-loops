@@ -1,9 +1,14 @@
 """Tests for transcript formatting visibility."""
 
+from uuid import uuid4
+
 from pairo.core.events import AgentEvent, ClientActivityCompleted
 from pairo.ui.formatting import CompletedEventFormatter
 from pairo.ui.models import EventDetailLevel
 from pairo.ui.presentation import CompletedActivityPresenter
+
+
+AGENT_ID = uuid4()
 
 
 def test_completed_mcp_calls_and_commands_are_visible_in_normal_mode() -> None:
@@ -11,7 +16,7 @@ def test_completed_mcp_calls_and_commands_are_visible_in_normal_mode() -> None:
 
     command = formatter.format(
         AgentEvent(
-            agent_name="reviewer",
+            agent_id=AGENT_ID,
             session_name="Conversation 1",
             payload=ClientActivityCompleted(
                 activity={"type": "commandExecution", "command": "pytest"}
@@ -20,7 +25,7 @@ def test_completed_mcp_calls_and_commands_are_visible_in_normal_mode() -> None:
     )
     mcp_call = formatter.format(
         AgentEvent(
-            agent_name="reviewer",
+            agent_id=AGENT_ID,
             session_name="Conversation 1",
             payload=ClientActivityCompleted(
                 activity={"type": "mcpToolCall", "serverName": "docs", "tool": "search"}
@@ -37,7 +42,7 @@ def test_completed_mcp_calls_and_commands_are_visible_in_normal_mode() -> None:
 def test_other_completed_activity_remains_debug_only() -> None:
     formatted = CompletedEventFormatter().format(
         AgentEvent(
-            agent_name="reviewer",
+            agent_id=AGENT_ID,
             session_name="Conversation 1",
             payload=ClientActivityCompleted(
                 activity={"type": "fileChange", "path": "src/example.py"}

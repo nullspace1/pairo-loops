@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 import pytest
 
@@ -26,10 +27,11 @@ class AdvancingClock:
 def test_upsert_preserves_creation_time_and_updates_identifier() -> None:
     async def scenario() -> None:
         repository = SqliteSessionRepository(clock=AdvancingClock())
-        created = await repository.save_session(" agent ", " session ", {"version": 1})
-        updated = await repository.save_session("agent", "session", {"version": 2})
+        agent_id = uuid4()
+        created = await repository.save_session(agent_id, " session ", {"version": 1})
+        updated = await repository.save_session(agent_id, "session", {"version": 2})
 
-        assert created.agent_name == "agent"
+        assert created.agent_id == agent_id
         assert created.session_name == "session"
         assert updated.identifier == {"version": 2}
         assert updated.created_at == created.created_at
@@ -43,30 +45,31 @@ def test_upsert_preserves_creation_time_and_updates_identifier() -> None:
 def test_transcripts_are_ordered_isolated_and_update_metadata() -> None:
     async def scenario() -> None:
         repository = SqliteSessionRepository(clock=AdvancingClock())
-        await repository.save_session("a", "one", {"id": 1})
-        await repository.save_session("a", "two", {"id": 2})
+        agent_id = uuid4()
+        await repository.save_session(agent_id, "one", {"id": 1})
+        await repository.save_session(agent_id, "two", {"id": 2})
         entries = (
             TranscriptEntry("user", "first", EventDetailLevel.NORMAL, {"type": "message"}),
             TranscriptEntry("agent", "debug", EventDetailLevel.DEBUG, {"type": "message"}),
             TranscriptEntry("agent", "last", EventDetailLevel.NORMAL, {"type": "message"}),
         )
         for entry in entries:
-            await repository.append_entry("a", "one", entry)
-        await repository.append_entry("a", "two", entries[1])
+            await repository.append_entry(agent_id, "one", entry)
+        await repository.append_entry(agent_id, "two", entries[1])
 
         persisted_entries = (
             TranscriptEntry("user", "first", EventDetailLevel.NORMAL, {"type": "historical"}),
             TranscriptEntry("agent", "debug", EventDetailLevel.DEBUG, {"type": "historical"}),
             TranscriptEntry("agent", "last", EventDetailLevel.NORMAL, {"type": "historical"}),
         )
-        assert await repository.entries_for("a", "one") == persisted_entries
-        assert await repository.entries_for("a", "two") == (persisted_entries[1],)
-        assert (await repository.get_session("a", "one")).last_message_at is not None
-        assert [item.session_name for item in await repository.sessions_for("a")] == [
+        assert await repository.entries_for(agent_id, "one") == persisted_entries
+        assert await repository.entries_for(agent_id, "two") == (persisted_entries[1],)
+        assert (await repository.get_session(agent_id, "one")).last_message_at is not None
+        assert [item.session_name for item in await repository.sessions_for(agent_id)] == [
             "one",
             "two",
         ]
-        assert await repository.sessions_for("missing") == ()
+        assert await repository.sessions_for(uuid4()) == ()
         await repository.close()
 
     asyncio.run(scenario())
@@ -79,13 +82,14 @@ def test_lookup_by_identifier_handles_none_one_and_many_matches() -> None:
         with pytest.raises(SessionNotFoundError, match="No session matches"):
             await repository.session_for_identifier(identifier)
 
-        await repository.save_session("a", "one", identifier)
+        first_agent_id = uuid4()
+        await repository.save_session(first_agent_id, "one", identifier)
         match = await repository.session_for_identifier(
             {"thread": "one", "provider": "fake"}
         )
-        assert (match.agent_name, match.session_name) == ("a", "one")
+        assert (match.agent_id, match.session_name) == (first_agent_id, "one")
 
-        await repository.save_session("b", "two", identifier)
+        await repository.save_session(uuid4(), "two", identifier)
         with pytest.raises(RuntimeError, match="multiple sessions"):
             await repository.session_for_identifier(identifier)
         await repository.close()
@@ -96,22 +100,22 @@ def test_lookup_by_identifier_handles_none_one_and_many_matches() -> None:
 def test_repository_rejects_invalid_inputs_and_operations_after_close() -> None:
     async def scenario() -> None:
         repository = SqliteSessionRepository()
-        for agent_name, session_name in (("", "s"), ("a", "  ")):
-            with pytest.raises(ValueError, match="cannot be empty"):
-                await repository.save_session(agent_name, session_name, {"id": 1})
+        agent_id = uuid4()
+        with pytest.raises(ValueError, match="cannot be empty"):
+            await repository.save_session(agent_id, "  ", {"id": 1})
         with pytest.raises(SessionNotFoundError, match="not registered"):
             await repository.append_entry(
-                "a",
+                agent_id,
                 "missing",
                 TranscriptEntry("user", "hello", EventDetailLevel.NORMAL, {"type": "message"}),
             )
         with pytest.raises(SessionNotFoundError, match="not registered"):
-            await repository.entries_for("a", "missing")
+            await repository.entries_for(agent_id, "missing")
 
         await repository.close()
         await repository.close()
         with pytest.raises(RuntimeError, match="closed"):
-            await repository.sessions_for("a")
+            await repository.sessions_for(agent_id)
 
     asyncio.run(scenario())
 
@@ -120,7 +124,7 @@ def test_repository_rejects_naive_clock_values() -> None:
     async def scenario() -> None:
         repository = SqliteSessionRepository(clock=lambda: datetime(2026, 1, 1))
         with pytest.raises(ValueError, match="aware datetime"):
-            await repository.save_session("a", "s", {"id": 1})
+            await repository.save_session(uuid4(), "s", {"id": 1})
         await repository.close()
 
     asyncio.run(scenario())
@@ -131,8 +135,9 @@ def test_repository_async_context_manager_closes_connection() -> None:
         repository = SqliteSessionRepository()
         async with repository as opened:
             assert opened is repository
-            await opened.save_session("a", "s", {"id": 1})
+            agent_id = uuid4()
+            await opened.save_session(agent_id, "s", {"id": 1})
         with pytest.raises(RuntimeError, match="closed"):
-            await repository.get_session("a", "s")
+            await repository.get_session(agent_id, "s")
 
     asyncio.run(scenario())

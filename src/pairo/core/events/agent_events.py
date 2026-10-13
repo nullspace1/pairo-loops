@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import Literal, TypeAlias
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..agent_config import JsonObject
+from ..agent.json_object import JsonObject
 
 
 class ClientTextDelta(BaseModel):
@@ -61,21 +62,21 @@ ClientEvent: TypeAlias = (
 
 
 class AgentEvent(BaseModel):
-    """A provider-neutral client event routed to one named agent session."""
+    """A provider-neutral client event routed to one agent ID and session."""
 
     model_config = ConfigDict(frozen=True)
 
-    agent_name: str
+    agent_id: UUID
     session_name: str
     payload: ClientEvent = Field(discriminator="kind")
 
 
 class SessionUpdated(BaseModel):
-    """The latest opaque provider identifier for a named session."""
+    """The latest opaque provider identifier for an ID-routed session."""
 
     model_config = ConfigDict(frozen=True)
 
-    agent_name: str
+    agent_id: UUID
     session_name: str
     identifier: JsonObject
 
@@ -85,7 +86,7 @@ class AgentError(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    agent_name: str
+    agent_id: UUID
     session_name: str
     message: str
 

@@ -3,11 +3,13 @@
 import asyncio
 from enum import Enum
 from contextlib import suppress
-from threading import Event as ThreadEvent, get_ident
+from pathlib import Path
+from threading import Barrier, Event as ThreadEvent, get_ident
 from types import SimpleNamespace
 
 from openai_codex.models import Notification, UnknownNotification
 
+from pairo.core.agent import Agent, SandboxMode
 from pairo.core.clients.codex_client import (
     CodexAgentClient,
     CodexSessionIdentifier,
@@ -71,6 +73,35 @@ class BlockingCodexSdkClient:
         self.interrupted.set()
 
 
+class ConcurrentCodexSdkClient:
+    def __init__(self) -> None:
+        self.barrier = Barrier(2)
+        self.reader_threads: list[int] = []
+
+    def next_turn_notification(self, turn_id: str) -> Notification:
+        self.reader_threads.append(get_ident())
+        self.barrier.wait(timeout=2)
+        return Notification(
+            method="turn/completed",
+            payload=UnknownNotification(params={}),
+        )
+
+    def close(self) -> None:
+        return None
+
+
+def register(adapter: CodexAgentClient, identifier: CodexSessionIdentifier) -> None:
+    adapter._register_session(
+        Agent(
+            name="test",
+            sandbox=SandboxMode.READ_ONLY,
+            workspace=Path.cwd(),
+            model="test",
+        ),
+        identifier,
+    )
+
+
 def test_one_reader_bridge_delivers_all_turn_notifications() -> None:
     async def scenario() -> None:
         adapter = CodexAgentClient()
@@ -84,6 +115,7 @@ def test_one_reader_bridge_delivers_all_turn_notifications() -> None:
 
         adapter._translate_notification = translate
         identifier = CodexSessionIdentifier(thread_id="thread-1", turn_id="turn-1")
+        register(adapter, identifier)
         notifications = [
             notification
             async for notification in adapter.notifications(identifier)
@@ -95,7 +127,7 @@ def test_one_reader_bridge_delivers_all_turn_notifications() -> None:
         assert sdk.reader_threads[0] != get_ident()
         assert isinstance(notifications[-1].event, ClientResponseCompleted)
         assert notifications[-1].session.turn_id is None
-        await adapter.close(identifier)
+        await adapter.close()
 
     asyncio.run(scenario())
 
@@ -120,6 +152,7 @@ def test_reader_uses_the_identifier_returned_by_steer() -> None:
 
         adapter._translate_notification = translate
         initial = CodexSessionIdentifier(thread_id="thread-1", turn_id="turn-1")
+        register(adapter, initial)
         stream = adapter.notifications(initial)
         first = await anext(stream)
         steered = await adapter.steer(first.session, "change direction")
@@ -128,7 +161,7 @@ def test_reader_uses_the_identifier_returned_by_steer() -> None:
         assert steered.turn_id == "turn-2"
         assert sdk.turn_ids == ["turn-1", "turn-2", "turn-2"]
         assert isinstance(remaining[-1].event, ClientResponseCompleted)
-        await adapter.close(steered)
+        await adapter.close()
 
     asyncio.run(scenario())
 
@@ -144,6 +177,7 @@ def test_cancelling_the_stream_interrupts_the_blocking_sdk_read() -> None:
 
         adapter._translate_notification = translate
         identifier = CodexSessionIdentifier(thread_id="thread-1", turn_id="turn-1")
+        register(adapter, identifier)
         stream = adapter.notifications(identifier)
         pending = asyncio.create_task(anext(stream))
         assert await asyncio.to_thread(sdk.read_started.wait, 1)
@@ -153,6 +187,32 @@ def test_cancelling_the_stream_interrupts_the_blocking_sdk_read() -> None:
             await pending
 
         assert sdk.interrupted.is_set()
-        await adapter.close(identifier)
+        await adapter.close()
+
+    asyncio.run(scenario())
+
+
+def test_multiple_agents_can_read_notifications_concurrently() -> None:
+    async def scenario() -> None:
+        adapter = CodexAgentClient()
+        sdk = ConcurrentCodexSdkClient()
+        adapter._client = sdk
+
+        async def translate(identifier, notification):
+            return ClientResponseCompleted(message=identifier.thread_id)
+
+        adapter._translate_notification = translate
+        first = CodexSessionIdentifier(thread_id="thread-1", turn_id="turn-1")
+        second = CodexSessionIdentifier(thread_id="thread-2", turn_id="turn-2")
+        register(adapter, first)
+        register(adapter, second)
+
+        async def collect(identifier):
+            return [item async for item in adapter.notifications(identifier)]
+
+        results = await asyncio.gather(collect(first), collect(second))
+        assert [items[0].event.message for items in results] == ["thread-1", "thread-2"]
+        assert len(set(sdk.reader_threads)) == 2
+        await adapter.close()
 
     asyncio.run(scenario())

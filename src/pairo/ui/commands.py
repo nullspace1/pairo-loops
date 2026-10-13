@@ -1,68 +1,23 @@
-"""Async command dispatch for a selected agent session."""
+"""Async command dispatch through the shared agent runner."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from types import MappingProxyType
-from typing import Mapping, Protocol
+from typing import Mapping
+from uuid import UUID
 
-from pairo.core.agent import AgentState, ConfiguredMCPServer
-from pairo.core.agent_config import AgentConfiguration, JsonObject
+from pairo.core.agent import Agent, Runner
 from pairo.core.events import EventPipeline, SessionUpdated
 
 from .models import EventDetailLevel, TranscriptEntry
 from .session_repository import SessionRepository
 
 
-class ChatAgent(Protocol):
-    """Agent contract required by the chat UI and application lifecycle."""
-
-    @property
-    def name(self) -> str: ...
-
-    @property
-    def description(self) -> str | None: ...
-
-    @property
-    def session_name(self) -> str | None: ...
-
-    @property
-    def session_names(self) -> tuple[str, ...]: ...
-
-    @property
-    def state(self) -> AgentState: ...
-
-    @property
-    def is_generating(self) -> bool: ...
-
-    @property
-    def configuration(self) -> AgentConfiguration: ...
-
-    @property
-    def configured_mcp_servers(self) -> tuple[ConfiguredMCPServer, ...]: ...
-
-    async def send_message(self, message: str, source: str = "user") -> None: ...
-
-    async def create_session(self, session_name: str) -> str: ...
-
-    async def restore_session(
-        self, session_name: str, identifier_json: JsonObject
-    ) -> str: ...
-
-    async def switch_session(self, session_name: str) -> str: ...
-
-    async def cancel_generation(self) -> bool: ...
-
-    async def run(self, initial_session_name: str) -> str: ...
-
-    async def close(self) -> None: ...
-
-
 @dataclass(frozen=True, slots=True)
 class CommandOutcome:
     entry: TranscriptEntry | None
     session_name: str | None = None
-    selected_agent: str | None = None
+    selected_agent: UUID | None = None
 
 
 from .chat_commands import (  # noqa: E402
@@ -78,18 +33,16 @@ from .chat_commands import (  # noqa: E402
 
 class AgentCommandController:
     HELP = (
-        "/agent NAME, /session new [NAME], /session switch NAME, /sessions, "
+        "/agent ID, /session new [NAME], /session switch NAME, /sessions, "
         "/interrupt, /image PATH, /help"
     )
 
     def __init__(
         self,
-        agents: Mapping[str, ChatAgent],
-        event_pipeline: EventPipeline,
+        runner: Runner,
         session_repository: SessionRepository,
     ) -> None:
-        self._agents = dict(agents)
-        self._event_pipeline = event_pipeline
+        self._runner = runner
         self._session_repository = session_repository
         self._commands: list[SlashCommand] = [
             HelpCommand(),
@@ -100,49 +53,55 @@ class AgentCommandController:
             ImageCommand(),
         ]
         self._commands_by_name = {command.name: command for command in self._commands}
-        self._event_pipeline.add_listener(SessionUpdated, self._persist_session)
+        self._runner.pipeline.add_listener(SessionUpdated, self._persist_session)
 
     @property
-    def agents(self) -> Mapping[str, ChatAgent]:
-        return MappingProxyType(self._agents)
+    def agents(self) -> Mapping[UUID, Agent]:
+        return self._runner.agents
+
+    @property
+    def runner(self) -> Runner:
+        return self._runner
 
     @property
     def event_pipeline(self) -> EventPipeline:
-        return self._event_pipeline
+        return self._runner.pipeline
 
     @property
     def session_repository(self) -> SessionRepository:
         return self._session_repository
 
-    async def execute(self, agent_name: str, submitted: str) -> CommandOutcome:
+    async def execute(self, agent_id: UUID, submitted: str) -> CommandOutcome:
         text = submitted.strip()
         if not text:
             raise ValueError("Message cannot be empty.")
-        agent = self._agents[agent_name]
         if not text.startswith("/"):
-            await agent.send_message(text)
+            await self._runner.send_message(agent_id, text)
             return CommandOutcome(
                 None,
-                session_name=agent.session_name,
+                session_name=self._runner.session_name(agent_id),
             )
 
         command_name, _, argument = text.partition(" ")
         command = self._commands_by_name.get(command_name)
         if command is None:
             raise ValueError(f"Unknown command '{command_name}'. Use /help.")
-        return await command.invoke(self, agent_name, argument.strip())
+        return await command.invoke(self, agent_id, argument.strip())
 
-    async def select_session(self, agent_name: str, session_name: str) -> str:
-        agent = self._agents[agent_name]
-        if session_name in agent.session_names:
-            return await agent.switch_session(session_name)
-        metadata = await self._session_repository.get_session(agent_name, session_name)
-        return await agent.restore_session(session_name, metadata.identifier)
+    async def select_session(self, agent_id: UUID, session_name: str) -> str:
+        if session_name in self._runner.session_names(agent_id):
+            return await self._runner.switch_session(agent_id, session_name)
+        metadata = await self._session_repository.get_session(agent_id, session_name)
+        return await self._runner.restore_session(
+            agent_id,
+            session_name,
+            metadata.identifier,
+        )
 
-    async def default_session_name(self, agent_name: str) -> str:
-        persisted = await self._session_repository.sessions_for(agent_name)
+    async def default_session_name(self, agent_id: UUID) -> str:
+        persisted = await self._session_repository.sessions_for(agent_id)
         names = {session.session_name for session in persisted}
-        names.update(self._agents[agent_name].session_names)
+        names.update(self._runner.session_names(agent_id))
         index = 1
         while f"Conversation {index}" in names:
             index += 1
@@ -150,7 +109,7 @@ class AgentCommandController:
 
     async def _persist_session(self, event: SessionUpdated) -> SessionUpdated:
         await self._session_repository.save_session(
-            event.agent_name,
+            event.agent_id,
             event.session_name,
             event.identifier,
         )

@@ -6,7 +6,7 @@ from typing import cast
 
 from openai_codex.models import JsonObject as CodexJsonObject
 
-from ..agent_config import JsonObject
+from ..agent.json_object import JsonObject
 from ..permissions import (
     ApprovalRequest,
     PermissionDecision,

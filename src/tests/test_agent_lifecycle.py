@@ -1,13 +1,13 @@
-"""Failure-path and state-machine coverage for :class:`pairo.core.agent.Agent`."""
+"""Failure-path and state-machine coverage for :class:`pairo.core.agent.Runner`."""
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from pydantic import ConfigDict
 
-from pairo.core.agent import Agent, AgentState
-from pairo.core.agent_config import AgentConfiguration, JsonObject, Sandbox
-from pairo.core.agent_server import SessionIdentifier, SessionNotification
+from pairo.core.agent import Agent, AgentState, JsonObject, Runner, SandboxMode, SessionIdentifier
+from pairo.core.clients.client import SessionNotification
 from pairo.core.events import (
     AgentError,
     ClientResponseCompleted,
@@ -24,8 +24,6 @@ class LifecycleIdentifier(SessionIdentifier):
 
 
 class ControlledClient:
-    """Small deterministic client whose notification stream is test-controlled."""
-
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
         self.notifications_queue: asyncio.Queue[SessionNotification | None] = asyncio.Queue()
@@ -34,12 +32,12 @@ class ControlledClient:
         self.release_start.set()
         self.start_error: Exception | None = None
 
-    async def new_session(self, configuration, agent_name):
-        self.calls.append(("new", agent_name))
+    async def new_session(self, agent: Agent):
+        self.calls.append(("new", agent.name, agent.model))
         return LifecycleIdentifier()
 
-    async def restore_session(self, configuration, identifier_json: JsonObject):
-        self.calls.append(("restore", identifier_json))
+    async def restore_session(self, agent: Agent, identifier_json: JsonObject):
+        self.calls.append(("restore", agent.name, identifier_json))
         return LifecycleIdentifier.model_validate(identifier_json)
 
     async def start(self, session, message):
@@ -71,8 +69,8 @@ class ControlledClient:
             ):
                 return
 
-    async def close(self, session):
-        self.calls.append(("close", session.revision))
+    async def close(self):
+        self.calls.append(("close",))
 
     async def complete(self, revision: int, message: str = "done") -> None:
         await self.notifications_queue.put(
@@ -83,180 +81,184 @@ class ControlledClient:
         )
 
 
-def make_agent(client: ControlledClient | None = None):
+def make_runner(tmp_path: Path, client: ControlledClient | None = None):
     pipeline = EventPipeline()
     configured_client = client or ControlledClient()
     agent = Agent(
         name=" developer ",
-        config=AgentConfiguration(
-            sandbox=Sandbox.READ_ONLY,
-            workspace=".",
-            model="test-model",
-        ),
-        client=configured_client,
-        event_pipeline=pipeline,
+        sandbox=SandboxMode.READ_ONLY,
+        workspace=tmp_path,
+        model="test-model",
     )
-    return agent, configured_client, pipeline
+    runner = Runner([agent], pipeline, configured_client)
+    return agent, runner, configured_client, pipeline
 
 
-def test_agent_validates_names_messages_sources_and_pre_run_operations() -> None:
+def test_runner_validates_operations_and_lifecycle(tmp_path: Path) -> None:
     async def scenario() -> None:
-        agent, _, pipeline = make_agent()
-        assert agent.name == "developer"
-        assert agent.state is AgentState.IDLE
-        assert not agent.is_active()
-        assert agent.last_message() is None
-
+        agent, runner, _, pipeline = make_runner(tmp_path)
+        assert runner.state(agent.id) is AgentState.IDLE
+        assert runner.last_message(agent.id) is None
         with pytest.raises(ValueError, match="Session name cannot be empty"):
-            await agent.run("  ")
+            await runner.start("  ")
         with pytest.raises(RuntimeError, match="active session"):
-            await agent.send_message("hello")
+            await runner.send_message(agent.id, "hello")
 
-        await agent.run("Main")
+        await runner.create_session(agent.id, "Main")
         with pytest.raises(ValueError, match="Message cannot be empty"):
-            await agent.send_message("  ")
+            await runner.send_message(agent.id, "  ")
         with pytest.raises(ValueError, match="source cannot be empty"):
-            await agent.send_message("hello", source="  ")
-        with pytest.raises(RuntimeError, match="already running"):
-            await agent.run("Other")
+            await runner.send_message(agent.id, "hello", source="  ")
 
-        await agent.close()
-        assert agent.state is AgentState.STOPPED
-        assert not agent.is_active()
-        with pytest.raises(RuntimeError, match="stopped"):
-            await agent.run("Again")
+        await runner.close()
+        assert runner.state(agent.id) is AgentState.STOPPED
+        with pytest.raises(RuntimeError, match="closed"):
+            await runner.create_session(agent.id, "Again")
         await pipeline.close()
 
     asyncio.run(scenario())
 
 
-def test_session_switching_requires_idle_and_known_session() -> None:
+def test_session_switching_requires_idle_and_known_session(tmp_path: Path) -> None:
     async def scenario() -> None:
         client = ControlledClient()
         client.release_start.clear()
-        agent, _, pipeline = make_agent(client)
-        await agent.run("First")
-        await agent.create_session("Second")
-        assert agent.session_names == ("First", "Second")
-        assert await agent.switch_session("First") == "First"
+        agent, runner, _, pipeline = make_runner(tmp_path, client)
+        await runner.start("First")
+        await runner.create_session(agent.id, "Second")
+        assert runner.session_names(agent.id) == ("First", "Second")
+        assert await runner.switch_session(agent.id, "First") == "First"
         with pytest.raises(KeyError, match="not loaded"):
-            await agent.switch_session("Missing")
+            await runner.switch_session(agent.id, "Missing")
 
-        await agent.send_message("working")
+        await runner.send_message(agent.id, "working")
         await client.start_entered.wait()
         with pytest.raises(RuntimeError, match="while the agent is generating"):
-            await agent.create_session("Third")
+            await runner.create_session(agent.id, "Third")
         with pytest.raises(RuntimeError, match="while the agent is generating"):
-            await agent.switch_session("Second")
+            await runner.switch_session(agent.id, "Second")
 
         client.release_start.set()
         await client.complete(2)
-        assert await agent.wait_for_message(timeout=1) == "done"
-        await agent.close()
+        assert await runner.wait_for_message(agent.id, timeout=1) == "done"
+        await runner.close()
         await pipeline.close()
 
     asyncio.run(scenario())
 
 
-def test_queued_messages_are_steered_in_order() -> None:
+def test_queued_messages_are_steered_in_order(tmp_path: Path) -> None:
     async def scenario() -> None:
         client = ControlledClient()
         client.release_start.clear()
-        agent, _, pipeline = make_agent(client)
-        await agent.run("Main")
+        agent, runner, _, pipeline = make_runner(tmp_path, client)
+        await runner.start("Main")
 
-        await agent.send_message("first")
+        await runner.send_message(agent.id, "first")
         await client.start_entered.wait()
-        await agent.send_message("second")
-        await agent.send_message("third")
+        await runner.send_message(agent.id, "second")
+        await runner.send_message(agent.id, "third")
         client.release_start.set()
-        await client.complete(4)
+        await client.complete(2)
 
-        assert await agent.wait_for_message(timeout=1) == "done"
+        assert await runner.wait_for_message(agent.id, timeout=1) == "done"
         assert [call for call in client.calls if call[0] == "steer"] == [
             ("steer", "second"),
             ("steer", "third"),
         ]
-        assert agent.session_identifier_json("Main")["revision"] == 6
-        await agent.close()
+        assert runner.session_identifier_json(agent.id, "Main")["revision"] == 4
+        await runner.close()
         await pipeline.close()
 
     asyncio.run(scenario())
 
 
-def test_provider_failure_publishes_error_unblocks_waiter_and_recovers() -> None:
+def test_interrupt_while_start_is_pending_is_sent_once(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        client = ControlledClient()
+        client.release_start.clear()
+        agent, runner, _, pipeline = make_runner(tmp_path, client)
+        await runner.start("Main")
+        await runner.send_message(agent.id, "hello")
+        await client.start_entered.wait()
+        assert await runner.interrupt(agent.id)
+        client.release_start.set()
+        await client.notifications_queue.put(
+            SessionNotification(
+                session=LifecycleIdentifier(revision=2),
+                event=ClientResponseInterrupted(),
+            )
+        )
+        assert await runner.wait_for_message(agent.id, timeout=1) is None
+        assert len([call for call in client.calls if call[0] == "interrupt"]) == 1
+        assert not await runner.interrupt(agent.id)
+        await runner.close()
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_provider_failure_unblocks_waiter_and_recovers(tmp_path: Path) -> None:
     async def scenario() -> None:
         client = ControlledClient()
         client.start_error = RuntimeError("provider unavailable")
-        agent, _, pipeline = make_agent(client)
-        await agent.run("Main")
-        await agent.send_message("first")
+        agent, runner, _, pipeline = make_runner(tmp_path, client)
+        await runner.start("Main")
+        await runner.send_message(agent.id, "first")
 
         with pytest.raises(RuntimeError, match="provider unavailable"):
-            await agent.wait_for_message(timeout=1)
-        assert agent.state is AgentState.IDLE
+            await runner.wait_for_message(agent.id, timeout=1)
+        await asyncio.sleep(0)
+        assert runner.state(agent.id) is AgentState.IDLE
         assert any(
             isinstance(event, AgentError) and event.message == "provider unavailable"
             for event in pipeline.events
         )
 
         client.start_error = None
-        await agent.send_message("retry")
+        await runner.send_message(agent.id, "retry")
         await client.complete(2, "recovered")
-        assert await agent.wait_for_message(timeout=1) == "recovered"
-        await agent.close()
+        assert await runner.wait_for_message(agent.id, timeout=1) == "recovered"
+        await runner.close()
         await pipeline.close()
 
     asyncio.run(scenario())
 
 
-def test_premature_notification_stream_is_reported_as_an_error() -> None:
+def test_premature_stream_is_error_and_unchanged_updates_are_deduplicated(
+    tmp_path: Path,
+) -> None:
     async def scenario() -> None:
-        agent, client, pipeline = make_agent()
-        await agent.run("Main")
-        await agent.send_message("hello")
+        agent, runner, client, pipeline = make_runner(tmp_path)
+        await runner.start("Main")
+        await runner.send_message(agent.id, "hello")
         await client.notifications_queue.put(None)
-
         with pytest.raises(RuntimeError, match="ended before completion"):
-            await agent.wait_for_message(timeout=1)
-        assert agent.state is AgentState.IDLE
+            await runner.wait_for_message(agent.id, timeout=1)
         assert isinstance(pipeline.events[-1], AgentError)
-        await agent.close()
-        await pipeline.close()
 
-    asyncio.run(scenario())
-
-
-def test_unchanged_identifiers_do_not_publish_duplicate_updates() -> None:
-    async def scenario() -> None:
-        agent, client, pipeline = make_agent()
-        await agent.run("Main")
-        await agent.send_message("hello")
-        await client.complete(1)
-        assert await agent.wait_for_message(timeout=1) == "done"
-
+        await runner.send_message(agent.id, "retry")
+        await client.complete(2)
+        assert await runner.wait_for_message(agent.id, timeout=1) == "done"
         updates = [event for event in pipeline.events if isinstance(event, SessionUpdated)]
-        assert [event.identifier["revision"] for event in updates] == [0, 1]
-        await agent.close()
+        assert [event.identifier["revision"] for event in updates] == [0, 1, 2]
+        await runner.close()
         await pipeline.close()
 
     asyncio.run(scenario())
 
 
-def test_interrupted_turn_unblocks_wait_for_message() -> None:
+def test_new_sessions_receive_latest_agent_configuration(tmp_path: Path) -> None:
     async def scenario() -> None:
-        agent, client, pipeline = make_agent()
-        await agent.run("Main")
-        await agent.send_message("hello")
-        await client.notifications_queue.put(
-            SessionNotification(
-                session=LifecycleIdentifier(revision=1),
-                event=ClientResponseInterrupted(),
-            )
-        )
-        result = await asyncio.wait_for(agent.wait_for_message(), timeout=0.05)
-        await agent.close()
+        agent, runner, client, pipeline = make_runner(tmp_path)
+        await runner.start("First")
+        agent.set_model("updated-model")
+        await runner.create_session(agent.id, "Second")
+        assert [call[2] for call in client.calls if call[0] == "new"] == [
+            "test-model",
+            "updated-model",
+        ]
+        await runner.close()
         await pipeline.close()
-        assert result is None
 
     asyncio.run(scenario())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from ..commands import CommandOutcome
 from ..models import EventDetailLevel, TranscriptEntry
@@ -15,16 +16,20 @@ if TYPE_CHECKING:
 class SessionCommand(SlashCommand):
     name = "/session"
 
-    async def invoke(self, controller: AgentCommandController, agent_name: str, argument: str) -> CommandOutcome:
-        agent = controller.agents[agent_name]
+    async def invoke(
+        self,
+        controller: AgentCommandController,
+        agent_id: UUID,
+        argument: str,
+    ) -> CommandOutcome:
         action, _, value = argument.partition(" ")
         value = value.strip()
         if action == "new":
-            session_name = value or await controller.default_session_name(agent_name)
-            selected = await agent.create_session(session_name)
+            session_name = value or await controller.default_session_name(agent_id)
+            selected = await controller.runner.create_session(agent_id, session_name)
             return self._selection_outcome("Created", selected)
         if action == "switch" and value:
-            selected = await controller.select_session(agent_name, value)
+            selected = await controller.select_session(agent_id, value)
             return self._selection_outcome("Switched to", selected)
         raise ValueError("Usage: /session new [NAME] or /session switch NAME")
 

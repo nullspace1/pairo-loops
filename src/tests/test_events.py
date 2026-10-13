@@ -1,11 +1,15 @@
 """Tests for ordered asyncio-native event delivery."""
 
 import asyncio
+from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
 
 from pairo.core.events import EventPipeline, MessageSent, UserInput
+
+
+AGENT_ID = uuid4()
 
 
 def test_listener_order_consumption_and_one_shot_waiters() -> None:
@@ -24,7 +28,7 @@ def test_listener_order_consumption_and_one_shot_waiters() -> None:
         pipeline.add_listener(MessageSent, first)
         pipeline.add_listener(MessageSent, second)
         waiting = pipeline.listen(MessageSent)
-        sent = MessageSent(agent_name="a", session_name="s", message="ready")
+        sent = MessageSent(agent_id=AGENT_ID, session_name="s", message="ready")
         await pipeline.publish(sent)
 
         assert await waiting is sent
@@ -62,7 +66,7 @@ def test_listener_removal_base_class_delivery_and_transformation() -> None:
         pipeline.add_listener(BaseModel, observe_base)
 
         result = await pipeline.publish(
-            MessageSent(agent_name="a", session_name="s", message="original")
+            MessageSent(agent_id=AGENT_ID, session_name="s", message="original")
         )
         assert result == UserInput(message="transformed")
         assert calls == ["transform", "base:UserInput"]
@@ -79,7 +83,7 @@ def test_multiple_waiters_receive_one_event_and_cancelled_waiters_are_safe() -> 
         second = pipeline.listen(MessageSent)
         cancelled = pipeline.listen(MessageSent)
         cancelled.cancel()
-        event = MessageSent(agent_name="a", session_name="s", message="ready")
+        event = MessageSent(agent_id=AGENT_ID, session_name="s", message="ready")
 
         assert await pipeline.publish(event) is event
         assert await first is event
@@ -101,7 +105,7 @@ def test_listener_errors_propagate_without_recording_the_event() -> None:
         pipeline.add_listener(MessageSent, fail)
         with pytest.raises(RuntimeError, match="listener failed"):
             await pipeline.publish(
-                MessageSent(agent_name="a", session_name="s", message="ready")
+                MessageSent(agent_id=AGENT_ID, session_name="s", message="ready")
             )
         assert pipeline.events == []
         await pipeline.close()

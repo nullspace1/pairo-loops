@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from uuid import uuid4
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -22,7 +23,7 @@ from .session_repository import SessionRepository
 class _PendingPermissionResponse:
     """Bind an approval future to the session that requested it."""
 
-    agent_name: str
+    agent_id: UUID
     session_name: str
     response: asyncio.Future[PermissionDecision]
 
@@ -47,7 +48,7 @@ class TextualPermissionRequester(PermissionRequester):
         request_id = str(uuid4())
         response = asyncio.get_running_loop().create_future()
         self._responses[request_id] = _PendingPermissionResponse(
-            agent_name=session.agent_name,
+            agent_id=session.agent_id,
             session_name=session.session_name,
             response=response,
         )
@@ -55,7 +56,7 @@ class TextualPermissionRequester(PermissionRequester):
             await self._event_pipeline.publish(
                 PermissionRequest(
                     request_id=request_id,
-                    agent_name=session.agent_name,
+                    agent_id=session.agent_id,
                     session_name=session.session_name,
                     request_type=request.request_type,
                     request=request.details,
@@ -70,7 +71,7 @@ class TextualPermissionRequester(PermissionRequester):
             pending = self._responses.get(event.request_id)
             if (
                 pending is not None
-                and pending.agent_name == event.agent_name
+                and pending.agent_id == event.agent_id
                 and pending.session_name == event.session_name
                 and not pending.response.done()
             ):
@@ -88,7 +89,7 @@ def build_permission_response(
         raise ValueError(f"Unknown permission decision: {decision}") from error
     return PermissionResponse(
         request_id=request.request_id,
-        agent_name=request.agent_name,
+        agent_id=request.agent_id,
         session_name=request.session_name,
         decision=normalized,
     )

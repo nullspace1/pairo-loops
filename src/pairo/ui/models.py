@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Literal, TypeAlias, TypedDict
+from uuid import UUID
 
-from pairo.core.agent_config import JsonObject
+from pairo.core.agent import JsonObject
 
 
 class EventDetailLevel(str, Enum):
@@ -89,7 +90,7 @@ class TranscriptEntry:
 
 @dataclass(frozen=True, slots=True)
 class SessionMetadata:
-    agent_name: str
+    agent_id: UUID
     session_name: str
     identifier: JsonObject
     created_at: datetime

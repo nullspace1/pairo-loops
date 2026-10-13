@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from ..commands import CommandOutcome
 from ..models import EventDetailLevel, TranscriptEntry
@@ -15,7 +16,12 @@ if TYPE_CHECKING:
 class HelpCommand(SlashCommand):
     name = "/help"
 
-    async def invoke(self, controller: AgentCommandController, agent_name: str, argument: str) -> CommandOutcome:
+    async def invoke(
+        self,
+        controller: AgentCommandController,
+        agent_id: UUID,
+        argument: str,
+    ) -> CommandOutcome:
         return CommandOutcome(
             TranscriptEntry("system", controller.HELP, EventDetailLevel.NORMAL, {"type": "system"})
         )

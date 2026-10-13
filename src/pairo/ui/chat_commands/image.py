@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from pairo.core.events import ImageSent
 
@@ -17,7 +18,12 @@ if TYPE_CHECKING:
 class ImageCommand(SlashCommand):
     name = "/image"
 
-    async def invoke(self, controller: AgentCommandController, agent_name: str, argument: str) -> CommandOutcome:
+    async def invoke(
+        self,
+        controller: AgentCommandController,
+        agent_id: UUID,
+        argument: str,
+    ) -> CommandOutcome:
         if not argument:
             raise ValueError("Usage: /image PATH")
         await controller.event_pipeline.publish(ImageSent(image_path=argument))

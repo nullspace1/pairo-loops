@@ -2,8 +2,7 @@
 
 import asyncio
 
-from pairo.core.agent import AgentState
-from pairo.core.agent_config import AgentConfiguration, JsonObject, Sandbox
+from pairo.core.agent import Agent, AgentState, SandboxMode
 from pairo.core.events import EventPipeline, MessageSent, SessionUpdated
 from pairo.ui.app import AgentChatApp
 from pairo.ui.models import EventDetailLevel, TranscriptEntry
@@ -15,77 +14,105 @@ class CountingSessionRepository(SqliteSessionRepository):
         super().__init__()
         self.save_count = 0
 
-    async def save_session(self, agent_name, session_name, identifier):
+    async def save_session(self, agent_id, session_name, identifier):
         self.save_count += 1
-        return await super().save_session(agent_name, session_name, identifier)
+        return await super().save_session(agent_id, session_name, identifier)
 
 
-class FakeAgent:
-    name = "reviewer"
-    description = None
-    session_name = "Conversation 1"
-    session_names = ("Conversation 1",)
-    state = AgentState.IDLE
-    is_generating = False
-    configured_mcp_servers = ()
-    configuration = AgentConfiguration(
-        sandbox=Sandbox.READ_ONLY,
-        workspace=".",
-        model="test",
-    )
+class FakeRunner:
+    """Runner fake owns sessions and emits the same events as the shared runner."""
 
-    def __init__(self, pipeline: EventPipeline) -> None:
-        self._pipeline = pipeline
+    def __init__(self, agent: Agent, pipeline: EventPipeline) -> None:
+        self.agents = {agent.id: agent}
+        self.pipeline = pipeline
+        self.sessions = {agent.id: {"Conversation 1": {"provider": "fake"}}}
+        self.current = {agent.id: "Conversation 1"}
         self.sent_messages: list[tuple[str, str]] = []
 
-    async def send_message(self, message: str, source: str = "user") -> None:
+    def session_name(self, agent_id) -> str | None:
+        return self.current[agent_id]
+
+    def session_names(self, agent_id) -> tuple[str, ...]:
+        return tuple(self.sessions[agent_id])
+
+    def state(self, agent_id) -> AgentState:
+        return AgentState.IDLE
+
+    def is_generating(self, agent_id) -> bool:
+        return False
+
+    async def send_message(self, agent_id, message: str, source: str = "user") -> None:
         self.sent_messages.append((message, source))
-        await self._pipeline.publish(
+        await self.pipeline.publish(
             MessageSent(
-                agent_name=self.name,
-                session_name=self.session_name,
+                agent_id=agent_id,
+                session_name=self.current[agent_id],
                 message=message,
                 source=source,
             )
         )
 
-    async def create_session(self, session_name: str) -> str:
+    async def create_session(self, agent_id, session_name: str) -> str:
+        return await self._load_session(agent_id, session_name, {"provider": "fake"})
+
+    async def restore_session(self, agent_id, session_name: str, identifier_json) -> str:
+        return await self._load_session(agent_id, session_name, identifier_json)
+
+    async def _load_session(self, agent_id, session_name: str, identifier) -> str:
+        self.sessions[agent_id][session_name] = identifier
+        self.current[agent_id] = session_name
+        await self.pipeline.publish(
+            SessionUpdated(
+                agent_id=agent_id,
+                session_name=session_name,
+                identifier=identifier,
+            )
+        )
         return session_name
 
-    async def restore_session(self, session_name: str, identifier_json: JsonObject) -> str:
+    async def switch_session(self, agent_id, session_name: str) -> str:
+        self.current[agent_id] = session_name
         return session_name
 
-    async def switch_session(self, session_name: str) -> str:
-        return session_name
-
-    async def cancel_generation(self) -> bool:
+    async def interrupt(self, agent_id) -> bool:
         return False
+
+
+def make_agent() -> Agent:
+    return Agent(
+        name="reviewer",
+        sandbox=SandboxMode.READ_ONLY,
+        workspace=".",
+        model="test",
+    )
 
 
 def test_app_mounts_and_replays_session_updates() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        agent = make_agent()
         await pipeline.publish(
             SessionUpdated(
-                agent_name="reviewer",
+                agent_id=agent.id,
                 session_name="Conversation 1",
                 identifier={"provider": "fake"},
             )
         )
         repository = CountingSessionRepository()
-        app = AgentChatApp([FakeAgent(pipeline)], pipeline, repository)
+        runner = FakeRunner(agent, pipeline)
+        app = AgentChatApp(runner, repository)
         async with app.run_test() as pilot:
             await pilot.pause()
-            assert app.chats["reviewer"].session_name == "Conversation 1"
+            assert app.chats[agent.id].session_name == "Conversation 1"
             metadata = await app.session_repository.get_session(
-                "reviewer",
+                agent.id,
                 "Conversation 1",
             )
             assert metadata.identifier == {"provider": "fake"}
             assert repository.save_count == 1
             await pipeline.publish(
                 SessionUpdated(
-                    agent_name="reviewer",
+                    agent_id=agent.id,
                     session_name="Conversation 1",
                     identifier={"provider": "fake", "turn": "updated"},
                 )
@@ -101,28 +128,29 @@ def test_app_renders_submitted_text_from_the_message_event() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
         repository = SqliteSessionRepository()
-        agent = FakeAgent(pipeline)
+        agent = make_agent()
+        runner = FakeRunner(agent, pipeline)
         await repository.save_session(
-            "reviewer",
+            agent.id,
             "Conversation 1",
             {"provider": "fake"},
         )
-        app = AgentChatApp([agent], pipeline, repository)
+        app = AgentChatApp(runner, repository)
 
         async with app.run_test() as pilot:
-            chat = app.chats["reviewer"]
+            chat = app.chats[agent.id]
             chat.input.value = "Review this"
             await pilot.press("enter")
             await pilot.pause()
 
-            assert agent.sent_messages == [("Review this", "user")]
+            assert runner.sent_messages == [("Review this", "user")]
             assert chat.transcript.entries == [
                 TranscriptEntry("user", "Review this", EventDetailLevel.NORMAL, {"type": "message"})
             ]
 
             await pipeline.publish(
                 MessageSent(
-                    agent_name="reviewer",
+                    agent_id=agent.id,
                     session_name="Conversation 1",
                     message="Ready for review.",
                     source="planner",

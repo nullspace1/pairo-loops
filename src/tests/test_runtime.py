@@ -1,4 +1,4 @@
-"""Tests for the high-level agent application lifecycle."""
+"""Tests for the high-level Runner application lifecycle."""
 
 import asyncio
 
@@ -9,17 +9,19 @@ from pairo.core.events import EventPipeline
 from pairo import runtime
 
 
-class FakeAgent:
-    def __init__(self, name: str, calls: list[str]) -> None:
-        self.name = name
+class FakeRunner:
+    def __init__(self, calls: list[str], *, start_error: Exception | None = None) -> None:
         self.calls = calls
+        self.pipeline = EventPipeline()
+        self.start_error = start_error
 
-    async def run(self, initial_session_name: str) -> str:
-        self.calls.append(f"run:{self.name}:{initial_session_name}")
-        return initial_session_name
+    async def start(self, initial_session_name: str) -> None:
+        self.calls.append(f"start:{initial_session_name}")
+        if self.start_error is not None:
+            raise self.start_error
 
     async def close(self) -> None:
-        self.calls.append(f"close:{self.name}")
+        self.calls.append("close:runner")
 
 
 class FakeRepository:
@@ -30,86 +32,70 @@ class FakeRepository:
         self.calls.append("close:repository")
 
 
-def test_run_agents_manages_the_complete_application_lifecycle(monkeypatch) -> None:
+def test_run_agents_manages_complete_application_lifecycle(monkeypatch) -> None:
     async def scenario() -> None:
         calls: list[str] = []
-        pipeline = EventPipeline()
+        runner = FakeRunner(calls)
         repository = FakeRepository(calls)
-        agents = (FakeAgent("planner", calls), FakeAgent("developer", calls))
 
-        async def fake_run_ui(received_agents, received_pipeline, received_repository):
-            assert received_agents == agents
-            assert received_pipeline is pipeline
+        async def fake_run_ui(received_runner, received_repository):
+            assert received_runner is runner
             assert received_repository is repository
             calls.append("ui")
 
         monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
+        await run_agents(runner, repository, initial_session_name="Initial")
 
-        await run_agents(agents, pipeline, repository, initial_session_name="Initial")
-
-        assert set(calls[:2]) == {"run:planner:Initial", "run:developer:Initial"}
-        assert calls[2:] == ["ui", "close:planner", "close:developer", "close:repository"]
-        assert pipeline._closed
+        assert calls == [
+            "start:Initial",
+            "ui",
+            "close:runner",
+            "close:repository",
+        ]
+        assert runner.pipeline._closed
 
     asyncio.run(scenario())
 
 
-def test_run_agents_releases_resources_when_the_ui_fails(monkeypatch) -> None:
+def test_run_agents_releases_resources_when_ui_fails(monkeypatch) -> None:
     async def scenario() -> None:
         calls: list[str] = []
-        pipeline = EventPipeline()
+        runner = FakeRunner(calls)
         repository = FakeRepository(calls)
-        agent = FakeAgent("planner", calls)
 
         async def failing_run_ui(*_args):
             raise RuntimeError("UI failed")
 
         monkeypatch.setattr(runtime, "run_ui", failing_run_ui)
-
         with pytest.raises(RuntimeError, match="UI failed"):
-            await run_agents((agent,), pipeline, repository)
-
+            await run_agents(runner, repository)
         assert calls == [
-            "run:planner:Conversation 1",
-            "close:planner",
+            "start:Conversation 1",
+            "close:runner",
             "close:repository",
         ]
-        assert pipeline._closed
+        assert runner.pipeline._closed
 
     asyncio.run(scenario())
 
 
-def test_run_agents_rejects_an_empty_agent_collection() -> None:
-    async def scenario() -> None:
-        with pytest.raises(ValueError, match="at least one agent"):
-            await run_agents((), EventPipeline(), FakeRepository([]))
-
-    asyncio.run(scenario())
-
-
-def test_run_agents_closes_every_resource_when_startup_fails(monkeypatch) -> None:
-    class FailingAgent(FakeAgent):
-        async def run(self, initial_session_name: str) -> str:
-            self.calls.append(f"run:{self.name}:{initial_session_name}")
-            raise RuntimeError("startup failed")
-
+def test_run_agents_closes_resources_when_startup_fails(monkeypatch) -> None:
     async def scenario() -> None:
         calls: list[str] = []
-        pipeline = EventPipeline()
+        runner = FakeRunner(calls, start_error=RuntimeError("startup failed"))
         repository = FakeRepository(calls)
-        failing = FailingAgent("broken", calls)
-        healthy = FakeAgent("healthy", calls)
 
         async def ui_must_not_run(*_args):
             raise AssertionError("UI should not start")
 
         monkeypatch.setattr(runtime, "run_ui", ui_must_not_run)
         with pytest.raises(RuntimeError, match="startup failed"):
-            await run_agents((failing, healthy), pipeline, repository)
-
-        assert "close:broken" in calls
-        assert "close:healthy" in calls
-        assert calls[-1] == "close:repository"
-        assert pipeline._closed
+            await run_agents(runner, repository)
+        assert calls == [
+            "start:Conversation 1",
+            "close:runner",
+            "close:repository",
+        ]
+        assert runner.pipeline._closed
 
     asyncio.run(scenario())

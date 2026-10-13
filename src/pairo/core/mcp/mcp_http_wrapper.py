@@ -47,7 +47,7 @@ class MCPHttpWrapper(ABC):
 
     ``boot_up`` starts the server in a background task. The returned
     ``HttpMCPServer`` from ``as_http_mcp_server`` can be placed directly in an
-    ``AgentConfiguration`` after startup.
+    an ``Agent`` after startup.
     """
 
     def __init__(
