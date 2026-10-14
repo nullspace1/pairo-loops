@@ -7,6 +7,8 @@ from .core import (
     ApprovalMode,
     ApprovalRequest,
     CodexAgentClient,
+    FakeAgentClient,
+    FakeSessionIdentifier,
     Hook,
     HookType,
     InterruptState,
@@ -25,7 +27,10 @@ from .core import (
     SessionIdentifier,
     SessionNotification,
     StdioMCPServer,
+    SpecManager,
+    WorkerVerifierPair,
     WebSearchMode,
+    install_spec_manager,
 )
 from .runtime import run_agents
 
@@ -36,6 +41,8 @@ __all__ = [
     "ApprovalMode",
     "ApprovalRequest",
     "CodexAgentClient",
+    "FakeAgentClient",
+    "FakeSessionIdentifier",
     "Hook",
     "HookType",
     "InterruptState",
@@ -54,6 +61,9 @@ __all__ = [
     "SessionIdentifier",
     "SessionNotification",
     "StdioMCPServer",
+    "SpecManager",
+    "WorkerVerifierPair",
     "WebSearchMode",
+    "install_spec_manager",
     "run_agents",
 ]

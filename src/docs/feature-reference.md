@@ -15,6 +15,7 @@ This reference describes the current public architecture and runtime behavior.
 | Persistence | `pairo.ui.SqliteSessionRepository` | Stores session identifiers, metadata, and ordered transcript entries |
 | UI | `pairo.ui` | Provides agent tabs, conversation commands, transcripts, and permission controls |
 | Agent communication | `pairo.mcp.chatroom` | Forwards MCP chatroom messages through the Runner |
+| Task coordination | `pairo.core.mcp.spec_manager` | Assigns persisted feature tasks to worker/verifier pairs |
 
 The public package exports `Agent`, `Runner`, `AgentState`,
 `SessionIdentifier`, `JsonObject`, configuration enums and hooks, client
@@ -30,6 +31,8 @@ settings can be changed after construction through validated setter methods:
   `set_model`, `set_base_instructions`, `set_developer_instructions`,
   `set_reasoning_effort`, `set_web_search`, `set_approval_mode`, and
   `set_permission_requester`.
+- `append_base_instructions` and `append_developer_instructions` preserve
+  existing instructions and append a separate trimmed block.
 - MCP servers, skill folders, and hooks support `set_*`, `add_*`, and
   `remove_*` methods. Their properties expose tuples or read-only mappings.
 - Every update validates a full candidate configuration before committing it.
@@ -113,6 +116,7 @@ session.
 | Session repository | Save/query/delete sessions and transcript entries; resolve identifiers; `close` |
 | Textual commands | `/agent`, `/session`, `/sessions`, `/compact`, `/delete`, `/interrupt`, `/image`, `/help` |
 | MCP hosting | `MCPHttpWrapper.boot_up`, `as_http_mcp_server`, `close` |
+| Spec manager | `install_spec_manager`, `WorkerVerifierPair`; task, assignment, and review MCP tools |
 
 The generic Runner treats provider identifiers as opaque JSON-compatible
 objects. `CodexSessionIdentifier` is the adapter-specific representation.
@@ -144,6 +148,10 @@ that event type.
   instances, attaches the HTTP server configuration, and checks the MCP caller
   header and room membership before forwarding messages or creating a named
   session for a registered destination agent.
+- Spec-manager installation adds its server, role skill, and usage instructions
+  to each participant. Task statuses are atomically maintained in `FEATURES.md`
+  while assignments remain in memory. A dedicated verifier session survives a
+  review timeout and is deleted after the eventual acceptance or rejection.
 
 ## Enum values
 

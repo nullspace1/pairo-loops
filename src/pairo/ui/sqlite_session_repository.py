@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime, timezone
 import json
@@ -39,6 +40,7 @@ class SqliteSessionRepository:
         self._clock = clock
         self._closed = False
         self._connection: aiosqlite.Connection | None = None
+        self.connection_lock : asyncio.Lock = asyncio.Lock() 
         if folder is None:
             self.database_path: Path | None = None
             self._target = ":memory:"
@@ -276,10 +278,11 @@ class SqliteSessionRepository:
         if self._closed:
             raise RuntimeError("Session repository is closed.")
         if self._connection is None:
-            self._connection = await aiosqlite.connect(self._target)
-            self._connection.row_factory = sqlite3.Row
-            await self._connection.execute("PRAGMA foreign_keys = ON")
-            await self._create_schema(self._connection)
+            async with self.connection_lock:
+                self._connection = await aiosqlite.connect(self._target)
+                self._connection.row_factory = sqlite3.Row
+                await self._connection.execute("PRAGMA foreign_keys = ON")
+                await self._create_schema(self._connection)
         return self._connection
 
     @staticmethod

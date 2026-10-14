@@ -19,6 +19,9 @@ pythonpath = ["."]
 [tool.setuptools.packages.find]
 include = ["pairo*"]
 
+[tool.setuptools.package-data]
+pairo = ["core/mcp/spec_manager_skills/*/spec-manager-*/SKILL.md"]
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

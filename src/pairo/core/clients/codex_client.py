@@ -302,6 +302,7 @@ class CodexAgentClient:
             with self._session_context_lock:
                 self._session_contexts.clear()
 
+
     async def _ensure_client(self) -> CodexClient:
         if self._client is not None:
             return self._client

@@ -155,8 +155,18 @@ class Agent(BaseModel):
     def set_base_instructions(self, instructions: str | None) -> None:
         self._replace(base_instructions=instructions)
 
+    def append_base_instructions(self, instructions: str) -> None:
+        """Append a distinct block to the base instructions."""
+        self.set_base_instructions(self._appended_instructions(self.base_instructions, instructions))
+
     def set_developer_instructions(self, instructions: str | None) -> None:
         self._replace(developer_instructions=instructions)
+
+    def append_developer_instructions(self, instructions: str) -> None:
+        """Append a distinct block to the developer instructions."""
+        self.set_developer_instructions(
+            self._appended_instructions(self.developer_instructions, instructions)
+        )
 
     def set_reasoning_effort(self, effort: ReasoningEffort) -> None:
         self._replace(reasoning_effort=effort)
@@ -234,6 +244,15 @@ class Agent(BaseModel):
             field_name: getattr(self, field_name)
             for field_name in type(self).model_fields
         }
+
+    @staticmethod
+    def _appended_instructions(current: str | None, addition: str) -> str | None:
+        normalized = addition.strip()
+        if not normalized:
+            return current
+        if not current:
+            return normalized
+        return f"{current.rstrip()}\n\n{normalized}"
 
 
 __all__ = ["Agent"]

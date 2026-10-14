@@ -67,6 +67,25 @@ their server configuration directly. For example,
 their stdio configuration, while `Chatroom.add_chatroom(name, runner, agents)`
 attaches the chatroom HTTP configuration and registers the room membership.
 
+The core spec-manager server coordinates a director and worker/verifier pairs:
+
+```python
+from pairo import WorkerVerifierPair, install_spec_manager
+
+spec_manager = install_spec_manager(
+    folder=".",
+    runner=runner,
+    director=director,
+    pairs=[WorkerVerifierPair("pair-1", worker, verifier)],
+)
+await spec_manager.boot_up()
+```
+
+The installer adds role-specific skills and instructions to each participant.
+Tasks are stored in `FEATURES.md`; verifier sessions are temporary and are
+deleted after each acceptance or rejection. Close the returned server during
+application cleanup.
+
 `Runner` is the entry point for creating, restoring, switching, deleting,
 compacting, messaging, waiting on, and interrupting conversations. `new_session(agent)` and
 `restore_session(agent, identifier_json)` receive the Agent directly. The

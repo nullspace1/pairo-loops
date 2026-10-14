@@ -23,12 +23,17 @@ class AgentSelectionCommand(SlashCommand):
         argument: str,
     ) -> CommandOutcome:
         try:
-            selected_id = UUID(argument)
+            selected_name = argument
         except ValueError as error:
-            raise ValueError(f"Invalid agent ID '{argument}'.") from error
-        if selected_id not in controller.agents:
+            raise ValueError(f"Invalid agent name '{argument}'.") from error
+        if selected_name not in controller.agents:
             raise ValueError(f"Unknown agent '{argument}'.")
-        selected = controller.agents[selected_id]
+        options = [agent for agent in controller.agents.values() if agent.name == selected_name]
+        if len(options) == 0:
+            raise ValueError(f"Unknown agent '{argument}'.")
+        if len(options) > 1:
+            raise ValueError(f"Multiple agents named '{selected_name}'.")
+        selected = options[0]
         return CommandOutcome(
             TranscriptEntry[SystemTranscriptMetadata](
                 "system",
@@ -36,5 +41,5 @@ class AgentSelectionCommand(SlashCommand):
                 EventDetailLevel.NORMAL,
                 {"type": "system"},
             ),
-            selected_agent=selected_id,
+            selected_agent=selected.id,
         )

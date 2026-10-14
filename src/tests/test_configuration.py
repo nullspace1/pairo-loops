@@ -90,6 +90,17 @@ def test_scalar_setters_validate_and_commit(tmp_path: Path) -> None:
     assert agent.permission_requester is requester
 
 
+def test_instruction_appenders_preserve_existing_blocks(tmp_path: Path) -> None:
+    agent = make_agent(tmp_path, base_instructions="base", developer_instructions="dev")
+
+    agent.append_base_instructions(" more base ")
+    agent.append_developer_instructions(" more dev ")
+    agent.append_base_instructions("   ")
+
+    assert agent.base_instructions == "base\n\nmore base"
+    assert agent.developer_instructions == "dev\n\nmore dev"
+
+
 def test_invalid_setter_is_atomic_and_preserves_cross_field_rules(tmp_path: Path) -> None:
     agent = make_agent(tmp_path)
 

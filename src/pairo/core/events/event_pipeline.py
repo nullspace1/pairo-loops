@@ -144,7 +144,6 @@ class EventPipeline:
         for registered_type, waiters in tuple(self._waiters.items()):
             if not isinstance(processed, registered_type):
                 continue
-            # Latest subscribers retain first refusal, matching the old pipeline.
             for waiter in reversed(tuple(waiters)):
                 if not waiter.done():
                     waiter.set_result(processed)

@@ -1,4 +1,4 @@
-"""Run the four example agents on one asyncio event loop."""
+"""Run one planner with a developer/verifier pair."""
 
 import asyncio
 from pathlib import Path
@@ -9,12 +9,15 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from agents.developer.developer import get_developer
-from agents.intern.intern import get_intern
 from agents.planner.planner import get_planner
-from agents.product_owner.product_owner import get_product_owner
-from pairo import CodexAgentClient, Runner, run_agents
+from pairo import (
+    CodexAgentClient,
+    Runner,
+    WorkerVerifierPair,
+    install_spec_manager,
+    run_agents,
+)
 from pairo.core.events import EventPipeline
-from pairo.mcp.chatroom import Chatroom
 from pairo.mcp.github import add_github_mcp_server
 from pairo.ui import SqliteSessionRepository
 
@@ -22,22 +25,24 @@ from pairo.ui import SqliteSessionRepository
 async def run_async() -> None:
     pipeline = EventPipeline()
     repository = SqliteSessionRepository()
-    chatroom = Chatroom(port=8081)
+    planner = get_planner(pipeline, repository)
+    developer = get_developer("developer", pipeline, repository)
+    verifier = get_developer("verifier", pipeline, repository)
+    agents = [planner, developer, verifier]
 
-    agents = [
-        get_product_owner(pipeline, repository),
-        get_planner(pipeline, repository),
-        get_developer(pipeline, repository),
-        get_intern(pipeline, repository),
-    ]
     runner = Runner(agents, pipeline, CodexAgentClient())
-    chatroom.add_chatroom("main", runner, agents)
+    spec_manager = install_spec_manager(
+        folder=SOURCE_ROOT / "pairo",
+        runner=runner,
+        director=planner,
+        pairs=[WorkerVerifierPair("pair-1", developer, verifier)],
+    )
     add_github_mcp_server(agents)
-    await chatroom.boot_up()
+    await spec_manager.boot_up()
     try:
         await run_agents(runner, repository)
     finally:
-        await chatroom.close()
+        await spec_manager.close()
 
 
 def run() -> None:

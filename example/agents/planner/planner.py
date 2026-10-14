@@ -25,6 +25,6 @@ def get_planner(pipeline, repository):
         model="gpt-5.6-sol",
         skill_folders=(agent_directory / "skills",),
         base_instructions=instructions,
-        reasoning_effort=ReasoningEffort.HIGH,
+        reasoning_effort=ReasoningEffort.MEDIUM,
         web_search=WebSearchMode.CACHED,
     )
