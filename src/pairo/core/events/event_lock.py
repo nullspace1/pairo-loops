@@ -20,3 +20,16 @@ class EventSubscription(Generic[EventT]):
 
     def __await__(self):
         return self.wait().__await__()
+
+
+class EventReceipt(Generic[EventT]):
+    """Completion handle for one event accepted by the pipeline."""
+
+    def __init__(self, future: asyncio.Future[EventT | None]) -> None:
+        self._future = future
+
+    async def wait(self) -> EventT | None:
+        return await self._future
+
+    def __await__(self):
+        return self.wait().__await__()

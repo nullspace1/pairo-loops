@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ..commands import CommandOutcome
-from ..models import EventDetailLevel, TranscriptEntry
+from ..models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
 from .base import SlashCommand
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ class SessionCommand(SlashCommand):
     @staticmethod
     def _selection_outcome(action: str, session_name: str) -> CommandOutcome:
         return CommandOutcome(
-            TranscriptEntry(
+            TranscriptEntry[SystemTranscriptMetadata](
                 "system",
                 f"{action} session {session_name}.",
                 EventDetailLevel.NORMAL,

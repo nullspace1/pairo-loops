@@ -16,10 +16,12 @@ from pairo.core.agent.session_identifier import SessionIdentifier
 from pairo.core.clients.client import AgentClient
 from pairo.core.events.agent_events import (
     AgentError,
-    AgentEvent,
     ClientResponseCompleted,
     ClientResponseInterrupted,
+    SessionCompacted,
+    SessionCreated,
     SessionUpdated,
+    route_client_event,
 )
 from pairo.core.events.event_pipeline import EventPipeline
 from pairo.core.events.message_sent import MessageSent
@@ -76,7 +78,13 @@ class Runner:
         identifier = await self._client.new_session(agent)
         await run.set_session(name, identifier)
         self._ensure_worker(agent, run)
-        await self._publish_session_update(agent, name, identifier)
+        await self._pipeline.enqueue(
+            SessionCreated(
+                agent_id=agent.id,
+                session_name=name,
+                identifier=identifier.model_dump(mode="json"),
+            )
+        )
         return name
 
     async def restore_session(
@@ -102,6 +110,23 @@ class Runner:
         await run.select_session(name)
         return name
 
+    async def delete_session(self, agent_id: UUID, session_name: str) -> str | None:
+        """Remove a loaded session without deleting provider-side history."""
+        _, run = self._agent_and_run(agent_id)
+        name = self._validated_session_name(session_name)
+        return await run.delete_session(name)
+
+    async def compact_session(self, agent_id: UUID) -> str:
+        """Ask the provider to compact the selected idle session."""
+        _, run = self._agent_and_run(agent_id)
+        run.require_idle()
+        session_name = run.require_session_name()
+        await self._client.compact(run.session_identifier())
+        await self._pipeline.enqueue(
+            SessionCompacted(agent_id=agent_id, session_name=session_name)
+        )
+        return session_name
+
     async def send_message(
         self,
         agent_id: UUID,
@@ -117,7 +142,7 @@ class Runner:
         session_name = run.require_session_name()
         if run.worker is None or run.worker.done():
             raise RuntimeError("Start a session before sending messages.")
-        await self._pipeline.publish(
+        await self._pipeline.enqueue(
             MessageSent(
                 agent_id=agent.id,
                 session_name=session_name,
@@ -175,10 +200,12 @@ class Runner:
         workers = [run.worker for run in self._runs.values() if run.worker is not None]
         for worker in workers:
             worker.cancel()
-        for worker in workers:
-            with suppress(asyncio.CancelledError):
-                await worker
-        await self._client.close()
+        try:
+            await self._client.close()
+        finally:
+            for worker in workers:
+                with suppress(asyncio.CancelledError):
+                    await worker
 
     def _ensure_worker(self, agent: Agent, run: AgentRun) -> None:
         if run.worker is None:
@@ -192,21 +219,26 @@ class Runner:
             message = await run.next_request()
             if message is None:
                 return
+            failure: Exception | None = None
             try:
                 await self._run_turn(message, agent, run)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                await run.add_response(error)
-                await self._pipeline.publish(
+                await self._pipeline.enqueue(
                     AgentError(
                         agent_id=agent.id,
                         session_name=run.require_session_name(),
                         message=str(error),
                     )
                 )
+                failure = error
             finally:
                 await run.finish_turn()
+            if failure is not None:
+                # Release the response waiter only after the failure is visible
+                # to event observers and the run has returned to idle.
+                await run.add_response(failure)
 
     async def _run_turn(self, message: str, agent: Agent, run: AgentRun) -> None:
         updated = await self._client.start(run.session_identifier(), message)
@@ -220,18 +252,13 @@ class Runner:
         async for notification in self._client.notifications(run.session_identifier()):
             await self._update_session(agent, run, notification.session)
             session_name = run.require_session_name()
-            await self._pipeline.publish(
-                AgentEvent(
-                    agent_id=agent.id,
-                    session_name=session_name,
-                    payload=notification.event,
-                )
+            await self._pipeline.enqueue(
+                route_client_event(agent.id, session_name, notification.event)
             )
             await self._steer_pending_messages(agent, run)
             if isinstance(notification.event, ClientResponseCompleted):
                 response = notification.event.message
-                await run.add_response(response)
-                await self._pipeline.publish(
+                await self._pipeline.enqueue(
                     MessageSent(
                         agent_id=agent.id,
                         session_name=session_name,
@@ -239,6 +266,7 @@ class Runner:
                         source=agent.name,
                     )
                 )
+                await run.add_response(response)
                 terminal_received = True
             elif isinstance(notification.event, ClientResponseInterrupted):
                 await run.add_response(None)
@@ -277,7 +305,7 @@ class Runner:
         session_name: str,
         identifier: SessionIdentifier,
     ) -> None:
-        await self._pipeline.publish(
+        await self._pipeline.enqueue(
             SessionUpdated(
                 agent_id=agent.id,
                 session_name=session_name,

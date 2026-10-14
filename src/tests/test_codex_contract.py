@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,7 @@ from pairo.core.agent import (
     WebSearchMode,
 )
 from pairo.core.clients.codex_client import CodexAgentClient, CodexSessionIdentifier
+from pairo.core.events import ClientTokenUsageUpdated
 from pairo.core.mcp.mcp_permissions import MCPPermissions, MCPToolApprovalMode
 from pairo.core.mcp.servers import HttpMCPServer, StdioMCPServer
 
@@ -146,5 +148,75 @@ def test_concurrent_initialization_creates_one_sdk_client(monkeypatch) -> None:
         await adapter.close()
         await adapter.close()
         assert FakeSdkClient.instances[0].close_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_compaction_delegates_to_the_codex_thread() -> None:
+    class FakeSdkClient:
+        def __init__(self) -> None:
+            self.compacted: list[str] = []
+
+        def thread_compact(self, thread_id: str) -> None:
+            self.compacted.append(thread_id)
+
+    async def scenario() -> None:
+        adapter = CodexAgentClient()
+        sdk = FakeSdkClient()
+        adapter._client = sdk
+        identifier = CodexSessionIdentifier(thread_id="thread-1")
+        adapter._register_session(
+            Agent(
+                name="developer",
+                sandbox=SandboxMode.READ_ONLY,
+                workspace=Path.cwd(),
+                model="test",
+            ),
+            identifier,
+        )
+
+        await adapter.compact(identifier)
+
+        assert sdk.compacted == ["thread-1"]
+
+    asyncio.run(scenario())
+
+
+def test_token_usage_notification_is_translated_without_provider_types() -> None:
+    from openai_codex.generated.v2_all import (
+        ThreadTokenUsage,
+        ThreadTokenUsageUpdatedNotification,
+        TokenUsageBreakdown,
+    )
+
+    def breakdown(total: int) -> TokenUsageBreakdown:
+        return TokenUsageBreakdown(
+            inputTokens=total - 20,
+            cachedInputTokens=10,
+            outputTokens=20,
+            reasoningOutputTokens=5,
+            totalTokens=total,
+        )
+
+    async def scenario() -> None:
+        event = await CodexAgentClient()._translate_notification(
+            CodexSessionIdentifier(thread_id="thread-1", turn_id="turn-1"),
+            SimpleNamespace(
+                payload=ThreadTokenUsageUpdatedNotification(
+                    threadId="thread-1",
+                    turnId="turn-1",
+                    tokenUsage=ThreadTokenUsage(
+                        last=breakdown(100),
+                        total=breakdown(500),
+                        modelContextWindow=200_000,
+                    ),
+                )
+            ),
+        )
+
+        assert isinstance(event, ClientTokenUsageUpdated)
+        assert event.last.total_tokens == 100
+        assert event.total.total_tokens == 500
+        assert event.model_context_window == 200_000
 
     asyncio.run(scenario())

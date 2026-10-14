@@ -8,7 +8,7 @@ from uuid import UUID
 from pairo.core.events import ImageSent
 
 from ..commands import CommandOutcome
-from ..models import EventDetailLevel, TranscriptEntry
+from ..models import EventDetailLevel, MessageTranscriptMetadata, TranscriptEntry
 from .base import SlashCommand
 
 if TYPE_CHECKING:
@@ -26,9 +26,9 @@ class ImageCommand(SlashCommand):
     ) -> CommandOutcome:
         if not argument:
             raise ValueError("Usage: /image PATH")
-        await controller.event_pipeline.publish(ImageSent(image_path=argument))
+        await controller.event_pipeline.enqueue(ImageSent(image_path=argument))
         return CommandOutcome(
-            TranscriptEntry(
+            TranscriptEntry[MessageTranscriptMetadata](
                 "user", f"Image: {argument}", EventDetailLevel.NORMAL, {"type": "message"}
             )
         )

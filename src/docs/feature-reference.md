@@ -48,7 +48,8 @@ Construct one `Runner(agents, pipeline, client)` with a single shared client.
 Runner keys agents and runtime state by immutable agent ID and owns session names, identifiers, worker tasks,
 message queues, generation state, and last responses independently for each
 agent. Use its public methods to start and close the runtime, create/restore or
-switch sessions, send messages, wait for responses, and interrupt generation.
+switch, delete, or compact sessions, send messages, wait for responses, and
+interrupt generation.
 Queries such as `session_names`, `session_name`, `state`, `is_generating`,
 `last_message`, and `session_identifier_json` also go through Runner.
 
@@ -82,16 +83,21 @@ files from later folders replace same-named files from earlier folders.
    it for the selected agent's active session.
 2. Runner starts the first message; later queued messages steer the active turn
    in order while client notifications are consumed.
-3. Provider events become neutral `AgentEvent` values. Changed identifiers
-   produce `SessionUpdated` events.
+3. Provider events become concrete routed agent event values. Changed identifiers
+   produce `SessionUpdated` events, and provider token metrics produce
+   `ClientTokenUsageUpdated` payloads that the UI stores in session history.
 4. Completed responses are published and made available to
    `wait_for_message`. Provider errors produce `AgentError` and are re-raised
    by the waiter. Interrupted turns resolve waiters with `None`.
 
 ### Session persistence and permissions
 
-The UI persists each `SessionUpdated` identifier under its agent and session
-names. Restoring a persisted session passes the current Agent and stored opaque
+The UI persists each `SessionCreated` or `SessionUpdated` identifier under its
+agent and session names. It listens for creation events so sessions created by
+UI commands and the chatroom MCP tool use the same registration path. Deletion
+removes both session metadata and its cascading transcript entries; deleting
+the final session creates a replacement. Restoring a persisted session passes
+the current Agent and stored opaque
 identifier JSON to Runner and the shared client. Permission requests are routed
 by provider session context to the permission requester captured for that
 session.
@@ -101,11 +107,11 @@ session.
 | Surface | Main operations |
 | --- | --- |
 | `Agent` | Validated setters; MCP/skill/hook set, add, and remove methods; `snapshot()` |
-| `Runner` | `start`, `close`, `create_session`, `restore_session`, `switch_session`, `send_message`, `wait_for_message`, `interrupt` |
-| `AgentClient` | `new_session`, `restore_session`, `start`, `steer`, `interrupt`, `notifications`, `close` |
+| `Runner` | `start`, `close`, `create_session`, `restore_session`, `switch_session`, `delete_session`, `compact_session`, `send_message`, `wait_for_message`, `interrupt` |
+| `AgentClient` | `new_session`, `restore_session`, `start`, `steer`, `interrupt`, `compact`, `notifications`, `close` |
 | `EventPipeline` | Add/remove listeners, `listen`, ordered `publish`, `close` |
-| Session repository | Save/query sessions and transcript entries; resolve identifiers; `close` |
-| Textual commands | `/agent`, `/session`, `/sessions`, `/interrupt`, `/image`, `/help` |
+| Session repository | Save/query/delete sessions and transcript entries; resolve identifiers; `close` |
+| Textual commands | `/agent`, `/session`, `/sessions`, `/compact`, `/delete`, `/interrupt`, `/image`, `/help` |
 | MCP hosting | `MCPHttpWrapper.boot_up`, `as_http_mcp_server`, `close` |
 
 The generic Runner treats provider identifiers as opaque JSON-compatible
@@ -136,7 +142,8 @@ that event type.
   for an identical server and rejects conflicts before changing any agent.
 - Chatroom registration is in memory. `add_chatroom` receives the room's Agent
   instances, attaches the HTTP server configuration, and checks the MCP caller
-  header and room membership before forwarding messages.
+  header and room membership before forwarding messages or creating a named
+  session for a registered destination agent.
 
 ## Enum values
 

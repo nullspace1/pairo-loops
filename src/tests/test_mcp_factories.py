@@ -1,6 +1,8 @@
 """Contract tests for the packaged MCP server factories."""
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -83,6 +85,40 @@ def test_chatroom_registers_runner_agent_ids() -> None:
     with pytest.raises(ValueError, match="Unknown chatroom agents"):
         chatroom.add_chatroom("invalid", runner, [unknown_agent])
     assert unknown_agent.mcp_servers == ()
+
+
+def test_chatroom_can_create_a_session_for_a_registered_agent() -> None:
+    async def scenario() -> None:
+        sender = configured_agent(Path.cwd(), "sender")
+        recipient = configured_agent(Path.cwd(), "recipient")
+
+        class RunnerStub:
+            agents = {sender.id: sender, recipient.id: recipient}
+
+            def __init__(self) -> None:
+                self.created = []
+
+            async def create_session(self, agent_id, session_name):
+                self.created.append((agent_id, session_name))
+                return session_name
+
+        runner = RunnerStub()
+        chatroom = Chatroom(port=8081)
+        chatroom.add_chatroom("main", runner, [sender, recipient])
+        server = chatroom.build_mcp_server()
+        tool = server._tool_manager.get_tool("create_session")
+
+        result = await tool.fn(
+            "main",
+            str(recipient.id),
+            "Review branch",
+            SimpleNamespace(headers={"X-Agent-ID": str(sender.id)}),
+        )
+
+        assert runner.created == [(recipient.id, "Review branch")]
+        assert "Created session 'Review branch'" in result
+
+    asyncio.run(scenario())
 
 
 def test_repeated_factory_registration_is_idempotent(tmp_path: Path) -> None:

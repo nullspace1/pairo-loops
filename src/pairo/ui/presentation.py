@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
-from typing import Any
+from typing import Any, TypeGuard
 
 from pairo.core.events import PermissionRequest
 
@@ -89,7 +89,7 @@ def describe_fields(
     return tuple(lines)
 
 
-def _is_sequence(value: Any) -> bool:
+def _is_sequence(value: object) -> TypeGuard[Sequence[Any]]:
     return isinstance(value, Sequence) and not isinstance(
         value,
         (str, bytes, bytearray),

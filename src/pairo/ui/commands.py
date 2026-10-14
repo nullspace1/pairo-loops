@@ -7,7 +7,7 @@ from typing import Mapping
 from uuid import UUID
 
 from pairo.core.agent import Agent, Runner
-from pairo.core.events import EventPipeline, SessionUpdated
+from pairo.core.events import EventPipeline, SessionDeleted, SessionUpdated
 
 from .models import EventDetailLevel, TranscriptEntry
 from .session_repository import SessionRepository
@@ -22,6 +22,8 @@ class CommandOutcome:
 
 from .chat_commands import (  # noqa: E402
     AgentSelectionCommand,
+    CompactCommand,
+    DeleteCommand,
     HelpCommand,
     ImageCommand,
     InterruptCommand,
@@ -34,7 +36,7 @@ from .chat_commands import (  # noqa: E402
 class AgentCommandController:
     HELP = (
         "/agent ID, /session new [NAME], /session switch NAME, /sessions, "
-        "/interrupt, /image PATH, /help"
+        "/compact, /delete [NAME], /interrupt, /image PATH, /help"
     )
 
     def __init__(
@@ -49,11 +51,23 @@ class AgentCommandController:
             AgentSelectionCommand(),
             SessionCommand(),
             SessionsCommand(),
+            CompactCommand(),
+            DeleteCommand(),
             InterruptCommand(),
             ImageCommand(),
         ]
         self._commands_by_name = {command.name: command for command in self._commands}
-        self._runner.pipeline.add_listener(SessionUpdated, self._persist_session)
+        self._session_replay = self._runner.pipeline.add_listener(
+            SessionUpdated,
+            self._persist_session,
+            process_existing_events=True,
+        )
+
+    async def wait_until_ready(self) -> None:
+        """Wait until sessions published before construction are persisted."""
+        if self._session_replay is not None:
+            await self._session_replay
+            self._session_replay = None
 
     @property
     def agents(self) -> Mapping[UUID, Agent]:
@@ -106,6 +120,47 @@ class AgentCommandController:
         while f"Conversation {index}" in names:
             index += 1
         return f"Conversation {index}"
+
+    async def delete_session(
+        self,
+        agent_id: UUID,
+        session_name: str | None = None,
+    ) -> tuple[str, str]:
+        """Delete one session and guarantee that the agent still has a selection."""
+        target = session_name or self._runner.session_name(agent_id)
+        if target is None:
+            raise RuntimeError("The selected agent has no active session.")
+
+        loaded_names = self._runner.session_names(agent_id)
+        current_name = self._runner.session_name(agent_id)
+        selected_name = current_name
+        if target in loaded_names:
+            selected_name = await self._runner.delete_session(agent_id, target)
+        else:
+            await self._session_repository.get_session(agent_id, target)
+
+        await self._session_repository.delete_session(agent_id, target)
+
+        if selected_name is None:
+            remaining = await self._session_repository.sessions_for(agent_id)
+            if remaining:
+                selected_name = await self.select_session(
+                    agent_id,
+                    remaining[-1].session_name,
+                )
+            else:
+                selected_name = await self._runner.create_session(
+                    agent_id,
+                    await self.default_session_name(agent_id),
+                )
+        await self._runner.pipeline.enqueue(
+            SessionDeleted(
+                agent_id=agent_id,
+                session_name=target,
+                selected_session_name=selected_name,
+            )
+        )
+        return target, selected_name
 
     async def _persist_session(self, event: SessionUpdated) -> SessionUpdated:
         await self._session_repository.save_session(

@@ -13,6 +13,7 @@ from pairo.core.events import (
     ClientResponseCompleted,
     ClientResponseInterrupted,
     EventPipeline,
+    SessionCompacted,
     SessionUpdated,
 )
 
@@ -56,6 +57,9 @@ class ControlledClient:
         self.calls.append(("interrupt", session.revision))
         return LifecycleIdentifier(revision=session.revision + 1)
 
+    async def compact(self, session):
+        self.calls.append(("compact", session.revision))
+
     async def notifications(self, session):
         self.calls.append(("notifications", session.revision))
         while True:
@@ -81,6 +85,29 @@ class ControlledClient:
         )
 
 
+class CloseUnblocksNotificationsClient(ControlledClient):
+    """Model a provider read that cannot unwind until its transport closes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.notifications_started = asyncio.Event()
+        self.transport_closed = asyncio.Event()
+
+    async def notifications(self, session):
+        self.calls.append(("notifications", session.revision))
+        self.notifications_started.set()
+        try:
+            await asyncio.Future()
+            if False:
+                yield
+        finally:
+            await self.transport_closed.wait()
+
+    async def close(self) -> None:
+        self.calls.append(("close",))
+        self.transport_closed.set()
+
+
 def make_runner(tmp_path: Path, client: ControlledClient | None = None):
     pipeline = EventPipeline()
     configured_client = client or ControlledClient()
@@ -92,6 +119,25 @@ def make_runner(tmp_path: Path, client: ControlledClient | None = None):
     )
     runner = Runner([agent], pipeline, configured_client)
     return agent, runner, configured_client, pipeline
+
+
+def test_runner_closes_transport_before_waiting_for_cancelled_workers(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        client = CloseUnblocksNotificationsClient()
+        agent, runner, _, pipeline = make_runner(tmp_path, client)
+        await runner.start()
+        await runner.send_message(agent.id, "keep reading")
+        await asyncio.wait_for(client.notifications_started.wait(), timeout=1)
+
+        await asyncio.wait_for(runner.close(), timeout=1)
+
+        assert client.transport_closed.is_set()
+        assert runner.state(agent.id) is AgentState.STOPPED
+        await pipeline.close()
+
+    asyncio.run(scenario())
 
 
 def test_runner_validates_operations_and_lifecycle(tmp_path: Path) -> None:
@@ -258,6 +304,21 @@ def test_new_sessions_receive_latest_agent_configuration(tmp_path: Path) -> None
             "test-model",
             "updated-model",
         ]
+        await runner.close()
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_compaction_is_delegated_and_publishes_an_event(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        agent, runner, client, pipeline = make_runner(tmp_path)
+        await runner.start("Main")
+
+        assert await runner.compact_session(agent.id) == "Main"
+
+        assert ("compact", 0) in client.calls
+        assert SessionCompacted(agent_id=agent.id, session_name="Main") in pipeline.events
         await runner.close()
         await pipeline.close()
 

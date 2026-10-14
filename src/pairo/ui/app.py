@@ -2,48 +2,47 @@
 
 from __future__ import annotations
 
+import asyncio
 from uuid import UUID
 
 from pydantic import BaseModel
 from textual import on
 from textual.app import App, ComposeResult
 from textual.css.query import NoMatches
-from textual.message import Message
 from textual.widgets import Footer, Header, Input, TabbedContent, TabPane
 
 from pairo.core.agent import Runner
 from pairo.core.events import (
-    AgentError,
-    AgentEvent,
-    EventPipeline,
-    MessageSent,
-    NetworkMessageSent,
+    AgentTokenUsageUpdated,
     PermissionRequest,
     PermissionResponse,
-    SessionUpdated,
+    SessionCreated,
+    SessionDeleted,
 )
 
 from .commands import AgentCommandController
-from .formatting import CompletedEventFormatter
 from .models import (
     EventDetailLevel,
+    SystemTranscriptMetadata,
     TranscriptEntry,
 )
-from .permissions import build_permission_response
-from .presentation import permission_request_history_content
 from .session_repository import SessionRepository
 from .sqlite_session_repository import SqliteSessionRepository
+from .transcript_events import (
+    TranscriptEntryAdded,
+    TranscriptEntryDeleted,
+    TranscriptEntryUpdated,
+)
+from .transcribers import (
+    EventTranscriberRegistry,
+    TranscriberList,
+    TranscriptTranscriberRegistry,
+    default_transcribers,
+)
 from .widgets import (
     AgentChatPane,
     AgentSidebar,
-    PermissionRequestCard,
 )
-
-
-class PipelineEventReceived(Message):
-    def __init__(self, event: BaseModel) -> None:
-        super().__init__()
-        self.event = event
 
 
 class AgentChatApp(App[None]):
@@ -72,7 +71,9 @@ class AgentChatApp(App[None]):
     .detail-filter { width: 14; min-width: 14; height: 3; margin-left: 1; }
     .session-switch-note { height: auto; color: $text-muted; }
     .session-list { height: auto; }
-    .session-button { width: 1fr; height: auto; min-height: 3; margin-top: 1; }
+    .session-row { width: 1fr; height: auto; min-height: 3; margin-top: 1; }
+    .session-button { width: 1fr; height: auto; min-height: 3; }
+    .session-delete-button { width: 5; min-width: 5; height: 3; }
     .current-session { border: heavy $accent; }
     .chat-input-container { layout: horizontal; height: 3; margin: 1 0; }
     .transcript {
@@ -93,18 +94,13 @@ class AgentChatApp(App[None]):
     """
     BINDINGS = [("ctrl+q", "quit", "Quit")]
 
-    _DISPLAYED_EVENT_TYPES = (
-        AgentError,
-        AgentEvent,
-        MessageSent,
-        NetworkMessageSent,
-        PermissionRequest,
-    )
 
     def __init__(
         self,
         runner: Runner,
         session_repository: SessionRepository | None = None,
+        *,
+        transcribers: TranscriberList | None = None,
     ) -> None:
         super().__init__()
         agents_by_id = dict(runner.agents)
@@ -114,7 +110,16 @@ class AgentChatApp(App[None]):
         self._owns_repository = session_repository is None
         self.session_repository = session_repository or SqliteSessionRepository()
         self.history = self.session_repository
-        self._formatter = CompletedEventFormatter()
+        configured_transcribers = (
+            default_transcribers() if transcribers is None else transcribers
+        )
+        self._event_transcribers, self._transcript_transcribers = (
+            self._build_transcriber_registries(configured_transcribers)
+        )
+        self._transcribed_event_types = tuple(self._event_transcribers)
+        self._token_usage_by_session: dict[
+            tuple[UUID, str], AgentTokenUsageUpdated
+        ] = {}
         self._detail_level = EventDetailLevel.NORMAL
         self._controller = AgentCommandController(
             runner,
@@ -129,6 +134,8 @@ class AgentChatApp(App[None]):
                 agent,
                 runner,
                 self.session_repository,
+                self._event_pipeline,
+                self._transcript_transcribers,
                 self._detail_level,
                 id=f"chat-content-{index}",
             )
@@ -144,61 +151,195 @@ class AgentChatApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        for event_type in self._DISPLAYED_EVENT_TYPES:
-            self._event_pipeline.add_listener(event_type, self._receive_pipeline_event)
-        replayed_events = tuple(self._event_pipeline.events)
-        answered_request_ids = {
-            event.request_id for event in replayed_events
+        replay_tasks: list[asyncio.Task[None]] = []
+        self._event_pipeline.add_listener(TranscriptEntryAdded, self._persist_transcript_entry_added)
+        self._event_pipeline.add_listener(TranscriptEntryUpdated, self._persist_transcript_entry_updated)
+        self._event_pipeline.add_listener(TranscriptEntryDeleted, self._persist_transcript_entry_deleted)
+        token_usage_replay = self._event_pipeline.add_listener(
+            AgentTokenUsageUpdated,
+            self._track_token_usage,
+            process_existing_events=True,
+        )
+        if token_usage_replay is not None:
+            replay_tasks.append(token_usage_replay)
+        for event_type in self._transcribed_event_types:
+            replay = self._event_pipeline.add_listener(
+                event_type,
+                self._transcribe_event,
+                process_existing_events=True,
+            )
+            if replay is not None:
+                replay_tasks.append(replay)
+        created_replay = self._event_pipeline.add_listener(
+            SessionCreated,
+            self._receive_session_created,
+            process_existing_events=True,
+        )
+        if created_replay is not None:
+            replay_tasks.append(created_replay)
+        deleted_replay = self._event_pipeline.add_listener(
+            SessionDeleted,
+            self._receive_session_deleted,
+            process_existing_events=True,
+        )
+        if deleted_replay is not None:
+            replay_tasks.append(deleted_replay)
+        self._answered_request_ids = {
+            event.request_id
+            for event in self._event_pipeline.events
             if isinstance(event, PermissionResponse)
         }
-        for event in replayed_events:
-            if isinstance(event, SessionUpdated):
-                await self._save_session(event)
-            elif isinstance(event, self._DISPLAYED_EVENT_TYPES):
-                if (
-                    isinstance(event, PermissionRequest)
-                    and event.request_id in answered_request_ids
-                ):
-                    continue
-                self._receive_pipeline_event(event)
+        await self._controller.wait_until_ready()
+        if replay_tasks:
+            await asyncio.gather(*replay_tasks)
         self._active_chat().input.focus()
         self.set_interval(0.25, self._refresh_sidebars)
 
     async def on_unmount(self) -> None:
-        for event_type in self._DISPLAYED_EVENT_TYPES:
-            self._event_pipeline.remove_listener(event_type, self._receive_pipeline_event)
+        self._event_pipeline.remove_listener(
+            TranscriptEntryAdded, self._persist_transcript_entry_added
+        )
+        self._event_pipeline.remove_listener(
+            TranscriptEntryUpdated, self._persist_transcript_entry_updated
+        )
+        self._event_pipeline.remove_listener(
+            TranscriptEntryDeleted, self._persist_transcript_entry_deleted
+        )
+        self._event_pipeline.remove_listener(
+            AgentTokenUsageUpdated, self._track_token_usage
+        )
+        for event_type in self._transcribed_event_types:
+            self._event_pipeline.remove_listener(event_type, self._transcribe_event)
+        self._event_pipeline.remove_listener(SessionCreated, self._receive_session_created)
+        self._event_pipeline.remove_listener(SessionDeleted, self._receive_session_deleted)
         if self._owns_repository:
             await self.session_repository.close()
 
-    def _receive_pipeline_event(self, event: BaseModel) -> BaseModel:
-        self.post_message(PipelineEventReceived(event))
+    def _transcribe_event(self, event: BaseModel) -> BaseModel:
+        if (
+            isinstance(event, PermissionRequest)
+            and event.request_id in self._answered_request_ids
+        ):
+            return event
+        transcriber = self._event_transcribers[type(event)]
+        routed = transcriber.write(event)
+        if routed.agent_id in self.chats:
+            self._event_pipeline.enqueue(
+                TranscriptEntryAdded(
+                    agent_id=routed.agent_id,
+                    session_name=routed.session_name,
+                    entry=routed.entry,
+                )
+            )
         return event
 
-    @on(PipelineEventReceived)
-    async def show_pipeline_event(self, message: PipelineEventReceived) -> None:
-        event = message.event
-        if isinstance(event, PermissionRequest):
-            pane = self.chats.get(event.agent_id)
-            if pane is not None:
-                # Persist the request for history, but render the richer card only live.
-                await pane.append(
-                    event.session_name,
-                    TranscriptEntry(
-                        "permission",
-                        permission_request_history_content(event),
-                        EventDetailLevel.NORMAL,
-                        {"type": "permission_request", "request_id": event.request_id},
-                    ),
-                    display=False,
+    def _track_token_usage(
+        self,
+        event: AgentTokenUsageUpdated,
+    ) -> AgentTokenUsageUpdated:
+        self._token_usage_by_session[(event.agent_id, event.session_name)] = event
+        return event
+
+    @property
+    def active_token_usage(self) -> AgentTokenUsageUpdated | None:
+        """Latest usage for the agent and session currently shown in the UI."""
+        pane = self._active_chat()
+        if pane.session_name is None:
+            return None
+        return self._token_usage_by_session.get((pane.agent_id, pane.session_name))
+
+    @staticmethod
+    def _build_transcriber_registries(
+        transcribers: TranscriberList,
+    ) -> tuple[EventTranscriberRegistry, TranscriptTranscriberRegistry]:
+        event_registry: EventTranscriberRegistry = {}
+        transcript_registry: TranscriptTranscriberRegistry = {}
+        for transcriber in transcribers:
+            if transcriber.event_type in event_registry:
+                raise ValueError(
+                    "Multiple transcribers registered for event "
+                    f"{transcriber.event_type.__name__}."
                 )
-                await pane.enqueue_permission(event)
-            return
-        routed = self._formatter.format(event)
-        if routed is not None and routed.agent_id in self.chats:
-            await self.chats[routed.agent_id].append(
-                routed.session_name,
-                routed.entry,
-            )
+            if transcriber.transcript_type in transcript_registry:
+                raise ValueError(
+                    "Multiple transcribers registered for transcript type "
+                    f"'{transcriber.transcript_type}'."
+                )
+            event_registry[transcriber.event_type] = transcriber
+            transcript_registry[transcriber.transcript_type] = transcriber
+        return event_registry, transcript_registry
+
+    def _receive_session_created(self, event: SessionCreated) -> SessionCreated:
+        if event.session_name in self._runner.session_names(event.agent_id):
+            self.call_later(self._apply_session_created, event)
+        return event
+
+    async def _apply_session_created(self, event: SessionCreated) -> None:
+        pane = self.chats.get(event.agent_id)
+        if pane is not None:
+            await pane.select_session(event.session_name)
+
+    def _receive_session_deleted(self, event: SessionDeleted) -> SessionDeleted:
+        self._token_usage_by_session.pop((event.agent_id, event.session_name), None)
+        self.call_later(self._apply_session_deleted, event)
+        return event
+
+    async def _apply_session_deleted(self, event: SessionDeleted) -> None:
+        pane = self.chats.get(event.agent_id)
+        if pane is not None:
+            await pane.select_session(event.selected_session_name)
+
+    async def _persist_transcript_entry_added(
+        self, event: TranscriptEntryAdded
+    ) -> TranscriptEntryAdded:
+        await self.session_repository.add_entry(
+            event.agent_id, event.session_name, event.entry
+        )
+        self.call_later(self._apply_transcript_entry_added, event)
+        return event
+
+    async def _apply_transcript_entry_added(self, event: TranscriptEntryAdded) -> None:
+        pane = self.chats.get(event.agent_id)
+        if pane is not None:
+            try:
+                await pane.add_entry(event.session_name, event.entry)
+            except NoMatches:
+                # A deferred application can race with application teardown.
+                return
+
+    async def _persist_transcript_entry_updated(
+        self, event: TranscriptEntryUpdated
+    ) -> TranscriptEntryUpdated:
+        await self.session_repository.update_entry(
+            event.agent_id, event.session_name, event.entry
+        )
+        self.call_later(self._apply_transcript_entry_updated, event)
+        return event
+
+    async def _apply_transcript_entry_updated(self, event: TranscriptEntryUpdated) -> None:
+        pane = self.chats.get(event.agent_id)
+        if pane is not None:
+            try:
+                await pane.update_entry(event.session_name, event.entry)
+            except NoMatches:
+                return
+
+    async def _persist_transcript_entry_deleted(
+        self, event: TranscriptEntryDeleted
+    ) -> TranscriptEntryDeleted:
+        await self.session_repository.delete_entry(
+            event.agent_id, event.session_name, event.entry_id
+        )
+        self.call_later(self._apply_transcript_entry_deleted, event)
+        return event
+
+    async def _apply_transcript_entry_deleted(self, event: TranscriptEntryDeleted) -> None:
+        pane = self.chats.get(event.agent_id)
+        if pane is not None:
+            try:
+                await pane.delete_entry(event.session_name, event.entry_id)
+            except NoMatches:
+                return
 
     @on(Input.Submitted)
     async def submit_chat_input(self, message: Input.Submitted) -> None:
@@ -213,7 +354,7 @@ class AgentChatApp(App[None]):
         except (KeyError, RuntimeError, ValueError) as error:
             await self._append_to_current(
                 pane,
-                TranscriptEntry(
+                TranscriptEntry[SystemTranscriptMetadata](
                     "system", f"Error: {error}", EventDetailLevel.NORMAL, {"type": "system"}
                 ),
             )
@@ -226,43 +367,6 @@ class AgentChatApp(App[None]):
         if outcome.selected_agent is not None:
             self.select_agent(outcome.selected_agent)
 
-    @on(PermissionRequestCard.Decided)
-    async def answer_permission(self, message: PermissionRequestCard.Decided) -> None:
-        request = message.request
-        pane = self.chats.get(request.agent_id)
-        if pane is None:
-            return
-        try:
-            await self._event_pipeline.publish(
-                build_permission_response(request, message.decision)
-            )
-        except (RuntimeError, ValueError) as error:
-            pane.allow_permission_retry(request)
-            await pane.append(
-                request.session_name,
-                TranscriptEntry(
-                    "system",
-                    f"Unable to answer permission {request.request_id}: {error}",
-                    EventDetailLevel.NORMAL,
-                    {"type": "system"},
-                ),
-            )
-            return
-        pane.resolve_permission(request, message.decision)
-        await pane.append(
-            request.session_name,
-            TranscriptEntry(
-                "permission",
-                f"Approval answered: {message.decision}",
-                EventDetailLevel.NORMAL,
-                {
-                    "type": "permission_response",
-                    "request_id": request.request_id,
-                    "decision": message.decision,
-                },
-            ),
-        )
-
     @on(AgentSidebar.SessionSelected)
     async def select_sidebar_session(self, message: AgentSidebar.SessionSelected) -> None:
         pane = self.chats[message.agent_id]
@@ -274,7 +378,7 @@ class AgentChatApp(App[None]):
             await pane.select_session(selected)
             await self._append_to_current(
                 pane,
-                TranscriptEntry(
+                TranscriptEntry[SystemTranscriptMetadata](
                     "system",
                     f"Switched to session {selected}.",
                     EventDetailLevel.NORMAL,
@@ -284,7 +388,7 @@ class AgentChatApp(App[None]):
         except (KeyError, RuntimeError, ValueError) as error:
             await self._append_to_current(
                 pane,
-                TranscriptEntry(
+                TranscriptEntry[SystemTranscriptMetadata](
                     "system",
                     f"Unable to switch session: {error}",
                     EventDetailLevel.NORMAL,
@@ -292,6 +396,37 @@ class AgentChatApp(App[None]):
                 ),
             )
 
+    @on(AgentSidebar.SessionDeletionRequested)
+    async def delete_sidebar_session(
+        self,
+        message: AgentSidebar.SessionDeletionRequested,
+    ) -> None:
+        pane = self.chats[message.agent_id]
+        try:
+            deleted, selected = await self._controller.delete_session(
+                message.agent_id,
+                message.session_name,
+            )
+            await pane.select_session(selected)
+            await self._append_to_current(
+                pane,
+                TranscriptEntry[SystemTranscriptMetadata](
+                    "system",
+                    f"Deleted session {deleted}. Current session: {selected}.",
+                    EventDetailLevel.NORMAL,
+                    {"type": "system"},
+                ),
+            )
+        except (KeyError, RuntimeError, ValueError) as error:
+            await self._append_to_current(
+                pane,
+                TranscriptEntry[SystemTranscriptMetadata](
+                    "system",
+                    f"Unable to delete session: {error}",
+                    EventDetailLevel.NORMAL,
+                    {"type": "system"},
+                ),
+            )
     @on(AgentChatPane.DetailLevelChanged)
     async def change_detail_level(self, message: AgentChatPane.DetailLevelChanged) -> None:
         self._detail_level = message.detail_level
@@ -319,13 +454,12 @@ class AgentChatApp(App[None]):
     ) -> None:
         if pane.session_name is None:
             raise RuntimeError("The selected agent has no active session.")
-        await pane.append(pane.session_name, entry)
-
-    async def _save_session(self, event: SessionUpdated) -> None:
-        await self.session_repository.save_session(
-            event.agent_id,
-            event.session_name,
-            event.identifier,
+        await self._event_pipeline.enqueue(
+            TranscriptEntryAdded(
+                agent_id=pane.agent_id,
+                session_name=pane.session_name,
+                entry=entry,
+            )
         )
 
     async def _refresh_sidebars(self) -> None:
@@ -340,6 +474,12 @@ class AgentChatApp(App[None]):
 async def run_ui(
     runner: Runner,
     session_repository: SessionRepository | None = None,
+    *,
+    transcribers: TranscriberList | None = None,
 ) -> None:
-    await AgentChatApp(runner, session_repository).run_async()
+    await AgentChatApp(
+        runner,
+        session_repository,
+        transcribers=transcribers,
+    ).run_async()
     

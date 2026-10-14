@@ -113,6 +113,44 @@ class Chatroom(MCPHttpWrapper):
             )
 
         @mcp.tool(
+            "create_session",
+            "Create and select a new session for an agent in a chatroom.",
+        )
+        async def create_session(
+            chatroom: str,
+            destination_agent_id: str,
+            session_name: str,
+            ctx: Context,
+        ) -> str:
+            sender_id = get_agent_id(ctx)
+            if sender_id is None:
+                return "Agent ID not configured."
+            if not self._is_in_chatroom(chatroom, sender_id):
+                return f"Agent '{sender_id}' is not in chatroom '{chatroom}'."
+
+            try:
+                destination_id = UUID(destination_agent_id)
+            except ValueError:
+                return f"Agent ID '{destination_agent_id}' is invalid."
+
+            registration = self.chatrooms.get(chatroom)
+            if registration is None or destination_id not in registration.agent_ids:
+                return (
+                    f"Agent '{destination_agent_id}' is not registered in "
+                    f"chatroom '{chatroom}'."
+                )
+
+            created = await registration.runner.create_session(
+                destination_id,
+                session_name,
+            )
+            destination_name = registration.runner.agents[destination_id].name
+            return (
+                f"Created session '{created}' for {destination_name} "
+                f"({destination_id}) in chatroom '{chatroom}'."
+            )
+
+        @mcp.tool(
             "get_chatrooms",
             "List chatrooms that contain the calling agent.",
         )

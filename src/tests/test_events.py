@@ -6,10 +6,68 @@ from uuid import uuid4
 import pytest
 from pydantic import BaseModel
 
-from pairo.core.events import EventPipeline, MessageSent, UserInput
+from pairo.core.events import (
+    AgentActivityCompleted,
+    AgentActivityProgress,
+    AgentActivityStarted,
+    AgentPlanDelta,
+    AgentReasoningDelta,
+    AgentResponseCompleted,
+    AgentResponseInterrupted,
+    AgentTextDelta,
+    AgentTokenUsageUpdated,
+    ClientActivityCompleted,
+    ClientActivityProgress,
+    ClientActivityStarted,
+    ClientPlanDelta,
+    ClientReasoningDelta,
+    ClientResponseCompleted,
+    ClientResponseInterrupted,
+    ClientTextDelta,
+    ClientTokenUsageUpdated,
+    EventPipeline,
+    MessageSent,
+    TokenUsage,
+    UserInput,
+    route_client_event,
+)
 
 
 AGENT_ID = uuid4()
+
+
+def test_every_client_event_has_a_concrete_routed_event() -> None:
+    usage = TokenUsage(
+        input_tokens=1,
+        cached_input_tokens=0,
+        output_tokens=2,
+        reasoning_output_tokens=0,
+        total_tokens=3,
+    )
+    cases = (
+        (ClientTextDelta(text="text"), AgentTextDelta),
+        (ClientPlanDelta(text="plan"), AgentPlanDelta),
+        (ClientReasoningDelta(text="reason"), AgentReasoningDelta),
+        (ClientActivityStarted(activity={"type": "command"}), AgentActivityStarted),
+        (ClientActivityProgress(activity={"progress": 1}), AgentActivityProgress),
+        (ClientActivityCompleted(activity={"result": "ok"}), AgentActivityCompleted),
+        (ClientResponseCompleted(message="done"), AgentResponseCompleted),
+        (ClientResponseInterrupted(), AgentResponseInterrupted),
+        (
+            ClientTokenUsageUpdated(last=usage, total=usage),
+            AgentTokenUsageUpdated,
+        ),
+    )
+
+    for client_event, routed_type in cases:
+        routed = route_client_event(AGENT_ID, "session", client_event)
+
+        assert type(routed) is routed_type
+        assert routed.agent_id == AGENT_ID
+        assert routed.session_name == "session"
+        assert routed.model_dump(exclude={"agent_id", "session_name"}) == (
+            client_event.model_dump(exclude={"kind"})
+        )
 
 
 def test_listener_order_consumption_and_one_shot_waiters() -> None:
@@ -29,15 +87,86 @@ def test_listener_order_consumption_and_one_shot_waiters() -> None:
         pipeline.add_listener(MessageSent, second)
         waiting = pipeline.listen(MessageSent)
         sent = MessageSent(agent_id=AGENT_ID, session_name="s", message="ready")
-        await pipeline.publish(sent)
+        await pipeline.enqueue(sent)
 
         assert await waiting is sent
         assert calls == ["first", "second"]
         assert pipeline.events == [sent]
 
         pipeline.add_listener(UserInput, lambda event: None)
-        assert await pipeline.publish(UserInput(message="consumed")) is None
+        assert await pipeline.enqueue(UserInput(message="consumed")) is None
         assert len(pipeline.events) == 1
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_listener_can_process_existing_events_on_registration() -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        first = MessageSent(
+            agent_id=AGENT_ID,
+            session_name="s",
+            message="first",
+        )
+        second = MessageSent(
+            agent_id=AGENT_ID,
+            session_name="s",
+            message="second",
+        )
+        await pipeline.enqueue(first)
+        await pipeline.enqueue(second)
+        default_calls: list[str] = []
+        replayed_calls: list[str] = []
+
+        pipeline.add_listener(
+            MessageSent,
+            lambda event: default_calls.append(event.message) or event,
+        )
+
+        async def replay(event: MessageSent) -> MessageSent:
+            await asyncio.sleep(0)
+            replayed_calls.append(event.message)
+            return event
+
+        replay_task = pipeline.add_listener(
+            MessageSent,
+            replay,
+            process_existing_events=True,
+        )
+        assert replay_task is not None
+        await replay_task
+
+        assert default_calls == []
+        assert replayed_calls == ["first", "second"]
+        assert pipeline.events == [first, second]
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_enqueue_is_non_blocking_and_receipt_waits_for_processing() -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        listener_started = asyncio.Event()
+        release_listener = asyncio.Event()
+
+        async def delayed(event: MessageSent) -> MessageSent:
+            listener_started.set()
+            await release_listener.wait()
+            return event
+
+        pipeline.add_listener(MessageSent, delayed)
+        event = MessageSent(agent_id=AGENT_ID, session_name="s", message="queued")
+
+        receipt = pipeline.enqueue(event)
+        await listener_started.wait()
+        waiting = asyncio.create_task(receipt.wait())
+        await asyncio.sleep(0)
+        assert not waiting.done()
+
+        release_listener.set()
+        assert await waiting is event
         await pipeline.close()
 
     asyncio.run(scenario())
@@ -65,7 +194,7 @@ def test_listener_removal_base_class_delivery_and_transformation() -> None:
         pipeline.add_listener(MessageSent, transform)
         pipeline.add_listener(BaseModel, observe_base)
 
-        result = await pipeline.publish(
+        result = await pipeline.enqueue(
             MessageSent(agent_id=AGENT_ID, session_name="s", message="original")
         )
         assert result == UserInput(message="transformed")
@@ -85,7 +214,7 @@ def test_multiple_waiters_receive_one_event_and_cancelled_waiters_are_safe() -> 
         cancelled.cancel()
         event = MessageSent(agent_id=AGENT_ID, session_name="s", message="ready")
 
-        assert await pipeline.publish(event) is event
+        assert await pipeline.enqueue(event) is event
         assert await first is event
         assert await second is event
         with pytest.raises(asyncio.CancelledError):
@@ -104,7 +233,7 @@ def test_listener_errors_propagate_without_recording_the_event() -> None:
 
         pipeline.add_listener(MessageSent, fail)
         with pytest.raises(RuntimeError, match="listener failed"):
-            await pipeline.publish(
+            await pipeline.enqueue(
                 MessageSent(agent_id=AGENT_ID, session_name="s", message="ready")
             )
         assert pipeline.events == []
@@ -125,6 +254,6 @@ def test_close_cancels_waiters_and_rejects_future_operations() -> None:
         with pytest.raises(RuntimeError, match="closed"):
             pipeline.add_listener(UserInput, lambda event: event)
         with pytest.raises(RuntimeError, match="closed"):
-            await pipeline.publish(UserInput(message="late"))
+            pipeline.enqueue(UserInput(message="late"))
 
     asyncio.run(scenario())

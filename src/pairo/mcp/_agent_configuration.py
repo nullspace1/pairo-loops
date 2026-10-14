@@ -1,16 +1,20 @@
 """Shared registration of MCP server configurations on mutable agents."""
 
 from collections.abc import Sequence
+from typing import TypeVar
 from uuid import UUID
 
 from pairo.core.agent import Agent
 from pairo.core.mcp.servers import MCPServer
 
 
+MCPServerT = TypeVar("MCPServerT", bound=MCPServer)
+
+
 def add_server_to_agents(
     agents: Sequence[Agent],
-    server: MCPServer,
-) -> MCPServer:
+    server: MCPServerT,
+) -> MCPServerT:
     """Add one server to each agent without leaving a partially updated list."""
     unique_agents = _unique_agents(agents)
     agents_to_update: list[Agent] = []

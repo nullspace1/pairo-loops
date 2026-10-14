@@ -67,8 +67,8 @@ their server configuration directly. For example,
 their stdio configuration, while `Chatroom.add_chatroom(name, runner, agents)`
 attaches the chatroom HTTP configuration and registers the room membership.
 
-`Runner` is the entry point for creating, restoring, switching, messaging,
-waiting on, and interrupting conversations. `new_session(agent)` and
+`Runner` is the entry point for creating, restoring, switching, deleting,
+compacting, messaging, waiting on, and interrupting conversations. `new_session(agent)` and
 `restore_session(agent, identifier_json)` receive the Agent directly. The
 client snapshots its configuration at session creation or restoration, so
 later Agent updates apply to subsequent sessions only.
@@ -92,7 +92,15 @@ interpreted outside the provider client.
   lowest unused `Conversation N`.
 - `/session switch NAME` restores or selects a known session.
 - `/sessions` lists persisted and loaded sessions.
+- `/compact` asks the provider client to compact the current idle session.
+- `/delete [NAME]` deletes the named or current session and its transcript.
+  Deleting the last available session immediately creates a replacement.
 - `/interrupt` interrupts the active generation.
+
+Each session row also has an `X` deletion button. Provider token-usage updates
+are recorded as debug-level transcript entries for the session that generated
+them. The chatroom MCP server can create and select named sessions for agents
+registered in the room.
 
 The SQLite schema is intentionally new and does not migrate the former thread
 schema.

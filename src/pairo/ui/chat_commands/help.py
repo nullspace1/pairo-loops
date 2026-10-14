@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ..commands import CommandOutcome
-from ..models import EventDetailLevel, TranscriptEntry
+from ..models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
 from .base import SlashCommand
 
 if TYPE_CHECKING:
@@ -23,5 +23,7 @@ class HelpCommand(SlashCommand):
         argument: str,
     ) -> CommandOutcome:
         return CommandOutcome(
-            TranscriptEntry("system", controller.HELP, EventDetailLevel.NORMAL, {"type": "system"})
+            TranscriptEntry[SystemTranscriptMetadata](
+                "system", controller.HELP, EventDetailLevel.NORMAL, {"type": "system"}
+            )
         )

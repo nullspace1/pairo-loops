@@ -60,6 +60,17 @@ class AgentRun:
                 raise KeyError(f"Session '{session_name}' is not loaded.")
             self.session_name = session_name
 
+    async def delete_session(self, session_name: str) -> str | None:
+        """Forget one loaded session and select another loaded session if needed."""
+        async with self.state_lock:
+            self.require_idle()
+            if session_name not in self.sessions:
+                raise KeyError(f"Session '{session_name}' is not loaded.")
+            del self.sessions[session_name]
+            if self.session_name == session_name:
+                self.session_name = next(reversed(self.sessions), None)
+            return self.session_name
+
     async def enqueue(self, message: str) -> None:
         async with self.state_lock:
             if self.state is AgentState.STOPPED:

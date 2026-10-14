@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
+from typing import cast
 from uuid import UUID
 
 import aiosqlite
@@ -17,6 +18,7 @@ from .models import (
     EventDetailLevel,
     SessionMetadata,
     TranscriptEntry,
+    TranscriptMetadata,
 )
 from .session_repository import SessionNotFoundError
 
@@ -72,7 +74,7 @@ class SqliteSessionRepository:
         await connection.commit()
         return await self.get_session(agent_id, session_name)
 
-    async def append_entry(
+    async def add_entry(
         self,
         agent_id: UUID,
         session_name: str,
@@ -84,15 +86,18 @@ class SqliteSessionRepository:
         await connection.execute(
             """
             INSERT INTO transcript_entries (
-                agent_id, session_name, role, content, detail_level, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                entry_id, agent_id, session_name, role, content,
+                detail_level, metadata_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                str(entry.entry_id),
                 str(agent_id),
                 session_name,
                 entry.role,
                 entry.content,
                 entry.detail_level.value,
+                json.dumps(entry.metadata, sort_keys=True, separators=(",", ":")),
                 timestamp,
             ),
         )
@@ -106,6 +111,77 @@ class SqliteSessionRepository:
         )
         await connection.commit()
 
+    async def append_entry(
+        self,
+        agent_id: UUID,
+        session_name: str,
+        entry: TranscriptEntry,
+    ) -> None:
+        """Compatibility alias for callers migrating to ``add_entry``."""
+        await self.add_entry(agent_id, session_name, entry)
+
+    async def update_entry(
+        self,
+        agent_id: UUID,
+        session_name: str,
+        entry: TranscriptEntry,
+    ) -> None:
+        connection = await self._connect()
+        await self._require_registered(agent_id, session_name)
+        timestamp = self._timestamp()
+        cursor = await connection.execute(
+            """
+            UPDATE transcript_entries
+            SET role = ?, content = ?, detail_level = ?, metadata_json = ?
+            WHERE entry_id = ? AND agent_id = ? AND session_name = ?
+            """,
+            (
+                entry.role,
+                entry.content,
+                entry.detail_level.value,
+                json.dumps(entry.metadata, sort_keys=True, separators=(",", ":")),
+                str(entry.entry_id),
+                str(agent_id),
+                session_name,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise LookupError(f"Transcript entry '{entry.entry_id}' was not found.")
+        await connection.execute(
+            """
+            UPDATE sessions SET last_updated_at = ?
+            WHERE agent_id = ? AND session_name = ?
+            """,
+            (timestamp, str(agent_id), session_name),
+        )
+        await connection.commit()
+
+    async def delete_entry(
+        self,
+        agent_id: UUID,
+        session_name: str,
+        entry_id: UUID,
+    ) -> None:
+        connection = await self._connect()
+        await self._require_registered(agent_id, session_name)
+        cursor = await connection.execute(
+            """
+            DELETE FROM transcript_entries
+            WHERE entry_id = ? AND agent_id = ? AND session_name = ?
+            """,
+            (str(entry_id), str(agent_id), session_name),
+        )
+        if cursor.rowcount != 1:
+            raise LookupError(f"Transcript entry '{entry_id}' was not found.")
+        await connection.execute(
+            """
+            UPDATE sessions SET last_updated_at = ?
+            WHERE agent_id = ? AND session_name = ?
+            """,
+            (self._timestamp(), str(agent_id), session_name),
+        )
+        await connection.commit()
+
     async def entries_for(
         self,
         agent_id: UUID,
@@ -115,21 +191,16 @@ class SqliteSessionRepository:
         await self._require_registered(agent_id, session_name)
         cursor = await connection.execute(
             """
-            SELECT role, content, detail_level
+            SELECT entry_id, role, content, detail_level, metadata_json
             FROM transcript_entries
             WHERE agent_id = ? AND session_name = ?
             ORDER BY entry_order ASC
             """,
             (str(agent_id), session_name),
         )
-        rows = await cursor.fetchall()
+        rows = list(await cursor.fetchall())
         return tuple(
-            TranscriptEntry(
-                row["role"],
-                row["content"],
-                EventDetailLevel(row["detail_level"]),
-                {"type": "historical"},
-            )
+            self._entry_from(row)
             for row in rows
         )
 
@@ -155,6 +226,16 @@ class SqliteSessionRepository:
         )
         return tuple(self._metadata_from(row) for row in await cursor.fetchall())
 
+    async def delete_session(self, agent_id: UUID, session_name: str) -> None:
+        """Delete a session and its transcript in one committed operation."""
+        connection = await self._connect()
+        await self._require_registered(agent_id, session_name)
+        await connection.execute(
+            "DELETE FROM sessions WHERE agent_id = ? AND session_name = ?",
+            (str(agent_id), session_name),
+        )
+        await connection.commit()
+
     async def session_for_identifier(
         self,
         identifier: JsonObject,
@@ -170,7 +251,7 @@ class SqliteSessionRepository:
             """,
             (encoded,),
         )
-        rows = await cursor.fetchall()
+        rows = list(await cursor.fetchall())
         if not rows:
             raise SessionNotFoundError("No session matches the provider identifier.")
         if len(rows) > 1:
@@ -218,22 +299,33 @@ class SqliteSessionRepository:
 
             CREATE TABLE IF NOT EXISTS transcript_entries (
                 entry_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 session_name TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 detail_level TEXT NOT NULL
                     CHECK (detail_level IN ('normal', 'debug')),
+                metadata_json TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (agent_id, session_name)
                     REFERENCES sessions (agent_id, session_name)
-                    ON DELETE CASCADE
+                    ON DELETE CASCADE,
+                UNIQUE (agent_id, session_name, entry_id)
             );
 
             CREATE INDEX IF NOT EXISTS transcript_session_order
                 ON transcript_entries (agent_id, session_name, entry_order);
             """
         )
+        cursor = await connection.execute("PRAGMA table_info(transcript_entries)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        required = {"entry_id", "metadata_json"}
+        if not required.issubset(columns):
+            raise RuntimeError(
+                "The session database uses an incompatible transcript schema. "
+                "Select a fresh database or remove the existing sessions.sqlite3 file."
+            )
         await connection.commit()
 
     async def _session_row(self, agent_id: UUID, session_name: str) -> sqlite3.Row:
@@ -287,6 +379,19 @@ class SqliteSessionRepository:
                 else None
             ),
             last_updated_at=datetime.fromisoformat(row["last_updated_at"]),
+        )
+
+    @staticmethod
+    def _entry_from(row: sqlite3.Row) -> TranscriptEntry:
+        metadata = json.loads(row["metadata_json"])
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("type"), str):
+            raise ValueError("Stored transcript metadata must contain a string type.")
+        return TranscriptEntry(
+            role=row["role"],
+            content=row["content"],
+            detail_level=EventDetailLevel(row["detail_level"]),
+            metadata=cast(TranscriptMetadata, metadata),
+            entry_id=UUID(row["entry_id"]),
         )
 
 

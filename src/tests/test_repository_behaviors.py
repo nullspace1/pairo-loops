@@ -54,16 +54,11 @@ def test_transcripts_are_ordered_isolated_and_update_metadata() -> None:
             TranscriptEntry("agent", "last", EventDetailLevel.NORMAL, {"type": "message"}),
         )
         for entry in entries:
-            await repository.append_entry(agent_id, "one", entry)
-        await repository.append_entry(agent_id, "two", entries[1])
+            await repository.add_entry(agent_id, "one", entry)
+        await repository.add_entry(agent_id, "two", entries[1])
 
-        persisted_entries = (
-            TranscriptEntry("user", "first", EventDetailLevel.NORMAL, {"type": "historical"}),
-            TranscriptEntry("agent", "debug", EventDetailLevel.DEBUG, {"type": "historical"}),
-            TranscriptEntry("agent", "last", EventDetailLevel.NORMAL, {"type": "historical"}),
-        )
-        assert await repository.entries_for(agent_id, "one") == persisted_entries
-        assert await repository.entries_for(agent_id, "two") == (persisted_entries[1],)
+        assert await repository.entries_for(agent_id, "one") == entries
+        assert await repository.entries_for(agent_id, "two") == (entries[1],)
         assert (await repository.get_session(agent_id, "one")).last_message_at is not None
         assert [item.session_name for item in await repository.sessions_for(agent_id)] == [
             "one",

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ..commands import CommandOutcome
-from ..models import EventDetailLevel, TranscriptEntry
+from ..models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
 from .base import SlashCommand
 
 if TYPE_CHECKING:
@@ -25,5 +25,7 @@ class InterruptCommand(SlashCommand):
         interrupted = await controller.runner.interrupt(agent_id)
         message = "Interrupt requested." if interrupted else "Agent is already idle."
         return CommandOutcome(
-            TranscriptEntry("system", message, EventDetailLevel.NORMAL, {"type": "system"})
+            TranscriptEntry[SystemTranscriptMetadata](
+                "system", message, EventDetailLevel.NORMAL, {"type": "system"}
+            )
         )

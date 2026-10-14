@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ..commands import CommandOutcome
-from ..models import EventDetailLevel, TranscriptEntry
+from ..models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
 from .base import SlashCommand
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ class SessionsCommand(SlashCommand):
         known = ", ".join(session.session_name for session in sessions)
         current = controller.runner.session_name(agent_id) or "none"
         return CommandOutcome(
-            TranscriptEntry(
+            TranscriptEntry[SystemTranscriptMetadata](
                 "system",
                 f"Current session: {current}. History: {known or 'none recorded'}.",
                 EventDetailLevel.NORMAL,

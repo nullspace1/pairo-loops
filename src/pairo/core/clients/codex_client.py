@@ -31,6 +31,8 @@ from openai_codex.generated.v2_all import (
     SandboxMode as CodexSandboxMode,
     ThreadResumeParams,
     ThreadStartParams,
+    ThreadTokenUsageUpdatedNotification,
+    TokenUsageBreakdown,
     TurnCompletedNotification,
     TurnStatus,
 )
@@ -53,6 +55,8 @@ from ..events import (
     ClientResponseCompleted,
     ClientResponseInterrupted,
     ClientTextDelta,
+    ClientTokenUsageUpdated,
+    TokenUsage,
 )
 from ..mcp.servers import HttpMCPServer
 from ..permissions import PermissionRequester
@@ -170,7 +174,7 @@ class CodexAgentClient:
         response = await asyncio.to_thread(
             client.turn_steer,
             identifier.thread_id,
-            identifier.turn_id,
+            self._turn_id(identifier),
             message,
         )
         updated = identifier.model_copy(update={"turn_id": response.turn_id})
@@ -180,13 +184,19 @@ class CodexAgentClient:
         self._update_session_identifier(updated)
         return updated
 
+    async def compact(self, session: SessionIdentifier) -> None:
+        identifier = self._identifier(session)
+        self._require_session_context(identifier.thread_id)
+        client = await self._ensure_client()
+        await asyncio.to_thread(client.thread_compact, identifier.thread_id)
+
     async def interrupt(self, session: SessionIdentifier) -> SessionIdentifier:
         identifier = self._active_identifier(session)
         client = await self._ensure_client()
         await asyncio.to_thread(
             client.turn_interrupt,
             identifier.thread_id,
-            identifier.turn_id,
+            self._turn_id(identifier),
         )
         return identifier
 
@@ -222,7 +232,9 @@ class CodexAgentClient:
             try:
                 while not stop_requested.is_set():
                     current = stream.current()
-                    notification = client.next_turn_notification(current.turn_id)
+                    notification = client.next_turn_notification(
+                        self._turn_id(current)
+                    )
                     if not enqueue(notification):
                         return
                     if notification.method == "turn/completed":
@@ -271,7 +283,7 @@ class CodexAgentClient:
                         asyncio.to_thread(
                             client.turn_interrupt,
                             current.thread_id,
-                            current.turn_id,
+                            self._turn_id(current),
                         )
                     )
             with suppress(asyncio.CancelledError, Exception):
@@ -395,6 +407,12 @@ class CodexAgentClient:
         payload = notification.payload
         if isinstance(payload, AgentMessageDeltaNotification):
             return ClientTextDelta(text=str(payload.delta))
+        if isinstance(payload, ThreadTokenUsageUpdatedNotification):
+            return ClientTokenUsageUpdated(
+                last=self._token_usage(payload.token_usage.last),
+                total=self._token_usage(payload.token_usage.total),
+                model_context_window=payload.token_usage.model_context_window,
+            )
         if isinstance(payload, PlanDeltaNotification):
             return ClientPlanDelta(text=str(payload.delta))
         if isinstance(
@@ -422,6 +440,17 @@ class CodexAgentClient:
                 message=await self._read_final_response(identifier.thread_id)
             )
         return ClientActivityProgress(activity=self._dump(payload))
+
+    @staticmethod
+    def _token_usage(usage: TokenUsageBreakdown) -> TokenUsage:
+        return TokenUsage(
+            input_tokens=usage.input_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            output_tokens=usage.output_tokens,
+            reasoning_output_tokens=usage.reasoning_output_tokens,
+            total_tokens=usage.total_tokens,
+            cache_write_input_tokens=usage.cache_write_input_tokens,
+        )
 
     async def _read_final_response(self, thread_id: str) -> str:
         client = await self._ensure_client()
@@ -463,8 +492,9 @@ class CodexAgentClient:
 
     @staticmethod
     def _json_default(value: object) -> object:
-        if hasattr(value, "model_dump"):
-            return value.model_dump(
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return model_dump(
                 mode="python",
                 by_alias=True,
                 exclude_none=True,
@@ -490,6 +520,12 @@ class CodexAgentClient:
         if identifier.turn_id is None:
             raise ValueError("The Codex session has no active turn.")
         return identifier
+
+    @staticmethod
+    def _turn_id(identifier: CodexSessionIdentifier) -> str:
+        if identifier.turn_id is None:
+            raise ValueError("The Codex session has no active turn.")
+        return identifier.turn_id
 
     @classmethod
     def _thread_start_params(
@@ -571,14 +607,16 @@ class CodexAgentClient:
                         MCP_AGENT_ID_HEADER: str(config.id),
                     }
                 else:
+                    environment: CodexJsonObject = {}
+                    if server.env:
+                        environment.update(server.env)
+                    environment[MCP_AGENT_ID_HEADER] = str(config.id)
                     connection = {
                         "command": server.command,
                         "args": list(server.args),
                         "startup_timeout_sec": server.startup_timeout_sec,
+                        "env": environment,
                     }
-                    if server.env:
-                        connection["env"] = dict(server.env)
-                    connection.setdefault("env", {})[MCP_AGENT_ID_HEADER] = str(config.id)
                 if server.permissions is not None:
                     permissions = server.permissions
                     if permissions.default_tools_approval_mode is not None:

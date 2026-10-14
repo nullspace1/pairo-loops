@@ -53,7 +53,7 @@ class TextualPermissionRequester(PermissionRequester):
             response=response,
         )
         try:
-            await self._event_pipeline.publish(
+            await self._event_pipeline.enqueue(
                 PermissionRequest(
                     request_id=request_id,
                     agent_id=session.agent_id,

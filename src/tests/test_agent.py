@@ -8,6 +8,8 @@ from pydantic import ConfigDict
 from pairo.core.agent import Agent, JsonObject, Runner, SandboxMode, SessionIdentifier
 from pairo.core.clients.client import SessionNotification
 from pairo.core.events import (
+    AgentResponseCompleted,
+    AgentTextDelta,
     ClientResponseCompleted,
     ClientTextDelta,
     EventPipeline,
@@ -114,6 +116,16 @@ def test_runner_uses_opaque_identifiers_and_async_lifecycle(tmp_path: Path) -> N
         assert client.calls.count(("notifications",)) == 1
         assert ("new", "test-model", "researcher") in client.calls
         assert starts_when_user_message_published == [0]
+        assert AgentTextDelta(
+            agent_id=agent.id,
+            session_name="Conversation 1",
+            text="Frequent ",
+        ) in pipeline.events
+        assert AgentResponseCompleted(
+            agent_id=agent.id,
+            session_name="Conversation 1",
+            message="Finished",
+        ) in pipeline.events
         assert MessageSent(
             agent_id=agent.id,
             session_name="Conversation 1",

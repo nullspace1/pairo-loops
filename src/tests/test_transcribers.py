@@ -1,9 +1,21 @@
-"""Tests for transcript formatting visibility."""
+"""Tests for combined transcript conversion and rendering."""
 
 from uuid import uuid4
 
-from pairo.core.events import AgentEvent, ClientActivityCompleted
-from pairo.ui.formatting import CompletedEventFormatter
+import pytest
+
+from pairo.core.events import (
+    AgentActivityCompleted,
+    AgentError,
+    AgentTokenUsageUpdated,
+    TokenUsage,
+)
+from pairo.ui.transcribers import (
+    ActivityCompletedTranscriber,
+    MessageSentTranscriber,
+    TokenUsageUpdatedTranscriber,
+    default_transcribers,
+)
 from pairo.ui.models import EventDetailLevel
 from pairo.ui.presentation import CompletedActivityPresenter
 
@@ -11,25 +23,47 @@ from pairo.ui.presentation import CompletedActivityPresenter
 AGENT_ID = uuid4()
 
 
-def test_completed_mcp_calls_and_commands_are_visible_in_normal_mode() -> None:
-    formatter = CompletedEventFormatter()
+def test_default_transcribers_declare_concrete_event_and_transcript_types() -> None:
+    transcribers = default_transcribers()
+    event_types = {transcriber.event_type for transcriber in transcribers}
+    transcript_types = {transcriber.transcript_type for transcriber in transcribers}
 
-    command = formatter.format(
-        AgentEvent(
+    assert isinstance(transcribers, list)
+    assert AgentActivityCompleted in event_types
+    assert AgentTokenUsageUpdated in event_types
+    assert transcript_types == {
+        "activity", "error", "message", "network", "permission_request", "token_usage"
+    }
+
+
+def test_transcriber_rejects_an_event_other_than_its_declared_type() -> None:
+    transcriber = MessageSentTranscriber()
+
+    with pytest.raises(TypeError, match="MessageSentTranscriber requires MessageSent"):
+        transcriber.write(
+            AgentError(
+                agent_id=AGENT_ID,
+                session_name="Conversation 1",
+                message="failure",
+            )
+        )
+
+
+def test_completed_mcp_calls_and_commands_are_visible_in_normal_mode() -> None:
+    transcriber = ActivityCompletedTranscriber()
+
+    command = transcriber.write(
+        AgentActivityCompleted(
             agent_id=AGENT_ID,
             session_name="Conversation 1",
-            payload=ClientActivityCompleted(
-                activity={"type": "commandExecution", "command": "pytest"}
-            ),
+            activity={"type": "commandExecution", "command": "pytest"},
         )
     )
-    mcp_call = formatter.format(
-        AgentEvent(
+    mcp_call = transcriber.write(
+        AgentActivityCompleted(
             agent_id=AGENT_ID,
             session_name="Conversation 1",
-            payload=ClientActivityCompleted(
-                activity={"type": "mcpToolCall", "serverName": "docs", "tool": "search"}
-            ),
+            activity={"type": "mcpToolCall", "serverName": "docs", "tool": "search"},
         )
     )
 
@@ -40,13 +74,11 @@ def test_completed_mcp_calls_and_commands_are_visible_in_normal_mode() -> None:
 
 
 def test_other_completed_activity_remains_debug_only() -> None:
-    formatted = CompletedEventFormatter().format(
-        AgentEvent(
+    formatted = ActivityCompletedTranscriber().write(
+        AgentActivityCompleted(
             agent_id=AGENT_ID,
             session_name="Conversation 1",
-            payload=ClientActivityCompleted(
-                activity={"type": "fileChange", "path": "src/example.py"}
-            ),
+            activity={"type": "fileChange", "path": "src/example.py"},
         )
     )
 
@@ -120,3 +152,32 @@ def test_activity_presenter_has_safe_fallbacks_for_missing_and_unknown_items() -
     assert "hidden" not in command.text
     assert unknown.title == "Custom operation completed"
     assert unknown.lines == ("Payload:", "  - one", "  - two")
+
+
+def test_token_usage_is_written_as_a_session_log_entry() -> None:
+    formatted = TokenUsageUpdatedTranscriber().write(
+        AgentTokenUsageUpdated(
+            agent_id=AGENT_ID,
+            session_name="Conversation 1",
+            last=TokenUsage(
+                input_tokens=100,
+                cached_input_tokens=40,
+                output_tokens=25,
+                reasoning_output_tokens=10,
+                total_tokens=125,
+            ),
+            total=TokenUsage(
+                input_tokens=300,
+                cached_input_tokens=80,
+                output_tokens=75,
+                reasoning_output_tokens=30,
+                total_tokens=375,
+            ),
+            model_context_window=200_000,
+        )
+    )
+
+    assert formatted is not None
+    assert formatted.entry.metadata == {"type": "token_usage"}
+    assert "turn: 100 input (40 cached)" in formatted.entry.content
+    assert "session: 375 total" in formatted.entry.content

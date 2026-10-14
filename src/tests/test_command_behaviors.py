@@ -37,7 +37,7 @@ class CommandRunner:
 
     async def send_message(self, agent_id: UUID, message: str, source: str = "user") -> None:
         self.sent.append((agent_id, message, source))
-        await self.pipeline.publish(
+        await self.pipeline.enqueue(
             MessageSent(
                 agent_id=agent_id,
                 session_name=self.current[agent_id],
@@ -55,7 +55,7 @@ class CommandRunner:
     async def _load_session(self, agent_id: UUID, session_name: str, identifier) -> str:
         self.sessions[agent_id][session_name] = identifier
         self.current[agent_id] = session_name
-        await self.pipeline.publish(
+        await self.pipeline.enqueue(
             SessionUpdated(
                 agent_id=agent_id,
                 session_name=session_name,
@@ -199,7 +199,7 @@ def test_session_updates_are_persisted_by_the_controller_listener() -> None:
             session_name="Conversation 1",
             identifier={"provider": "fake", "revision": 1},
         )
-        assert await pipeline.publish(event) is event
+        assert await pipeline.enqueue(event) is event
         assert (await repository.get_session(agent.id, "Conversation 1")).identifier == {
             "provider": "fake",
             "revision": 1,

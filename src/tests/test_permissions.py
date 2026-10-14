@@ -61,8 +61,8 @@ def test_concurrent_permission_requests_are_routed_by_identifier() -> None:
         requests = [
             event for event in pipeline.events if isinstance(event, PermissionRequest)
         ]
-        await pipeline.publish(build_permission_response(requests[1], "decline"))
-        await pipeline.publish(build_permission_response(requests[0], "accept"))
+        await pipeline.enqueue(build_permission_response(requests[1], "decline"))
+        await pipeline.enqueue(build_permission_response(requests[0], "accept"))
 
         assert await first is PermissionDecision.ACCEPT
         assert await second is PermissionDecision.DECLINE
@@ -189,7 +189,7 @@ def test_permission_response_must_match_request_agent_and_session() -> None:
         published = next(
             event for event in pipeline.events if isinstance(event, PermissionRequest)
         )
-        await pipeline.publish(
+        await pipeline.enqueue(
             PermissionResponse(
                 request_id=published.request_id,
                 agent_id=uuid4(),
@@ -199,7 +199,7 @@ def test_permission_response_must_match_request_agent_and_session() -> None:
         )
         await asyncio.sleep(0)
         assert not task.done()
-        await pipeline.publish(
+        await pipeline.enqueue(
             PermissionResponse(
                 request_id=published.request_id,
                 agent_id=published.agent_id,
@@ -253,7 +253,7 @@ def test_codex_client_wraps_the_configured_neutral_requester() -> None:
         request = next(
             event for event in pipeline.events if isinstance(event, PermissionRequest)
         )
-        await pipeline.publish(build_permission_response(request, "accept"))
+        await pipeline.enqueue(build_permission_response(request, "accept"))
 
         assert await response_task == {"decision": "accept"}
         await adapter.close()

@@ -17,8 +17,16 @@ class SessionRepository(Protocol):
         self, agent_id: UUID, session_name: str, identifier: JsonObject
     ) -> SessionMetadata: ...
 
-    async def append_entry(
+    async def add_entry(
         self, agent_id: UUID, session_name: str, entry: TranscriptEntry
+    ) -> None: ...
+
+    async def update_entry(
+        self, agent_id: UUID, session_name: str, entry: TranscriptEntry
+    ) -> None: ...
+
+    async def delete_entry(
+        self, agent_id: UUID, session_name: str, entry_id: UUID
     ) -> None: ...
 
     async def entries_for(
@@ -30,6 +38,8 @@ class SessionRepository(Protocol):
     ) -> SessionMetadata: ...
 
     async def sessions_for(self, agent_id: UUID) -> tuple[SessionMetadata, ...]: ...
+
+    async def delete_session(self, agent_id: UUID, session_name: str) -> None: ...
 
     async def session_for_identifier(
         self, identifier: JsonObject

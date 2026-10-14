@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from collections.abc import Awaitable
+from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
 
 EventT = TypeVar("EventT", bound=BaseModel)
-EventListener = Callable[[BaseModel], BaseModel | None | Awaitable[BaseModel | None]]
+ListenerEventT = TypeVar("ListenerEventT", bound=BaseModel, contravariant=True)
+
+
+class EventListener(Protocol[ListenerEventT]):
+    def __call__(
+        self,
+        event: ListenerEventT,
+    ) -> BaseModel | None | Awaitable[BaseModel | None]: ...

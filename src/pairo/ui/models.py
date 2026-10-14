@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Literal, TypeAlias, TypedDict
-from uuid import UUID
+from typing import Generic, Literal, TypeAlias, TypedDict, TypeVar
+from uuid import UUID, uuid4
 
 from pairo.core.agent import JsonObject
 
@@ -41,11 +41,15 @@ class ActivityTranscriptMetadata(TypedDict):
     activity_type: str
 
 
-class PermissionRequestTranscriptMetadata(TypedDict):
-    """In-memory identity for a live permission request."""
+class PermissionRequestTranscriptMetadata(TypedDict, total=False):
+    """Durable state for a permission request transcript entry."""
 
     type: Literal["permission_request"]
     request_id: str
+    request_type: str
+    request: JsonObject
+    status: Literal["pending", "resolved"]
+    decision: str
 
 
 class PermissionResponseTranscriptMetadata(TypedDict):
@@ -62,6 +66,12 @@ class SystemTranscriptMetadata(TypedDict):
     type: Literal["system"]
 
 
+class TokenUsageTranscriptMetadata(TypedDict):
+    """Metadata for provider token accounting snapshots."""
+
+    type: Literal["token_usage"]
+
+
 class HistoricalTranscriptMetadata(TypedDict):
     """Metadata assigned when a durable entry is reloaded from SQLite."""
 
@@ -76,16 +86,21 @@ TranscriptMetadata: TypeAlias = (
     | PermissionRequestTranscriptMetadata
     | PermissionResponseTranscriptMetadata
     | SystemTranscriptMetadata
+    | TokenUsageTranscriptMetadata
     | HistoricalTranscriptMetadata
 )
 
+MetadataT = TypeVar("MetadataT", bound=TranscriptMetadata)
+
 
 @dataclass(frozen=True, slots=True)
-class TranscriptEntry:
+class TranscriptEntry(Generic[MetadataT]):
     role: str
     content: str
     detail_level: EventDetailLevel
-    metadata: TranscriptMetadata
+    metadata: MetadataT
+    # Identity is operational (update/delete routing), not presentation content.
+    entry_id: UUID = field(default_factory=uuid4, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
