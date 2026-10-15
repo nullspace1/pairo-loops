@@ -1,7 +1,7 @@
 """Tests for ordered asyncio-native event delivery."""
 
 import asyncio
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import BaseModel
@@ -17,6 +17,7 @@ from pairo.core.events import (
     AgentTextDelta,
     AgentTokenUsageUpdated,
     ClientActivityCompleted,
+    ClientEvent,
     ClientActivityProgress,
     ClientActivityStarted,
     ClientPlanDelta,
@@ -34,6 +35,42 @@ from pairo.core.events import (
 
 
 AGENT_ID = uuid4()
+
+
+class CustomClientEvent(ClientEvent):
+    """Test-only event proving route_client_event uses the event contract."""
+
+    text: str
+
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentTextDelta:
+        return AgentTextDelta(
+            agent_id=agent_id,
+            session_name=session_name,
+            text=self.text,
+        )
+
+
+class IncompleteClientEvent(ClientEvent):
+    pass
+
+
+def test_route_client_event_delegates_to_the_client_event_contract() -> None:
+    routed = route_client_event(AGENT_ID, "session", CustomClientEvent(text="custom"))
+
+    assert routed == AgentTextDelta(
+        agent_id=AGENT_ID,
+        session_name="session",
+        text="custom",
+    )
+
+
+def test_client_events_must_implement_the_routing_contract() -> None:
+    with pytest.raises(TypeError, match="abstract"):
+        IncompleteClientEvent()
 
 
 def test_every_client_event_has_a_concrete_routed_event() -> None:

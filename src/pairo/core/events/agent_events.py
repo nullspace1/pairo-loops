@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal, TypeAlias
+from abc import ABC, abstractmethod
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -10,43 +11,139 @@ from pydantic import BaseModel, ConfigDict
 from ..agent.json_object import JsonObject
 
 
-class ClientTextDelta(BaseModel):
+class ClientEvent(BaseModel, ABC):
+    """A provider-neutral client notification that can be routed by a runner."""
+
+    @abstractmethod
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> RoutedAgentEvent:
+        """Create this event's runner-routed counterpart."""
+
+
+class ClientTextDelta(ClientEvent):
     kind: Literal["text_delta"] = "text_delta"
     text: str
 
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentTextDelta:
+        return AgentTextDelta(
+            agent_id=agent_id,
+            session_name=session_name,
+            text=self.text,
+        )
 
-class ClientPlanDelta(BaseModel):
+
+class ClientPlanDelta(ClientEvent):
     kind: Literal["plan_delta"] = "plan_delta"
     text: str
 
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentPlanDelta:
+        return AgentPlanDelta(
+            agent_id=agent_id,
+            session_name=session_name,
+            text=self.text,
+        )
 
-class ClientReasoningDelta(BaseModel):
+
+class ClientReasoningDelta(ClientEvent):
     kind: Literal["reasoning_delta"] = "reasoning_delta"
     text: str
 
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentReasoningDelta:
+        return AgentReasoningDelta(
+            agent_id=agent_id,
+            session_name=session_name,
+            text=self.text,
+        )
 
-class ClientActivityStarted(BaseModel):
+
+class ClientActivityStarted(ClientEvent):
     kind: Literal["activity_started"] = "activity_started"
     activity: JsonObject
 
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentActivityStarted:
+        return AgentActivityStarted(
+            agent_id=agent_id,
+            session_name=session_name,
+            activity=self.activity,
+        )
 
-class ClientActivityProgress(BaseModel):
+
+class ClientActivityProgress(ClientEvent):
     kind: Literal["activity_progress"] = "activity_progress"
     activity: JsonObject
 
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentActivityProgress:
+        return AgentActivityProgress(
+            agent_id=agent_id,
+            session_name=session_name,
+            activity=self.activity,
+        )
 
-class ClientActivityCompleted(BaseModel):
+
+class ClientActivityCompleted(ClientEvent):
     kind: Literal["activity_completed"] = "activity_completed"
     activity: JsonObject
 
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentActivityCompleted:
+        return AgentActivityCompleted(
+            agent_id=agent_id,
+            session_name=session_name,
+            activity=self.activity,
+        )
 
-class ClientResponseCompleted(BaseModel):
+
+class ClientResponseCompleted(ClientEvent):
     kind: Literal["response_completed"] = "response_completed"
     message: str
 
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentResponseCompleted:
+        return AgentResponseCompleted(
+            agent_id=agent_id,
+            session_name=session_name,
+            message=self.message,
+        )
 
-class ClientResponseInterrupted(BaseModel):
+
+class ClientResponseInterrupted(ClientEvent):
     kind: Literal["response_interrupted"] = "response_interrupted"
+
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentResponseInterrupted:
+        return AgentResponseInterrupted(agent_id=agent_id, session_name=session_name)
 
 
 class TokenUsage(BaseModel):
@@ -60,24 +157,24 @@ class TokenUsage(BaseModel):
     cache_write_input_tokens: int | None = None
 
 
-class ClientTokenUsageUpdated(BaseModel):
+class ClientTokenUsageUpdated(ClientEvent):
     kind: Literal["token_usage_updated"] = "token_usage_updated"
     last: TokenUsage
     total: TokenUsage
     model_context_window: int | None = None
 
-
-ClientEvent: TypeAlias = (
-    ClientTextDelta
-    | ClientPlanDelta
-    | ClientReasoningDelta
-    | ClientActivityStarted
-    | ClientActivityProgress
-    | ClientActivityCompleted
-    | ClientResponseCompleted
-    | ClientResponseInterrupted
-    | ClientTokenUsageUpdated
-)
+    def to_routed_event(
+        self,
+        agent_id: UUID,
+        session_name: str,
+    ) -> AgentTokenUsageUpdated:
+        return AgentTokenUsageUpdated(
+            agent_id=agent_id,
+            session_name=session_name,
+            last=self.last,
+            total=self.total,
+            model_context_window=self.model_context_window,
+        )
 
 
 class RoutedAgentEvent(BaseModel):
@@ -133,31 +230,7 @@ def route_client_event(
     event: ClientEvent,
 ) -> RoutedAgentEvent:
     """Attach runner routing to a provider-neutral client notification."""
-    route = {"agent_id": agent_id, "session_name": session_name}
-    if isinstance(event, ClientTextDelta):
-        return AgentTextDelta(**route, text=event.text)
-    if isinstance(event, ClientPlanDelta):
-        return AgentPlanDelta(**route, text=event.text)
-    if isinstance(event, ClientReasoningDelta):
-        return AgentReasoningDelta(**route, text=event.text)
-    if isinstance(event, ClientActivityStarted):
-        return AgentActivityStarted(**route, activity=event.activity)
-    if isinstance(event, ClientActivityProgress):
-        return AgentActivityProgress(**route, activity=event.activity)
-    if isinstance(event, ClientActivityCompleted):
-        return AgentActivityCompleted(**route, activity=event.activity)
-    if isinstance(event, ClientResponseCompleted):
-        return AgentResponseCompleted(**route, message=event.message)
-    if isinstance(event, ClientResponseInterrupted):
-        return AgentResponseInterrupted(**route)
-    if isinstance(event, ClientTokenUsageUpdated):
-        return AgentTokenUsageUpdated(
-            **route,
-            last=event.last,
-            total=event.total,
-            model_context_window=event.model_context_window,
-        )
-    raise TypeError(f"Unsupported client event: {type(event).__name__}")
+    return event.to_routed_event(agent_id, session_name)
 
 
 class SessionUpdated(BaseModel):
