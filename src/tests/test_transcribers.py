@@ -8,10 +8,12 @@ from pairo.core.events import (
     AgentActivityCompleted,
     AgentError,
     AgentTokenUsageUpdated,
+    MessageSent,
     TokenUsage,
 )
 from pairo.ui.transcribers import (
     ActivityCompletedTranscriber,
+    TranscriberRegistry,
     MessageSentTranscriber,
     TokenUsageUpdatedTranscriber,
     default_transcribers,
@@ -23,17 +25,44 @@ from pairo.ui.presentation import CompletedActivityPresenter
 AGENT_ID = uuid4()
 
 
-def test_default_transcribers_declare_concrete_event_and_transcript_types() -> None:
-    transcribers = default_transcribers()
-    event_types = {transcriber.event_type for transcriber in transcribers}
-    transcript_types = {transcriber.transcript_type for transcriber in transcribers}
+def test_default_transcribers_register_concrete_event_and_transcript_types() -> None:
+    registry = default_transcribers()
 
-    assert isinstance(transcribers, list)
-    assert AgentActivityCompleted in event_types
-    assert AgentTokenUsageUpdated in event_types
-    assert transcript_types == {
-        "activity", "error", "message", "network", "permission_request", "token_usage"
-    }
+    assert AgentActivityCompleted in registry.event_types
+    assert AgentTokenUsageUpdated in registry.event_types
+    for transcript_type in (
+        "activity",
+        "error",
+        "message",
+        "network",
+        "permission_request",
+        "token_usage",
+    ):
+        assert registry.transcript_transcriber_for(transcript_type) is not None
+
+
+def test_registry_routes_events_and_finds_transcript_renderers() -> None:
+    registry = TranscriberRegistry()
+    registry.register(MessageSentTranscriber())
+    event = MessageSent(
+        agent_id=AGENT_ID,
+        session_name="Conversation 1",
+        message="Hello",
+    )
+
+    routed = registry.event_transcriber_for(event).transcribe(event)
+
+    assert routed.entry.metadata == {"type": "message"}
+    assert registry.transcript_transcriber_for("message") is not None
+    assert registry.transcript_transcriber_for("missing") is None
+
+
+def test_registry_rejects_duplicate_event_registration() -> None:
+    registry = TranscriberRegistry()
+    registry.register(MessageSentTranscriber())
+
+    with pytest.raises(ValueError, match="Multiple transcribers registered for event MessageSent"):
+        registry.register(MessageSentTranscriber())
 
 
 def test_transcriber_rejects_an_event_other_than_its_declared_type() -> None:

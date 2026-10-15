@@ -7,11 +7,11 @@ from textual.widget import Widget
 from textual.widgets import Static
 from typing import TypeVar
 
-from ..models import TranscriptEntry, TranscriptMetadata
+from ..models import TranscriptEntry
 from .transcript_render_context import TranscriptRenderContext
 
 
-MetadataT = TypeVar("MetadataT", bound=TranscriptMetadata)
+MetadataT = TypeVar("MetadataT")
 
 
 _ROLE_STYLES = {

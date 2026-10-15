@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Generic, Literal, TypeAlias, TypedDict, TypeVar
+from typing import Generic, Literal, TypedDict, TypeVar
 from uuid import UUID, uuid4
 
 from pairo.core.agent import JsonObject
@@ -78,19 +78,7 @@ class HistoricalTranscriptMetadata(TypedDict):
     type: Literal["historical"]
 
 
-TranscriptMetadata: TypeAlias = (
-    MessageTranscriptMetadata
-    | ErrorTranscriptMetadata
-    | NetworkTranscriptMetadata
-    | ActivityTranscriptMetadata
-    | PermissionRequestTranscriptMetadata
-    | PermissionResponseTranscriptMetadata
-    | SystemTranscriptMetadata
-    | TokenUsageTranscriptMetadata
-    | HistoricalTranscriptMetadata
-)
-
-MetadataT = TypeVar("MetadataT", bound=TranscriptMetadata)
+MetadataT = TypeVar("MetadataT")
 
 
 @dataclass(frozen=True, slots=True)

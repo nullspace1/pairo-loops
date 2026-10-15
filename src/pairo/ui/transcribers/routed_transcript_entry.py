@@ -4,10 +4,10 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from ..models import TranscriptEntry, TranscriptMetadata
+from ..models import TranscriptEntry
 
 
-MetadataT = TypeVar("MetadataT", bound=TranscriptMetadata)
+MetadataT = TypeVar("MetadataT")
 
 
 @dataclass(frozen=True, slots=True)

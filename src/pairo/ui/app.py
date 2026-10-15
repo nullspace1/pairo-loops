@@ -34,9 +34,7 @@ from .transcript_events import (
     TranscriptEntryUpdated,
 )
 from .transcribers import (
-    EventTranscriberRegistry,
-    TranscriberList,
-    TranscriptTranscriberRegistry,
+    TranscriberRegistry,
     default_transcribers,
 )
 from .widgets import (
@@ -101,7 +99,7 @@ class AgentChatApp(App[None]):
         runner: Runner,
         session_repository: SessionRepository | None = None,
         *,
-        transcribers: TranscriberList | None = None,
+        transcribers: TranscriberRegistry | None = None,
         sidebar_statistics: SidebarStatistics | None = None,
     ) -> None:
         super().__init__()
@@ -115,10 +113,8 @@ class AgentChatApp(App[None]):
         configured_transcribers = (
             default_transcribers() if transcribers is None else transcribers
         )
-        self._event_transcribers, self._transcript_transcribers = (
-            self._build_transcriber_registries(configured_transcribers)
-        )
-        self._transcribed_event_types = tuple(self._event_transcribers)
+        self._transcribers = configured_transcribers
+        self._transcribed_event_types = self._transcribers.event_types
         self._token_usage_by_session: dict[
             tuple[UUID, str], AgentTokenUsageUpdated
         ] = {}
@@ -138,7 +134,7 @@ class AgentChatApp(App[None]):
                 runner,
                 self.session_repository,
                 self._event_pipeline,
-                self._transcript_transcribers,
+                self._transcribers,
                 self._detail_level,
                 sidebar_statistics=(
                     self._sidebar_statistics
@@ -228,8 +224,8 @@ class AgentChatApp(App[None]):
             and event.request_id in self._answered_request_ids
         ):
             return event
-        transcriber = self._event_transcribers[type(event)]
-        routed = transcriber.write(event)
+        transcriber = self._transcribers.event_transcriber_for(event)
+        routed = transcriber.transcribe(event)
         if routed.agent_id in self.chats:
             self._event_pipeline.enqueue(
                 TranscriptEntryAdded(
@@ -259,27 +255,6 @@ class AgentChatApp(App[None]):
         if pane.session_name is None:
             return None
         return self._token_usage_by_session.get((pane.agent_id, pane.session_name))
-
-    @staticmethod
-    def _build_transcriber_registries(
-        transcribers: TranscriberList,
-    ) -> tuple[EventTranscriberRegistry, TranscriptTranscriberRegistry]:
-        event_registry: EventTranscriberRegistry = {}
-        transcript_registry: TranscriptTranscriberRegistry = {}
-        for transcriber in transcribers:
-            if transcriber.event_type in event_registry:
-                raise ValueError(
-                    "Multiple transcribers registered for event "
-                    f"{transcriber.event_type.__name__}."
-                )
-            if transcriber.transcript_type in transcript_registry:
-                raise ValueError(
-                    "Multiple transcribers registered for transcript type "
-                    f"'{transcriber.transcript_type}'."
-                )
-            event_registry[transcriber.event_type] = transcriber
-            transcript_registry[transcriber.transcript_type] = transcriber
-        return event_registry, transcript_registry
 
     def _receive_session_created(self, event: SessionCreated) -> SessionCreated:
         if event.session_name in self._runner.session_names(event.agent_id):
@@ -487,7 +462,7 @@ async def run_ui(
     runner: Runner,
     session_repository: SessionRepository | None = None,
     *,
-    transcribers: TranscriberList | None = None,
+    transcribers: TranscriberRegistry | None = None,
     sidebar_statistics: SidebarStatistics | None = None,
 ) -> None:
     await AgentChatApp(

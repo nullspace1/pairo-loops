@@ -18,8 +18,7 @@ from pairo.core.agent import JsonObject
 from .models import (
     EventDetailLevel,
     SessionMetadata,
-    TranscriptEntry,
-    TranscriptMetadata,
+    TranscriptEntry
 )
 from .session_repository import SessionNotFoundError
 
@@ -393,7 +392,7 @@ class SqliteSessionRepository:
             role=row["role"],
             content=row["content"],
             detail_level=EventDetailLevel(row["detail_level"]),
-            metadata=cast(TranscriptMetadata, metadata),
+            metadata=metadata,
             entry_id=UUID(row["entry_id"]),
         )
 

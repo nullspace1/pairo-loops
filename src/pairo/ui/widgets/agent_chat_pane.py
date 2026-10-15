@@ -12,7 +12,7 @@ from pairo.core.agent import Agent, Runner
 from pairo.core.events import EventPipeline
 
 from ..models import EventDetailLevel, TranscriptEntry
-from ..transcribers import TranscriptTranscriberRegistry
+from ..transcribers import TranscriberRegistry
 from ..session_repository import SessionNotFoundError, SessionRepository
 from .agent_sidebar import AgentSidebar
 from .sidebar_statistics import SidebarStatistics
@@ -31,7 +31,7 @@ class AgentChatPane(Vertical):
         runner: Runner,
         repository: SessionRepository,
         event_pipeline: EventPipeline,
-        transcribers: TranscriptTranscriberRegistry,
+        transcribers: TranscriberRegistry,
         detail_level: EventDetailLevel,
         *,
         sidebar_statistics: SidebarStatistics | None = None,

@@ -31,6 +31,7 @@ from pairo.ui.transcribers import (
     PermissionRequestCard,
     RoutedTranscriptEntry,
     Transcriber,
+    TranscriberRegistry,
 )
 from pairo.ui.models import EventDetailLevel, TranscriptEntry
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
@@ -305,7 +306,7 @@ def test_active_token_usage_follows_the_selected_session() -> None:
             "Conversation 2",
             {"provider": "fake-2"},
         )
-        app = AgentChatApp(runner, repository, transcribers=[])
+        app = AgentChatApp(runner, repository, transcribers=TranscriberRegistry())
         usage = TokenUsage(
             input_tokens=45,
             cached_input_tokens=10,
@@ -359,11 +360,9 @@ def test_constructor_transcriber_collection_replaces_the_defaults() -> None:
             "Conversation 1",
             {"provider": "fake"},
         )
-        app = AgentChatApp(
-            runner,
-            repository,
-            transcribers=[CustomMessageTranscriber()],
-        )
+        registry = TranscriberRegistry()
+        registry.register(CustomMessageTranscriber())
+        app = AgentChatApp(runner, repository, transcribers=registry)
 
         async with app.run_test() as pilot:
             await pipeline.enqueue(
@@ -391,7 +390,7 @@ def test_constructor_transcriber_collection_replaces_the_defaults() -> None:
 
             entries = await repository.entries_for(agent.id, "Conversation 1")
             assert [entry.content for entry in entries] == ["custom: hello"]
-            assert set(app.chats[agent.id]._transcribers) == {"message"}
+            assert app.chats[agent.id]._transcribers.transcript_transcriber_for("message") is not None
             assert app.active_token_usage is token_event
 
         await repository.close()
@@ -405,15 +404,15 @@ def test_constructor_rejects_duplicate_transcriber_registrations() -> None:
         def __init__(self) -> None:
             Transcriber.__init__(self, AgentError, "message")
 
+    registry = TranscriberRegistry()
+    registry.register(MessageSentTranscriber())
     with pytest.raises(ValueError, match="event MessageSent"):
-        AgentChatApp._build_transcriber_registries(
-            [MessageSentTranscriber(), MessageSentTranscriber()]
-        )
+        registry.register(MessageSentTranscriber())
 
+    registry = TranscriberRegistry()
+    registry.register(MessageSentTranscriber())
     with pytest.raises(ValueError, match="transcript type 'message'"):
-        AgentChatApp._build_transcriber_registries(
-            [MessageSentTranscriber(), ConflictingTranscriptTranscriber()]
-        )
+        registry.register(ConflictingTranscriptTranscriber())
 
 
 def test_sidebar_statistics_reject_duplicate_keys() -> None:
@@ -469,7 +468,7 @@ def test_default_sidebar_statistics_render_session_usage_by_agent_and_session() 
             (second, "Conversation 1"),
         ):
             await repository.save_session(agent.id, session_name, {"provider": "fake"})
-        app = AgentChatApp(runner, repository, transcribers=[])
+        app = AgentChatApp(runner, repository, transcribers=TranscriberRegistry())
 
         def rendered_values(agent: Agent) -> dict[str, str]:
             group = app.chats[agent.id].sidebar.query_one(

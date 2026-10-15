@@ -11,7 +11,7 @@ from pairo.core.events import EventPipeline
 from ..models import EventDetailLevel, TranscriptEntry
 from ..transcribers import (
     TranscriptRenderContext,
-    TranscriptTranscriberRegistry,
+    TranscriberRegistry,
     render_text_transcript,
 )
 
@@ -22,7 +22,7 @@ class Transcript(VerticalScroll):
         agent_id: UUID,
         session_name: str | None,
         event_pipeline: EventPipeline,
-        transcribers: TranscriptTranscriberRegistry,
+        transcribers: TranscriberRegistry,
         detail_level: EventDetailLevel = EventDetailLevel.NORMAL,
         *,
         name: str | None = None,
@@ -108,7 +108,7 @@ class Transcript(VerticalScroll):
 
     async def _mount_entry(self, entry: TranscriptEntry, *, scroll_after_mount: bool) -> None:
         metadata_type = entry.metadata.get("type", "historical")
-        transcriber = self._transcribers.get(metadata_type)
+        transcriber = self._transcribers.transcript_transcriber_for(metadata_type)
         context = TranscriptRenderContext(
             agent_id=self._agent_id,
             session_name=self._session_name or "",
@@ -118,7 +118,7 @@ class Transcript(VerticalScroll):
         widget = (
             render_text_transcript(entry, context)
             if transcriber is None
-            else transcriber.render(entry, context)
+            else transcriber.render_transcript(entry, context)
         )
         await self.mount(widget)
         if scroll_after_mount:
