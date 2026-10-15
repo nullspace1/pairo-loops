@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from .models import TranscriptEntry
+from .models import TranscriptEntry, TranscriptMetadata
 
 
 class TranscriptEntryAdded(BaseModel):
@@ -12,7 +12,7 @@ class TranscriptEntryAdded(BaseModel):
 
     agent_id: UUID
     session_name: str
-    entry: TranscriptEntry
+    entry: TranscriptEntry[TranscriptMetadata]
 
 
 class TranscriptEntryUpdated(BaseModel):
@@ -20,7 +20,7 @@ class TranscriptEntryUpdated(BaseModel):
 
     agent_id: UUID
     session_name: str
-    entry: TranscriptEntry
+    entry: TranscriptEntry[TranscriptMetadata]
 
 
 class TranscriptEntryDeleted(BaseModel):

@@ -8,7 +8,7 @@ from textual.events import MouseScrollDown, MouseScrollUp
 
 from pairo.core.events import EventPipeline
 
-from ..models import EventDetailLevel, TranscriptEntry
+from ..models import EventDetailLevel, TranscriptEntry, TranscriptMetadata
 from ..transcribers import (
     TranscriptRenderContext,
     TranscriberRegistry,
@@ -42,7 +42,7 @@ class Transcript(VerticalScroll):
             can_focus_children=can_focus_children,
             can_maximize=can_maximize,
         )
-        self.entries: list[TranscriptEntry] = []
+        self.entries: list[TranscriptEntry[TranscriptMetadata]] = []
         self.detail_level = detail_level
         self._agent_id = agent_id
         self._session_name = session_name
@@ -52,16 +52,16 @@ class Transcript(VerticalScroll):
         self._render_generation = 0
 
     @property
-    def visible_entries(self) -> tuple[TranscriptEntry, ...]:
+    def visible_entries(self) -> tuple[TranscriptEntry[TranscriptMetadata], ...]:
         return tuple(entry for entry in self.entries if self._is_visible(entry))
 
-    async def add_entry(self, entry: TranscriptEntry) -> None:
+    async def add_entry(self, entry: TranscriptEntry[TranscriptMetadata]) -> None:
         self.entries.append(entry)
         self._live_entry_ids.add(entry.entry_id)
         if self._is_visible(entry):
             await self._mount_entry(entry, scroll_after_mount=True)
 
-    async def update_entry(self, entry: TranscriptEntry) -> None:
+    async def update_entry(self, entry: TranscriptEntry[TranscriptMetadata]) -> None:
         index = self._entry_index(entry.entry_id)
         previous = self.entries[index]
         self.entries[index] = entry
@@ -80,7 +80,7 @@ class Transcript(VerticalScroll):
         self._live_entry_ids.discard(entry_id)
         await self._render_all()
 
-    async def replace_entries(self, entries: Iterable[TranscriptEntry]) -> None:
+    async def replace_entries(self, entries: Iterable[TranscriptEntry[TranscriptMetadata]]) -> None:
         self.entries = list(entries)
         self._live_entry_ids.clear()
         await self._render_all()
@@ -106,7 +106,7 @@ class Transcript(VerticalScroll):
             await self._mount_entry(entry, scroll_after_mount=False)
         self._scroll_to_latest_after_layout()
 
-    async def _mount_entry(self, entry: TranscriptEntry, *, scroll_after_mount: bool) -> None:
+    async def _mount_entry(self, entry: TranscriptEntry[TranscriptMetadata], *, scroll_after_mount: bool) -> None:
         metadata_type = entry.metadata.get("type", "historical")
         transcriber = self._transcribers.transcript_transcriber_for(metadata_type)
         context = TranscriptRenderContext(
@@ -132,7 +132,7 @@ class Transcript(VerticalScroll):
             else None
         )
 
-    def _is_visible(self, entry: TranscriptEntry) -> bool:
+    def _is_visible(self, entry: TranscriptEntry[TranscriptMetadata]) -> bool:
         return (
             self.detail_level is EventDetailLevel.DEBUG
             or entry.detail_level is EventDetailLevel.NORMAL

@@ -47,7 +47,7 @@ def translate_permission_decision(
 
     requested = request.details.get("permissions")
     permissions = requested if isinstance(requested, dict) else {}
-    response: CodexJsonObject = {"permissions": cast(CodexJsonObject, permissions)}
+    response: CodexJsonObject = {"permissions": permissions}
     if decision is PermissionDecision.ACCEPT_FOR_SESSION:
         response["scope"] = "session"
     return response

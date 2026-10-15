@@ -48,7 +48,7 @@ class EventPipeline:
         if not process_existing_events:
             return None
         existing_events = tuple(
-            cast(EventT, event)
+            event
             for event in self.events
             if isinstance(event, event_type)
         )
@@ -140,6 +140,8 @@ class EventPipeline:
                 if processed is None:
                     return None
 
+        if processed is None:
+            return None
         self.events.append(processed)
         for registered_type, waiters in tuple(self._waiters.items()):
             if not isinstance(processed, registered_type):

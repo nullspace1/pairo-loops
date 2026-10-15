@@ -62,7 +62,7 @@ class TextualPermissionRequester(PermissionRequester):
                     request=request.details,
                 )
             )
-            return await response
+            return PermissionDecision(await response)
         finally:
             self._responses.pop(request_id, None)
 

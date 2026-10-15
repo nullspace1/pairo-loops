@@ -11,7 +11,7 @@ from textual.widgets import Input, Select
 from pairo.core.agent import Agent, Runner
 from pairo.core.events import EventPipeline
 
-from ..models import EventDetailLevel, TranscriptEntry
+from ..models import EventDetailLevel, TranscriptEntry, TranscriptMetadata
 from ..transcribers import TranscriberRegistry
 from ..session_repository import SessionNotFoundError, SessionRepository
 from .agent_sidebar import AgentSidebar
@@ -120,12 +120,12 @@ class AgentChatPane(Vertical):
     def sidebar(self) -> AgentSidebar:
         return self.query_one(AgentSidebar)
 
-    async def add_entry(self, session_name: str, entry: TranscriptEntry) -> None:
+    async def add_entry(self, session_name: str, entry: TranscriptEntry[TranscriptMetadata]) -> None:
         if session_name == self.session_name:
             await self.transcript.add_entry(entry)
         await self.sidebar.refresh_data()
 
-    async def update_entry(self, session_name: str, entry: TranscriptEntry) -> None:
+    async def update_entry(self, session_name: str, entry: TranscriptEntry[TranscriptMetadata]) -> None:
         if session_name == self.session_name:
             await self.transcript.update_entry(entry)
         await self.sidebar.refresh_data()

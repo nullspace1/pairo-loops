@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pairo.core.agent import JsonObject
 
-from .models import SessionMetadata, TranscriptEntry
+from .models import SessionMetadata, TranscriptEntry, TranscriptMetadata
 
 
 class SessionNotFoundError(LookupError):
@@ -18,11 +18,11 @@ class SessionRepository(Protocol):
     ) -> SessionMetadata: ...
 
     async def add_entry(
-        self, agent_id: UUID, session_name: str, entry: TranscriptEntry
+        self, agent_id: UUID, session_name: str, entry: TranscriptEntry[TranscriptMetadata]
     ) -> None: ...
 
     async def update_entry(
-        self, agent_id: UUID, session_name: str, entry: TranscriptEntry
+        self, agent_id: UUID, session_name: str, entry: TranscriptEntry[TranscriptMetadata]
     ) -> None: ...
 
     async def delete_entry(
@@ -31,7 +31,7 @@ class SessionRepository(Protocol):
 
     async def entries_for(
         self, agent_id: UUID, session_name: str
-    ) -> tuple[TranscriptEntry, ...]: ...
+    ) -> tuple[TranscriptEntry[TranscriptMetadata], ...]: ...
 
     async def get_session(
         self, agent_id: UUID, session_name: str

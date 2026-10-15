@@ -98,6 +98,7 @@ class FakeAgentClient:
             raise ValueError("The fake turn has no pending response.")
 
         completed = identifier.model_copy(update={"turn_id": None})
+        event: ClientResponseCompleted | ClientResponseInterrupted
         if turn_key in self._interrupted_turns:
             self._interrupted_turns.remove(turn_key)
             event = ClientResponseInterrupted()

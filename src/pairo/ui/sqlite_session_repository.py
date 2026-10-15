@@ -18,7 +18,8 @@ from pairo.core.agent import JsonObject
 from .models import (
     EventDetailLevel,
     SessionMetadata,
-    TranscriptEntry
+    TranscriptEntry,
+    TranscriptMetadata,
 )
 from .session_repository import SessionNotFoundError
 
@@ -79,7 +80,7 @@ class SqliteSessionRepository:
         self,
         agent_id: UUID,
         session_name: str,
-        entry: TranscriptEntry,
+        entry: TranscriptEntry[TranscriptMetadata],
     ) -> None:
         connection = await self._connect()
         await self._require_registered(agent_id, session_name)
@@ -116,7 +117,7 @@ class SqliteSessionRepository:
         self,
         agent_id: UUID,
         session_name: str,
-        entry: TranscriptEntry,
+        entry: TranscriptEntry[TranscriptMetadata],
     ) -> None:
         """Compatibility alias for callers migrating to ``add_entry``."""
         await self.add_entry(agent_id, session_name, entry)
@@ -125,7 +126,7 @@ class SqliteSessionRepository:
         self,
         agent_id: UUID,
         session_name: str,
-        entry: TranscriptEntry,
+        entry: TranscriptEntry[TranscriptMetadata],
     ) -> None:
         connection = await self._connect()
         await self._require_registered(agent_id, session_name)
@@ -187,7 +188,7 @@ class SqliteSessionRepository:
         self,
         agent_id: UUID,
         session_name: str,
-    ) -> tuple[TranscriptEntry, ...]:
+    ) -> tuple[TranscriptEntry[TranscriptMetadata], ...]:
         connection = await self._connect()
         await self._require_registered(agent_id, session_name)
         cursor = await connection.execute(
@@ -384,15 +385,15 @@ class SqliteSessionRepository:
         )
 
     @staticmethod
-    def _entry_from(row: sqlite3.Row) -> TranscriptEntry:
+    def _entry_from(row: sqlite3.Row) -> TranscriptEntry[TranscriptMetadata]:
         metadata = json.loads(row["metadata_json"])
         if not isinstance(metadata, dict) or not isinstance(metadata.get("type"), str):
             raise ValueError("Stored transcript metadata must contain a string type.")
-        return TranscriptEntry(
+        return TranscriptEntry[TranscriptMetadata](
             role=row["role"],
             content=row["content"],
             detail_level=EventDetailLevel(row["detail_level"]),
-            metadata=metadata,
+            metadata=cast(TranscriptMetadata, metadata),
             entry_id=UUID(row["entry_id"]),
         )
 

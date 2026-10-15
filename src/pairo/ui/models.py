@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Generic, Literal, TypedDict, TypeVar
+from typing import Generic, Literal, TypeAlias, TypedDict, TypeVar
 from uuid import UUID, uuid4
 
 from pairo.core.agent import JsonObject
@@ -78,7 +78,17 @@ class HistoricalTranscriptMetadata(TypedDict):
     type: Literal["historical"]
 
 
-MetadataT = TypeVar("MetadataT")
+
+
+TranscriptMetadata: TypeAlias = (
+    MessageTranscriptMetadata | ErrorTranscriptMetadata | NetworkTranscriptMetadata
+    | ActivityTranscriptMetadata | PermissionRequestTranscriptMetadata
+    | PermissionResponseTranscriptMetadata | SystemTranscriptMetadata
+    | TokenUsageTranscriptMetadata | HistoricalTranscriptMetadata
+)
+
+
+MetadataT = TypeVar("MetadataT", covariant=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,7 +97,6 @@ class TranscriptEntry(Generic[MetadataT]):
     content: str
     detail_level: EventDetailLevel
     metadata: MetadataT
-    # Identity is operational (update/delete routing), not presentation content.
     entry_id: UUID = field(default_factory=uuid4, compare=False)
 
 

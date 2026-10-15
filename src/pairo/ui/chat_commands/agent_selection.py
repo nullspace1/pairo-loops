@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+
+from pairo.core.agent import Agent
 from uuid import UUID
 
 from ..commands import CommandOutcome
@@ -34,9 +36,11 @@ class AgentSelectionCommand(SlashCommand):
                 raise ValueError(f"Multiple agents named '{argument}'.")
             selected = options[0]
         else:
-            selected = controller.agents.get(selected_id)
-            if selected is None:
+            selected_by_id = controller.agents.get(selected_id)
+            if selected_by_id is None:
                 raise ValueError(f"Unknown agent '{argument}'.")
+            selected = selected_by_id
+        assert selected is not None
         return CommandOutcome(
             TranscriptEntry[SystemTranscriptMetadata](
                 "system",

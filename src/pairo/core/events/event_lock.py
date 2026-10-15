@@ -18,7 +18,7 @@ class EventSubscription(Generic[EventT]):
     def cancel(self) -> None:
         self._future.cancel()
 
-    def __await__(self):
+    def __await__(self):  # type: ignore[no-untyped-def]
         return self.wait().__await__()
 
 
@@ -31,5 +31,5 @@ class EventReceipt(Generic[EventT]):
     async def wait(self) -> EventT | None:
         return await self._future
 
-    def __await__(self):
+    def __await__(self):  # type: ignore[no-untyped-def]
         return self.wait().__await__()

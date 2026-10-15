@@ -25,6 +25,7 @@ from .models import (
     EventDetailLevel,
     SystemTranscriptMetadata,
     TranscriptEntry,
+    TranscriptMetadata,
 )
 from .session_repository import SessionRepository
 from .sqlite_session_repository import SqliteSessionRepository
@@ -422,7 +423,7 @@ class AgentChatApp(App[None]):
     async def _append_to_current(
         self,
         pane: AgentChatPane,
-        entry: TranscriptEntry,
+        entry: TranscriptEntry[TranscriptMetadata],
     ) -> None:
         if pane.session_name is None:
             raise RuntimeError("The selected agent has no active session.")

@@ -5,6 +5,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
+from textual.widget import Widget
 from textual.widgets import Button, Select, Static
 
 from pairo.core.agent import Agent, Runner
@@ -132,7 +133,7 @@ class AgentSidebar(Vertical):
         self._session_snapshot = snapshot
         container = self.query_one(".session-list", Vertical)
         await container.remove_children()
-        rows = [
+        rows: list[Widget] = [
             Horizontal(
                 Button(
                     session.session_name,

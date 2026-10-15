@@ -9,13 +9,13 @@ from uuid import UUID
 from pairo.core.agent import Agent, Runner
 from pairo.core.events import EventPipeline, SessionDeleted, SessionUpdated
 
-from .models import EventDetailLevel, TranscriptEntry
+from .models import EventDetailLevel, TranscriptEntry, TranscriptMetadata
 from .session_repository import SessionRepository
 
 
 @dataclass(frozen=True, slots=True)
 class CommandOutcome:
-    entry: TranscriptEntry | None
+    entry: TranscriptEntry[TranscriptMetadata] | None
     session_name: str | None = None
     selected_agent: UUID | None = None
 
