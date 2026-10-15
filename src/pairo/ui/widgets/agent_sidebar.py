@@ -17,7 +17,6 @@ from .sidebar_statistics import (
     SidebarStatisticContext,
     SidebarStatistics,
     default_sidebar_statistics,
-    statistic_value,
 )
 
 
@@ -65,6 +64,7 @@ class AgentSidebar(Vertical):
         self._detail_level = detail_level
         self._event_pipeline = event_pipeline
         self._statistics = statistics or default_sidebar_statistics(agent)
+        self._statistics.setup(event_pipeline, runner.agents)
         self._session_snapshot: object | None = None
         self._information_mode = self._AGENT_INFORMATION
 
@@ -171,13 +171,14 @@ class AgentSidebar(Vertical):
         context = await self._statistic_context(
             include_session=self._information_mode == self._SESSION_INFORMATION
         )
-        fields_list: list[tuple[str, str, object]] = []
-        for statistic in statistics:
-            fields_list.append(
-                (statistic.key, statistic.label, await statistic_value(statistic, context))
-            )
-        fields = tuple(fields_list)
-        await self.query_one(".sidebar-information", SidebarFieldGroup).set_fields(fields)
+        fields_list = [
+            (statistic.key, statistic.label, await statistic.statistic(context))
+            for statistic in statistics
+        ]
+        fields_tuple = tuple(
+            (key, label, value) for key, label, value in fields_list if value is not None
+        )
+        await self.query_one(".sidebar-information", SidebarFieldGroup).set_fields(fields_tuple)
 
     async def _statistic_context(
         self, *, include_session: bool

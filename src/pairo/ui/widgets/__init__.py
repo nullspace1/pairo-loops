@@ -9,11 +9,15 @@ if TYPE_CHECKING:
     from .sidebar_field import SidebarField
     from .sidebar_field_group import SidebarFieldGroup
     from .sidebar_statistics import (
-        SidebarStatistic,
+        DefaultSidebarStatisticsFactory,
+        DurationFormatter,
+        FixedStatistic,
         SidebarStatisticContext,
         SidebarStatisticProvider,
         SidebarStatistics,
+        TimestampFormatter,
         TokenUsageStatistic,
+        default_sidebar_statistics,
     )
     from .transcript import Transcript
 
@@ -23,11 +27,15 @@ _MODULES = {
     "AgentSidebar": "agent_sidebar",
     "SidebarField": "sidebar_field",
     "SidebarFieldGroup": "sidebar_field_group",
-    "SidebarStatistic": "sidebar_statistics",
+    "DefaultSidebarStatisticsFactory": "sidebar_statistics",
+    "DurationFormatter": "sidebar_statistics",
+    "FixedStatistic": "sidebar_statistics",
     "SidebarStatisticContext": "sidebar_statistics",
     "SidebarStatisticProvider": "sidebar_statistics",
     "SidebarStatistics": "sidebar_statistics",
+    "TimestampFormatter": "sidebar_statistics",
     "TokenUsageStatistic": "sidebar_statistics",
+    "default_sidebar_statistics": "sidebar_statistics",
     "Transcript": "transcript",
 }
 
@@ -40,15 +48,20 @@ def __getattr__(name: str) -> Any:
     globals()[name] = value
     return value
 
+
 __all__ = [
     "AgentChatPane",
     "AgentSidebar",
     "SidebarField",
     "SidebarFieldGroup",
-    "SidebarStatistic",
+    "DefaultSidebarStatisticsFactory",
+    "DurationFormatter",
+    "FixedStatistic",
     "SidebarStatisticContext",
     "SidebarStatisticProvider",
     "SidebarStatistics",
+    "TimestampFormatter",
     "TokenUsageStatistic",
+    "default_sidebar_statistics",
     "Transcript",
 ]

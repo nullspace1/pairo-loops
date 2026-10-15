@@ -22,7 +22,7 @@ from pairo.core.events import (
 )
 from pairo.core.permissions import PermissionRequestType
 from pairo.ui.app import AgentChatApp
-from pairo.ui.widgets import SidebarStatistic, SidebarStatistics, TokenUsageStatistic
+from pairo.ui.widgets import FixedStatistic, SidebarStatistics, TokenUsageStatistic
 from pairo.ui.widgets.sidebar_field import SidebarField
 from pairo.ui.widgets.sidebar_field_group import SidebarFieldGroup
 from pairo.ui.transcribers import (
@@ -416,20 +416,26 @@ def test_constructor_rejects_duplicate_transcriber_registrations() -> None:
 
 
 def test_sidebar_statistics_reject_duplicate_keys() -> None:
-    statistic = SidebarStatistic("same", "One", lambda _context: "value")
+    async def value(_context) -> str:
+        return "value"
+
+    statistic = FixedStatistic("same", "One", value)
     with pytest.raises(ValueError, match="Duplicate sidebar statistic keys"):
         SidebarStatistics((statistic, statistic), ())
 
 
 def test_sidebar_statistics_are_configurable_and_token_usage_refreshes_in_place() -> None:
     async def scenario() -> None:
+        async def agent_name(context) -> str:
+            return context.agent.name
+
         pipeline = EventPipeline()
         repository = SqliteSessionRepository()
         agent = make_agent()
         runner = FakeRunner(agent, pipeline)
         await repository.save_session(agent.id, "Conversation 1", {"provider": "fake"})
         statistics = SidebarStatistics(
-            (SidebarStatistic("custom", "Custom", lambda context: context.agent.name),),
+            (FixedStatistic("custom", "Custom", agent_name),),
             (TokenUsageStatistic(),),
         )
         app = AgentChatApp(runner, repository, sidebar_statistics=statistics)

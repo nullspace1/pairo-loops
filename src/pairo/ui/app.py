@@ -115,11 +115,10 @@ class AgentChatApp(App[None]):
         )
         self._transcribers = configured_transcribers
         self._transcribed_event_types = self._transcribers.event_types
-        self._token_usage_by_session: dict[
-            tuple[UUID, str], AgentTokenUsageUpdated
-        ] = {}
         self._detail_level = EventDetailLevel.NORMAL
         self._sidebar_statistics = sidebar_statistics
+        if self._sidebar_statistics is not None:
+            self._sidebar_statistics.setup(self._event_pipeline, agents_by_id)
         self._controller = AgentCommandController(
             runner,
             self.session_repository,
@@ -138,7 +137,7 @@ class AgentChatApp(App[None]):
                 self._detail_level,
                 sidebar_statistics=(
                     self._sidebar_statistics
-                    or default_sidebar_statistics(agent, self._token_usage_for_session)
+                    or default_sidebar_statistics(agent)
                 ),
                 id=f"chat-content-{index}",
             )
@@ -158,13 +157,6 @@ class AgentChatApp(App[None]):
         self._event_pipeline.add_listener(TranscriptEntryAdded, self._persist_transcript_entry_added)
         self._event_pipeline.add_listener(TranscriptEntryUpdated, self._persist_transcript_entry_updated)
         self._event_pipeline.add_listener(TranscriptEntryDeleted, self._persist_transcript_entry_deleted)
-        token_usage_replay = self._event_pipeline.add_listener(
-            AgentTokenUsageUpdated,
-            self._track_token_usage,
-            process_existing_events=True,
-        )
-        if token_usage_replay is not None:
-            replay_tasks.append(token_usage_replay)
         for event_type in self._transcribed_event_types:
             replay = self._event_pipeline.add_listener(
                 event_type,
@@ -208,9 +200,6 @@ class AgentChatApp(App[None]):
         self._event_pipeline.remove_listener(
             TranscriptEntryDeleted, self._persist_transcript_entry_deleted
         )
-        self._event_pipeline.remove_listener(
-            AgentTokenUsageUpdated, self._track_token_usage
-        )
         for event_type in self._transcribed_event_types:
             self._event_pipeline.remove_listener(event_type, self._transcribe_event)
         self._event_pipeline.remove_listener(SessionCreated, self._receive_session_created)
@@ -236,25 +225,22 @@ class AgentChatApp(App[None]):
             )
         return event
 
-    def _track_token_usage(
-        self,
-        event: AgentTokenUsageUpdated,
-    ) -> AgentTokenUsageUpdated:
-        self._token_usage_by_session[(event.agent_id, event.session_name)] = event
-        return event
-
-    def _token_usage_for_session(
-        self, agent_id: UUID, session_name: str
-    ) -> AgentTokenUsageUpdated | None:
-        return self._token_usage_by_session.get((agent_id, session_name))
-
     @property
     def active_token_usage(self) -> AgentTokenUsageUpdated | None:
         """Latest usage for the agent and session currently shown in the UI."""
         pane = self._active_chat()
         if pane.session_name is None:
             return None
-        return self._token_usage_by_session.get((pane.agent_id, pane.session_name))
+        return next(
+            (
+                event
+                for event in reversed(self._event_pipeline.events)
+                if isinstance(event, AgentTokenUsageUpdated)
+                and event.agent_id == pane.agent_id
+                and event.session_name == pane.session_name
+            ),
+            None,
+        )
 
     def _receive_session_created(self, event: SessionCreated) -> SessionCreated:
         if event.session_name in self._runner.session_names(event.agent_id):
@@ -267,7 +253,6 @@ class AgentChatApp(App[None]):
             await pane.select_session(event.session_name)
 
     def _receive_session_deleted(self, event: SessionDeleted) -> SessionDeleted:
-        self._token_usage_by_session.pop((event.agent_id, event.session_name), None)
         self.call_later(self._apply_session_deleted, event)
         return event
 
@@ -471,4 +456,3 @@ async def run_ui(
         transcribers=transcribers,
         sidebar_statistics=sidebar_statistics,
     ).run_async()
-    
