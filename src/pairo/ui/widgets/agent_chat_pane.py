@@ -15,6 +15,7 @@ from ..models import EventDetailLevel, TranscriptEntry
 from ..transcribers import TranscriptTranscriberRegistry
 from ..session_repository import SessionNotFoundError, SessionRepository
 from .agent_sidebar import AgentSidebar
+from .sidebar_statistics import SidebarStatistics
 from .transcript import Transcript
 
 
@@ -33,6 +34,7 @@ class AgentChatPane(Vertical):
         transcribers: TranscriptTranscriberRegistry,
         detail_level: EventDetailLevel,
         *,
+        sidebar_statistics: SidebarStatistics | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -54,6 +56,7 @@ class AgentChatPane(Vertical):
         self._event_pipeline = event_pipeline
         self._transcribers = transcribers
         self._detail_level = detail_level
+        self._sidebar_statistics = sidebar_statistics
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="agent-workspace"):
@@ -82,6 +85,8 @@ class AgentChatPane(Vertical):
                 self._runner,
                 self._repository,
                 self._detail_level,
+                self._event_pipeline,
+                statistics=self._sidebar_statistics,
                 classes="agent-sidebar",
             )
 

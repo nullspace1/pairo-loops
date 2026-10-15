@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import replace
+from uuid import uuid4
 
 import pytest
 from textual.widgets import Button
@@ -15,11 +16,15 @@ from pairo.core.events import (
     PermissionRequest,
     PermissionResponse,
     SessionCreated,
+    SessionDeleted,
     SessionUpdated,
     TokenUsage,
 )
 from pairo.core.permissions import PermissionRequestType
 from pairo.ui.app import AgentChatApp
+from pairo.ui.widgets import SidebarStatistic, SidebarStatistics, TokenUsageStatistic
+from pairo.ui.widgets.sidebar_field import SidebarField
+from pairo.ui.widgets.sidebar_field_group import SidebarFieldGroup
 from pairo.ui.transcribers import (
     AgentErrorTranscriber,
     MessageSentTranscriber,
@@ -49,11 +54,15 @@ class CountingSessionRepository(SqliteSessionRepository):
 class FakeRunner:
     """Runner fake owns sessions and emits the same events as the shared runner."""
 
-    def __init__(self, agent: Agent, pipeline: EventPipeline) -> None:
-        self.agents = {agent.id: agent}
+    def __init__(self, agent: Agent | tuple[Agent, ...], pipeline: EventPipeline) -> None:
+        agents = (agent,) if isinstance(agent, Agent) else agent
+        self.agents = {configured.id: configured for configured in agents}
         self.pipeline = pipeline
-        self.sessions = {agent.id: {"Conversation 1": {"provider": "fake"}}}
-        self.current = {agent.id: "Conversation 1"}
+        self.sessions = {
+            configured.id: {"Conversation 1": {"provider": "fake"}}
+            for configured in agents
+        }
+        self.current = {configured.id: "Conversation 1" for configured in agents}
         self.sent_messages: list[tuple[str, str]] = []
 
     def session_name(self, agent_id) -> str | None:
@@ -177,6 +186,9 @@ def test_app_renders_submitted_text_from_the_message_event() -> None:
             chat = app.chats[agent.id]
             chat.input.value = "Review this"
             await pilot.press("enter")
+            # Message transcription enqueues a durable follow-up event. Wait
+            # for that queued work rather than relying on a single UI tick.
+            await pipeline.join()
             await pilot.pause()
 
             assert runner.sent_messages == [("Review this", "user")]
@@ -192,6 +204,7 @@ def test_app_renders_submitted_text_from_the_message_event() -> None:
                     source="planner",
                 )
             )
+            await pipeline.join()
             await pilot.pause()
             assert chat.transcript.entries[-1] == TranscriptEntry(
                 "planner",
@@ -401,6 +414,142 @@ def test_constructor_rejects_duplicate_transcriber_registrations() -> None:
         AgentChatApp._build_transcriber_registries(
             [MessageSentTranscriber(), ConflictingTranscriptTranscriber()]
         )
+
+
+def test_sidebar_statistics_reject_duplicate_keys() -> None:
+    statistic = SidebarStatistic("same", "One", lambda _context: "value")
+    with pytest.raises(ValueError, match="Duplicate sidebar statistic keys"):
+        SidebarStatistics((statistic, statistic), ())
+
+
+def test_sidebar_statistics_are_configurable_and_token_usage_refreshes_in_place() -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent()
+        runner = FakeRunner(agent, pipeline)
+        await repository.save_session(agent.id, "Conversation 1", {"provider": "fake"})
+        statistics = SidebarStatistics(
+            (SidebarStatistic("custom", "Custom", lambda context: context.agent.name),),
+            (TokenUsageStatistic(),),
+        )
+        app = AgentChatApp(runner, repository, sidebar_statistics=statistics)
+
+        async with app.run_test() as pilot:
+            sidebar = app.chats[agent.id].sidebar
+            group = sidebar.query_one(".sidebar-information", SidebarFieldGroup)
+            assert [field._label for field in group.children if isinstance(field, SidebarField)] == ["Custom"]
+
+            sidebar._information_mode = "session"
+            await sidebar.refresh_data()
+            field = next(field for field in group.children if isinstance(field, SidebarField))
+            assert field._value == "Unavailable"
+
+            await sidebar.refresh_data()
+            assert next(child for child in group.children if isinstance(child, SidebarField)) is field
+            assert field._value == "Unavailable"
+
+        await repository.close()
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_default_sidebar_statistics_render_session_usage_by_agent_and_session() -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        first = make_agent()
+        second = first.model_copy(update={"id": uuid4(), "name": "writer"})
+        runner = FakeRunner((first, second), pipeline)
+        runner.sessions[first.id]["Conversation 2"] = {"provider": "fake-2"}
+        for agent, session_name in (
+            (first, "Conversation 1"),
+            (first, "Conversation 2"),
+            (second, "Conversation 1"),
+        ):
+            await repository.save_session(agent.id, session_name, {"provider": "fake"})
+        app = AgentChatApp(runner, repository, transcribers=[])
+
+        def rendered_values(agent: Agent) -> dict[str, str]:
+            group = app.chats[agent.id].sidebar.query_one(
+                ".sidebar-information", SidebarFieldGroup
+            )
+            return {
+                field._label: field._value
+                for field in group.children
+                if isinstance(field, SidebarField)
+            }
+
+        async with app.run_test() as pilot:
+            # The agent category retains every legacy default field.
+            assert list(rendered_values(first)) == [
+                "Name", "ID", "State", "Model", "Reasoning", "Sandbox",
+                "Workspace", "Approval mode", "Web search", "Prompt",
+                "Developer instructions", "MCP servers",
+            ]
+            for agent in (first, second):
+                sidebar = app.chats[agent.id].sidebar
+                sidebar._information_mode = "session"
+                await sidebar.refresh_data()
+            assert list(rendered_values(first)) == [
+                "Name", "Created", "Last message", "Last update", "Duration", "Token usage",
+            ]
+            assert rendered_values(first)["Token usage"] == "Unavailable"
+
+            def usage(total: int) -> TokenUsage:
+                return TokenUsage(
+                    input_tokens=total,
+                    cached_input_tokens=0,
+                    output_tokens=0,
+                    reasoning_output_tokens=0,
+                    total_tokens=total,
+                )
+
+            await pipeline.enqueue(AgentTokenUsageUpdated(
+                agent_id=first.id, session_name="Conversation 1", last=usage(11), total=usage(11)
+            ))
+            await pipeline.enqueue(AgentTokenUsageUpdated(
+                agent_id=second.id, session_name="Conversation 1", last=usage(22), total=usage(22)
+            ))
+            await pilot.pause()
+            await app.chats[first.id].sidebar.refresh_data()
+            await app.chats[second.id].sidebar.refresh_data()
+            assert rendered_values(first)["Token usage"] == "11 tokens"
+            assert rendered_values(second)["Token usage"] == "22 tokens"
+
+            runner.current[first.id] = "Conversation 2"
+            await app.chats[first.id].sidebar.refresh_data()
+            assert rendered_values(first)["Token usage"] == "Unavailable"
+            await pipeline.enqueue(AgentTokenUsageUpdated(
+                agent_id=first.id, session_name="Conversation 2", last=usage(33), total=usage(33)
+            ))
+            await app.chats[first.id].sidebar.refresh_data()
+            assert rendered_values(first)["Token usage"] == "33 tokens"
+
+            # Deletion changes the selected session and cannot leak the
+            # deleted session's retained token event into the new selection.
+            runner.current[first.id] = "Conversation 1"
+            await pipeline.enqueue(SessionDeleted(
+                agent_id=first.id,
+                session_name="Conversation 2",
+                selected_session_name="Conversation 1",
+            ))
+            await pilot.pause()
+            await app.chats[first.id].sidebar.refresh_data()
+            assert rendered_values(first)["Token usage"] == "11 tokens"
+
+            # Reusing the deleted name has no usage until another event is
+            # received. The regular 250ms sidebar timer performs this refresh.
+            runner.sessions[first.id]["Conversation 2"] = {"provider": "replacement"}
+            runner.current[first.id] = "Conversation 2"
+            await pilot.pause(0.3)
+            assert rendered_values(first)["Token usage"] == "Unavailable"
+
+        await repository.close()
+        await pipeline.close()
+
+    asyncio.run(scenario())
 
 
 def test_each_transcript_mutation_has_an_independent_pipeline_path() -> None:

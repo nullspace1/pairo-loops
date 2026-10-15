@@ -1,6 +1,4 @@
 """Agent information and session-selection sidebar."""
-
-from datetime import datetime
 from uuid import UUID
 
 from textual import on
@@ -10,10 +8,17 @@ from textual.message import Message
 from textual.widgets import Button, Select, Static
 
 from pairo.core.agent import Agent, Runner
+from pairo.core.events import EventPipeline
 
 from ..models import EventDetailLevel
 from ..session_repository import SessionNotFoundError, SessionRepository
 from .sidebar_field_group import SidebarFieldGroup
+from .sidebar_statistics import (
+    SidebarStatisticContext,
+    SidebarStatistics,
+    default_sidebar_statistics,
+    statistic_value,
+)
 
 
 class AgentSidebar(Vertical):
@@ -38,7 +43,9 @@ class AgentSidebar(Vertical):
         runner: Runner,
         repository: SessionRepository,
         detail_level: EventDetailLevel,
+        event_pipeline: EventPipeline,
         *,
+        statistics: SidebarStatistics | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -56,6 +63,8 @@ class AgentSidebar(Vertical):
         self._runner = runner
         self._repository = repository
         self._detail_level = detail_level
+        self._event_pipeline = event_pipeline
+        self._statistics = statistics or default_sidebar_statistics(agent)
         self._session_snapshot: object | None = None
         self._information_mode = self._AGENT_INFORMATION
 
@@ -154,74 +163,42 @@ class AgentSidebar(Vertical):
         )
 
     async def _refresh_information_fields(self) -> None:
-        fields = (
-            self._agent_fields()
+        statistics = (
+            self._statistics.agent_information
             if self._information_mode == self._AGENT_INFORMATION
-            else await self._current_session_fields()
+            else self._statistics.current_session
         )
+        context = await self._statistic_context(
+            include_session=self._information_mode == self._SESSION_INFORMATION
+        )
+        fields_list: list[tuple[str, str, object]] = []
+        for statistic in statistics:
+            fields_list.append(
+                (statistic.key, statistic.label, await statistic_value(statistic, context))
+            )
+        fields = tuple(fields_list)
         await self.query_one(".sidebar-information", SidebarFieldGroup).set_fields(fields)
 
-    def _agent_fields(self) -> tuple[tuple[str, object], ...]:
-        config = self.agent
-        values = (
-            ("Name", self.agent.name),
-            ("ID", self.agent.id),
-            (
-                "State",
-                getattr(
-                    self._runner.state(self.agent.id),
-                    "value",
-                    self._runner.state(self.agent.id),
-                ),
-            ),
-            ("Model", config.model),
-            ("Reasoning", self._enum_value(config.reasoning_effort)),
-            ("Sandbox", self._enum_value(config.sandbox)),
-            ("Workspace", config.workspace),
-            ("Approval mode", self._enum_value(config.approval_mode)),
-            ("Web search", self._enum_value(config.web_search)),
-            ("Prompt", config.base_instructions or "Not set"),
-            ("Developer instructions", config.developer_instructions or "Not set"),
-        )
-        servers = self.agent.mcp_servers
-        return values + (
-            tuple((f"MCP server: {server.name}", server.description) for server in servers)
-            if servers
-            else (("MCP servers", "None configured"),)
-        )
-
-    async def _current_session_fields(self) -> tuple[tuple[str, object], ...]:
+    async def _statistic_context(
+        self, *, include_session: bool
+    ) -> SidebarStatisticContext:
         session_name = self._runner.session_name(self.agent.id)
-        if session_name is None:
-            return (("Session", "No session selected."),)
+        if session_name is None or not include_session:
+            return SidebarStatisticContext(
+                self.agent,
+                self._runner,
+                self._event_pipeline,
+                None,
+                None,
+            )
         try:
             session = await self._repository.get_session(self.agent.id, session_name)
         except SessionNotFoundError:
-            return (("Name", session_name),)
-        return (
-            ("Name", session.session_name),
-            ("Created", self._format_time(session.created_at)),
-            ("Last message", self._format_time(session.last_message_at)),
-            ("Last update", self._format_time(session.last_updated_at)),
-            ("Duration", self._format_duration(session.duration_seconds)),
+            session = None
+        return SidebarStatisticContext(
+            self.agent,
+            self._runner,
+            self._event_pipeline,
+            session_name,
+            session,
         )
-
-    @staticmethod
-    def _enum_value(value: object | None) -> str:
-        return "Default" if value is None else str(getattr(value, "value", value))
-
-    @staticmethod
-    def _format_time(value: datetime | None) -> str:
-        if value is None:
-            return "None"
-        local = value.astimezone()
-        offset = local.strftime("%z")
-        readable_offset = f"{offset[:3]}:{offset[3:]}" if offset else ""
-        return f"{local:%Y-%m-%d %H:%M:%S} {readable_offset}".rstrip()
-
-    @staticmethod
-    def _format_duration(seconds: float) -> str:
-        whole_seconds = max(0, int(seconds))
-        hours, remainder = divmod(whole_seconds, 3600)
-        minutes, remaining_seconds = divmod(remainder, 60)
-        return f"{hours:02d}:{minutes:02d}:{remaining_seconds:02d}"

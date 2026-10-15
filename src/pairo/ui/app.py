@@ -43,6 +43,7 @@ from .widgets import (
     AgentChatPane,
     AgentSidebar,
 )
+from .widgets.sidebar_statistics import SidebarStatistics, default_sidebar_statistics
 
 
 class AgentChatApp(App[None]):
@@ -101,6 +102,7 @@ class AgentChatApp(App[None]):
         session_repository: SessionRepository | None = None,
         *,
         transcribers: TranscriberList | None = None,
+        sidebar_statistics: SidebarStatistics | None = None,
     ) -> None:
         super().__init__()
         agents_by_id = dict(runner.agents)
@@ -121,6 +123,7 @@ class AgentChatApp(App[None]):
             tuple[UUID, str], AgentTokenUsageUpdated
         ] = {}
         self._detail_level = EventDetailLevel.NORMAL
+        self._sidebar_statistics = sidebar_statistics
         self._controller = AgentCommandController(
             runner,
             self.session_repository,
@@ -137,6 +140,10 @@ class AgentChatApp(App[None]):
                 self._event_pipeline,
                 self._transcript_transcribers,
                 self._detail_level,
+                sidebar_statistics=(
+                    self._sidebar_statistics
+                    or default_sidebar_statistics(agent, self._token_usage_for_session)
+                ),
                 id=f"chat-content-{index}",
             )
             for index, agent in enumerate(agents_by_id.values())
@@ -239,6 +246,11 @@ class AgentChatApp(App[None]):
     ) -> AgentTokenUsageUpdated:
         self._token_usage_by_session[(event.agent_id, event.session_name)] = event
         return event
+
+    def _token_usage_for_session(
+        self, agent_id: UUID, session_name: str
+    ) -> AgentTokenUsageUpdated | None:
+        return self._token_usage_by_session.get((agent_id, session_name))
 
     @property
     def active_token_usage(self) -> AgentTokenUsageUpdated | None:
@@ -476,10 +488,12 @@ async def run_ui(
     session_repository: SessionRepository | None = None,
     *,
     transcribers: TranscriberList | None = None,
+    sidebar_statistics: SidebarStatistics | None = None,
 ) -> None:
     await AgentChatApp(
         runner,
         session_repository,
         transcribers=transcribers,
+        sidebar_statistics=sidebar_statistics,
     ).run_async()
     

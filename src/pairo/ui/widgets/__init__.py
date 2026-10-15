@@ -8,6 +8,13 @@ if TYPE_CHECKING:
     from .agent_sidebar import AgentSidebar
     from .sidebar_field import SidebarField
     from .sidebar_field_group import SidebarFieldGroup
+    from .sidebar_statistics import (
+        SidebarStatistic,
+        SidebarStatisticContext,
+        SidebarStatisticProvider,
+        SidebarStatistics,
+        TokenUsageStatistic,
+    )
     from .transcript import Transcript
 
 
@@ -16,6 +23,11 @@ _MODULES = {
     "AgentSidebar": "agent_sidebar",
     "SidebarField": "sidebar_field",
     "SidebarFieldGroup": "sidebar_field_group",
+    "SidebarStatistic": "sidebar_statistics",
+    "SidebarStatisticContext": "sidebar_statistics",
+    "SidebarStatisticProvider": "sidebar_statistics",
+    "SidebarStatistics": "sidebar_statistics",
+    "TokenUsageStatistic": "sidebar_statistics",
     "Transcript": "transcript",
 }
 
@@ -33,5 +45,10 @@ __all__ = [
     "AgentSidebar",
     "SidebarField",
     "SidebarFieldGroup",
+    "SidebarStatistic",
+    "SidebarStatisticContext",
+    "SidebarStatisticProvider",
+    "SidebarStatistics",
+    "TokenUsageStatistic",
     "Transcript",
 ]
