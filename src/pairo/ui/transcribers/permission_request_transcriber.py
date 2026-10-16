@@ -265,3 +265,4 @@ class PermissionRequestTranscriber(
             "acceptForSession": "Approved for session",
             "decline": "Denied",
         }.get(decision, decision)
+

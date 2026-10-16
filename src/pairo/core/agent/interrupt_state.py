@@ -8,3 +8,4 @@ class InterruptState(str, Enum):
     PENDING = "pending"
     SENT = "sent"
 
+

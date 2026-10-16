@@ -27,3 +27,4 @@ class HelpCommand(SlashCommand):
                 "system", controller.HELP, EventDetailLevel.NORMAL, {"type": "system"}
             )
         )
+

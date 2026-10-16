@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import re
-from contextlib import suppress
 from typing import Literal, Sequence
 from uuid import UUID, uuid4
 
@@ -59,9 +58,9 @@ class _Task:
 @dataclass(slots=True)
 class _Assignment:
     task_name: str
+    completion: asyncio.Future[str]
     status: PairStatus = "working"
     review_result: asyncio.Future[str | None] | None = None
-    verifier_session: str | None = None
 
 
 class _FeatureStore:
@@ -115,6 +114,30 @@ class _FeatureStore:
         self._write("".join(lines))
         return updated
 
+    def replace(self, task: _Task) -> None:
+        """Replace one existing task line while preserving unrelated content."""
+        self._replace_line(task.name, task.line())
+
+    def delete(self, task_name: str) -> None:
+        """Remove one existing task line while preserving unrelated content."""
+        self._replace_line(task_name, None)
+
+    def _replace_line(self, task_name: str, replacement: str | None) -> None:
+        if not self.path.exists():
+            raise KeyError(f"Task '{task_name}' does not exist.")
+        lines = self.path.read_text(encoding="utf-8").splitlines(keepends=True)
+        for index, original in enumerate(lines):
+            match = _TASK_PATTERN.fullmatch(original.rstrip("\r\n"))
+            if match and match.group("name") == task_name:
+                if replacement is None:
+                    del lines[index]
+                else:
+                    ending = "\n" if original.endswith("\n") else ""
+                    lines[index] = replacement + ending
+                self._write("".join(lines))
+                return
+        raise KeyError(f"Task '{task_name}' does not exist.")
+
     def _write(self, content: str) -> None:
         self.path.parent.mkdir(parents=False, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
@@ -153,7 +176,6 @@ class SpecManager(MCPHttpWrapper):
         self._store = _FeatureStore(root)
         self._verification_timeout = verification_timeout
         self._lock = asyncio.Lock()
-        self._cleanup_tasks: set[asyncio.Task[None]] = set()
         super().__init__(port=port)
 
     @staticmethod
@@ -201,6 +223,49 @@ class SpecManager(MCPHttpWrapper):
             except (ValueError, OSError) as error_value:
                 return f"Could not create task: {error_value}"
 
+        @mcp.tool("modify_task", "Update a pending task's description and acceptance criteria.")
+        async def modify_task(
+            task_name: str, description: str, acceptance_criteria: str, ctx: Context
+        ) -> str:
+            error = self._require_role(ctx, "director")
+            if error:
+                return error
+            try:
+                updated_task = _Task(
+                    self._field("name", task_name, forbid_colon=True),
+                    self._field("description", description),
+                    self._field("acceptance criteria", acceptance_criteria),
+                    "pending",
+                )
+                async with self._lock:
+                    existing_task = self._store.tasks().get(updated_task.name)
+                    if existing_task is None:
+                        return f"Task '{updated_task.name}' does not exist."
+                    if existing_task.status != "pending":
+                        return f"Task '{updated_task.name}' is {existing_task.status}, not pending."
+                    self._store.replace(updated_task)
+                return f"Modified task '{updated_task.name}'."
+            except (ValueError, OSError) as error_value:
+                return f"Could not modify task: {error_value}"
+
+        @mcp.tool("delete_task", "Delete a pending task from FEATURES.md.")
+        async def delete_task(task_name: str, ctx: Context) -> str:
+            error = self._require_role(ctx, "director")
+            if error:
+                return error
+            try:
+                normalized_name = self._field("name", task_name, forbid_colon=True)
+                async with self._lock:
+                    task = self._store.tasks().get(normalized_name)
+                    if task is None:
+                        return f"Task '{normalized_name}' does not exist."
+                    if task.status != "pending":
+                        return f"Task '{normalized_name}' is {task.status}, not pending."
+                    self._store.delete(normalized_name)
+                return f"Deleted task '{normalized_name}'."
+            except (ValueError, OSError) as error_value:
+                return f"Could not delete task: {error_value}"
+
         @mcp.tool("list_workers", "List worker/verifier pairs and their status.")
         async def list_workers(ctx: Context) -> list[dict[str, object]] | str:
             error = self._require_role(ctx, "director")
@@ -215,6 +280,13 @@ class SpecManager(MCPHttpWrapper):
             if error:
                 return error
             return await self._assign(pair_id, task_name)
+
+        @mcp.tool("sleep_on_task", "Wait until an assigned task is accepted.")
+        async def sleep_on_task(task_name: str, ctx: Context) -> str:
+            error = self._require_role(ctx, "director")
+            if error:
+                return error
+            return await self._sleep_on_task(task_name)
 
         @mcp.tool("verify_task", "Submit the calling worker's task for verification.")
         async def verify_task(ctx: Context) -> str:
@@ -256,19 +328,46 @@ class SpecManager(MCPHttpWrapper):
                 return f"Task '{task_name}' does not exist."
             if task.status != "pending":
                 return f"Task '{task_name}' is {task.status}, not pending."
-            session = self._session_name("work", pair_id, task.name)
+            worker_session = self._session_name("work", pair_id, task.name)
+            verifier_session = self._session_name("verify", pair_id, task.name)
             try:
-                await self._runner.create_session(pair.worker.id, session)
+                await self._runner.create_session(pair.worker.id, worker_session)
+                await self._runner.create_session(pair.verifier.id, verifier_session)
                 await self._runner.send_message(
                     pair.worker.id, self._worker_message(task), source=self._director.name
                 )
                 self._store.set_status(task.name, "working")
             except Exception as error:
-                if session in self._runner.session_names(pair.worker.id):
-                    await self._safe_delete(pair.worker.id, session)
+                if worker_session in self._runner.session_names(pair.worker.id):
+                    await self._safe_delete(pair.worker.id, worker_session)
+                if verifier_session in self._runner.session_names(pair.verifier.id):
+                    await self._safe_delete(pair.verifier.id, verifier_session)
                 return f"Could not assign task '{task.name}': {error}"
-            self._assignments[pair_id] = _Assignment(task.name)
+            self._assignments[pair_id] = _Assignment(
+                task.name,
+                asyncio.get_running_loop().create_future(),
+            )
             return f"Assigned task '{task.name}' to pair '{pair_id}'."
+
+    async def _sleep_on_task(self, task_name: str) -> str:
+        async with self._lock:
+            task = self._store.tasks().get(task_name)
+            if task is None:
+                return f"Task '{task_name}' does not exist."
+            if task.status == "accepted":
+                return f"Task '{task_name}' is already accepted."
+            assignment = next(
+                (
+                    candidate
+                    for candidate in self._assignments.values()
+                    if candidate.task_name == task_name
+                ),
+                None,
+            )
+            if assignment is None:
+                return f"Task '{task_name}' is not assigned."
+            completion = assignment.completion
+        return await asyncio.shield(completion)
 
     async def _start_verification(self, pair: WorkerVerifierPair) -> str:
         async with self._lock:
@@ -276,21 +375,16 @@ class SpecManager(MCPHttpWrapper):
             if assignment is None or assignment.status != "working":
                 return f"Pair '{pair.pair_id}' has no working task to verify."
             task = self._store.tasks()[assignment.task_name]
-            session = self._session_name("verify", pair.pair_id, task.name)
             future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
             try:
-                await self._runner.create_session(pair.verifier.id, session)
                 await self._runner.send_message(
                     pair.verifier.id, self._verifier_message(task), source=pair.worker.name
                 )
                 self._store.set_status(task.name, "verifying")
             except Exception as error:
-                if session in self._runner.session_names(pair.verifier.id):
-                    await self._safe_delete(pair.verifier.id, session)
                 return f"Could not start verification: {error}"
             assignment.status = "verifying"
             assignment.review_result = future
-            assignment.verifier_session = session
         try:
             result = await asyncio.wait_for(
                 asyncio.shield(future), timeout=self._verification_timeout
@@ -310,7 +404,6 @@ class SpecManager(MCPHttpWrapper):
             if assignment is None or assignment.status != "verifying":
                 return f"Pair '{pair.pair_id}' has no active verification."
             future = assignment.review_result
-            session = assignment.verifier_session
             task_name = assignment.task_name
             try:
                 self._store.set_status(task_name, "accepted" if accepted else "working")
@@ -324,43 +417,22 @@ class SpecManager(MCPHttpWrapper):
                 return f"Could not record verification decision: {error}"
             if accepted:
                 del self._assignments[pair.pair_id]
+                if not assignment.completion.done():
+                    assignment.completion.set_result(f"Accepted task '{task_name}'.")
             else:
                 assignment.status = "working"
                 assignment.review_result = None
-                assignment.verifier_session = None
             if future is not None and not future.done():
                 future.set_result(None if accepted else feedback)
 
         outcome = f"Accepted task '{task_name}'." if accepted else f"Rejected task '{task_name}'."
-        if session is not None:
-            # MCP decisions normally occur inside the verifier's active turn.
-            # Deleting that selected session must wait until the turn completes.
-            if self._runner.is_generating(pair.verifier.id):
-                cleanup = asyncio.create_task(
-                    self._delete_after_verifier_turn(pair.verifier.id, session),
-                    name=f"spec-manager-cleanup-{pair.pair_id}",
-                )
-                self._cleanup_tasks.add(cleanup)
-                cleanup.add_done_callback(self._cleanup_tasks.discard)
-            else:
-                try:
-                    await self._runner.delete_session(pair.verifier.id, session)
-                except Exception as error:
-                    return f"{outcome} Verifier session cleanup failed: {error}"
         return outcome
-
-    async def _delete_after_verifier_turn(self, verifier_id: UUID, session: str) -> None:
-        with suppress(Exception):
-            await self._runner.wait_for_message(verifier_id)
-            await self._runner.delete_session(verifier_id, session)
 
     async def close(self) -> None:
         await super().close()
-        tasks = tuple(self._cleanup_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        for assignment in self._assignments.values():
+            if not assignment.completion.done():
+                assignment.completion.cancel()
 
     async def _safe_delete(self, agent_id: UUID, session: str) -> None:
         try:
@@ -424,7 +496,7 @@ class SpecManager(MCPHttpWrapper):
 
 
 _ROLE_INSTRUCTIONS = {
-    "director": "Use the spec_manager tools to create, list, and assign feature tasks.",
+    "director": "Use the spec_manager tools to create, modify, delete, and assign feature tasks; only change or delete pending tasks, and wait on assigned tasks when needed.",
     "worker": "Implement your assigned task, then call spec_manager.verify_task and respond to rejections.",
     "verifier": "Review the active task and call spec_manager.accept_task or reject_task exactly once.",
 }
@@ -466,3 +538,4 @@ def install_spec_manager(
 
 
 __all__ = ["SpecManager", "WorkerVerifierPair", "install_spec_manager"]
+

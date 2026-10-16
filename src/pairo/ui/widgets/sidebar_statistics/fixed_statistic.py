@@ -29,3 +29,4 @@ class FixedStatistic:
 
     async def statistic(self, context: SidebarStatisticContext) -> object:
         return await self.value(context)
+

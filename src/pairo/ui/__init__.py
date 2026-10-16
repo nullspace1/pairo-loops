@@ -11,3 +11,4 @@ __all__ = [
     "SessionNotFoundError", "SessionRepository", "SqliteSessionRepository",
     "TextualPermissionRequester", "TranscriptEntry", "run_ui",
 ]
+

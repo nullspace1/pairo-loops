@@ -9,12 +9,19 @@ dependencies = [
     "mcp",
     "openai-codex",
     "textual>=8.2.8,<9",
-    "pytest"
+    "pytest",
+    "mypy>=1.13,<2"
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.mypy]
+files = ["pairo/ui/transcribers", "pairo/ui/app.py", "pairo/ui/widgets/agent_chat_pane.py", "pairo/ui/widgets/transcript.py"]
+follow_imports = "silent"
+check_untyped_defs = true
+warn_unused_ignores = true
 
 [tool.setuptools.packages.find]
 include = ["pairo*"]

@@ -49,9 +49,6 @@ def test_permission_writer_persists_structured_pending_state() -> None:
 
 
 def test_default_transcribers_include_permission_request_rendering() -> None:
-    registry = {
-        transcriber.transcript_type: transcriber
-        for transcriber in default_transcribers()
-    }
+    registry = default_transcribers()
 
-    assert isinstance(registry["permission_request"], PermissionRequestTranscriber)
+    assert registry.transcript_transcriber_for("permission_request") is not None

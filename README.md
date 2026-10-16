@@ -82,9 +82,9 @@ await spec_manager.boot_up()
 ```
 
 The installer adds role-specific skills and instructions to each participant.
-Tasks are stored in `FEATURES.md`; verifier sessions are temporary and are
-deleted after each acceptance or rejection. Close the returned server during
-application cleanup.
+Tasks are stored in `FEATURES.md`; each assignment creates fresh worker and
+verifier sessions, which remain available until that role receives another
+task. Close the returned server during application cleanup.
 
 `Runner` is the entry point for creating, restoring, switching, deleting,
 compacting, messaging, waiting on, and interrupting conversations. `new_session(agent)` and

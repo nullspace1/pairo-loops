@@ -22,3 +22,4 @@ class SlashCommand(ABC):
     ) -> CommandOutcome:
         """Execute with the owning controller and parsed argument."""
 
+

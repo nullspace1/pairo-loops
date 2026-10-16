@@ -11,3 +11,4 @@ __all__ = [
     "ApprovalRequest", "PermissionDecision", "PermissionRequester",
     "PermissionRequestType",
 ]
+

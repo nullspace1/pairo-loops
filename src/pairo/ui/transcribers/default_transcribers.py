@@ -19,3 +19,4 @@ def default_transcribers() -> TranscriberRegistry:
     registry.register(ActivityCompletedTranscriber())
     registry.register(TokenUsageUpdatedTranscriber())
     return registry
+

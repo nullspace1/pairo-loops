@@ -34,3 +34,4 @@ class CompactCommand(SlashCommand):
             ),
             session_name=session_name,
         )
+

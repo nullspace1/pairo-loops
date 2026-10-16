@@ -40,3 +40,4 @@ class SidebarFieldGroup(Vertical):
         mounted_fields = (child for child in self.children if isinstance(child, SidebarField))
         for field, (_, label, value) in zip(mounted_fields, normalized):
             field.update(label, value)
+

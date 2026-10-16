@@ -5,20 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
-from typing import Any, TypeGuard
+from typing import Any, Literal, Protocol, TypeGuard
 
 from pairo.core.events import PermissionRequest
 
 
-_HIDDEN_TECHNICAL_FIELDS = {
-    "id",
-    "itemId",
-    "threadId",
-    "turnId",
-    "requestId",
-    "type",
-}
-
+_HIDDEN_TECHNICAL_FIELDS = {"id", "itemId", "threadId", "turnId", "requestId", "type"}
 _FIELD_LABELS = {
     "cwd": "Working directory",
     "exitCode": "Exit code",
@@ -27,35 +19,188 @@ _FIELD_LABELS = {
 }
 
 
+class FieldNamePresenter:
+    """Translate SDK field names into labels intended for people."""
+
+    def present(self, value: str) -> str:
+        if value in _FIELD_LABELS:
+            return _FIELD_LABELS[value]
+        words: list[str] = []
+        current = ""
+        for character in value.replace("_", " "):
+            if character == " ":
+                if current:
+                    words.append(current)
+                    current = ""
+            elif character.isupper() and current:
+                words.append(current)
+                current = character.lower()
+            else:
+                current += character
+        if current:
+            words.append(current)
+        return " ".join(words).capitalize()
+
+
+class StructuredStringDecoder:
+    """Decode JSON containers embedded in otherwise scalar SDK fields."""
+
+    def decode(self, value: Any) -> Any:
+        if not isinstance(value, str) or not value.lstrip().startswith(("{", "[")):
+            return value
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return value
+        return decoded if isinstance(decoded, (dict, list)) else value
+
+
+@dataclass(frozen=True, slots=True)
+class PresentedValue:
+    """Rendered value plus its structure, used by parent presenters for layout."""
+
+    kind: Literal["scalar", "sequence", "structured"]
+    lines: tuple[str, ...]
+
+
+class ValuePresenter(Protocol):
+    """A focused renderer for one category of SDK value."""
+
+    def supports(self, value: object) -> bool: ...
+
+    def present(self, value: Any, formatter: PresentationFormatter) -> PresentedValue: ...
+
+
+class ScalarPresenter:
+    """Present simple values without Python container syntax."""
+
+    def supports(self, value: object) -> bool:
+        return True
+
+    def present(self, value: Any, formatter: PresentationFormatter) -> PresentedValue:
+        del formatter
+        if value is True:
+            text = "Yes"
+        elif value is False:
+            text = "No"
+        elif value is None:
+            text = "Not specified"
+        else:
+            text = str(value).strip()
+        return PresentedValue("scalar", (text,))
+
+
+class SequencePresenter:
+    """Lay out nested list-like values as readable bullet points."""
+
+    def supports(self, value: object) -> bool:
+        return _is_sequence(value)
+
+    def present(self, value: Any, formatter: PresentationFormatter) -> PresentedValue:
+        assert _is_sequence(value)
+        lines: list[str] = []
+        for item in value:
+            presented = formatter.present_value(item)
+            if presented.kind == "structured" and presented.lines:
+                lines.append(f"- {presented.lines[0]}")
+                lines.extend(f"  {line}" for line in presented.lines[1:])
+            elif presented.kind == "sequence":
+                lines.append("- Items:")
+                lines.extend(f"  {line}" for line in presented.lines)
+            else:
+                lines.append(f"- {presented.lines[0]}")
+        return PresentedValue("sequence", tuple(lines))
+
+
+class StructuredPresenter:
+    """Present mappings as ordered, labelled fields while hiding SDK metadata."""
+
+    def __init__(self, field_names: FieldNamePresenter) -> None:
+        self._field_names = field_names
+
+    def supports(self, value: object) -> bool:
+        return isinstance(value, Mapping)
+
+    def present(self, value: Any, formatter: PresentationFormatter) -> PresentedValue:
+        assert isinstance(value, Mapping)
+        return PresentedValue("structured", self.describe(value, formatter=formatter))
+
+    def describe(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        formatter: PresentationFormatter,
+        preferred_fields: Sequence[str] = (),
+    ) -> tuple[str, ...]:
+        ordered_keys = [key for key in preferred_fields if key in payload]
+        ordered_keys.extend(key for key in payload if key not in ordered_keys)
+        lines: list[str] = []
+        for key in ordered_keys:
+            if key in _HIDDEN_TECHNICAL_FIELDS:
+                continue
+            value = payload[key]
+            if value in (None, "", [], {}):
+                continue
+            label = self._field_names.present(key)
+            presented = formatter.present_value(value)
+            if presented.kind == "scalar":
+                lines.append(f"{label}: {presented.lines[0]}")
+            else:
+                lines.append(f"{label}:")
+                lines.extend(f"  {line}" for line in presented.lines)
+        return tuple(lines)
+
+
+class PresentationFormatter:
+    """Compose focused value presenters into one formatting boundary."""
+
+    def __init__(
+        self,
+        *,
+        field_names: FieldNamePresenter | None = None,
+        decoder: StructuredStringDecoder | None = None,
+        value_presenters: Sequence[ValuePresenter] | None = None,
+    ) -> None:
+        self.field_names = field_names or FieldNamePresenter()
+        self._decoder = decoder or StructuredStringDecoder()
+        self.structured = StructuredPresenter(self.field_names)
+        self.sequence = SequencePresenter()
+        self.scalar = ScalarPresenter()
+        self._value_presenters = tuple(
+            value_presenters or (self.structured, self.sequence, self.scalar)
+        )
+
+    def present_value(self, value: Any) -> PresentedValue:
+        decoded = self._decoder.decode(value)
+        for presenter in self._value_presenters:
+            if presenter.supports(decoded):
+                return presenter.present(decoded, self)
+        raise ValueError(f"No presentation rule exists for {type(decoded).__name__} values.")
+
+    def describe_fields(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        preferred_fields: Sequence[str] = (),
+    ) -> tuple[str, ...]:
+        return self.structured.describe(
+            payload,
+            formatter=self,
+            preferred_fields=preferred_fields,
+        )
+
+
+def _is_sequence(value: object) -> TypeGuard[Sequence[Any]]:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+
+
+_DEFAULT_FORMATTER = PresentationFormatter()
+
+
+# Public compatibility wrappers for callers that use the original function API.
 def humanize_field(value: str) -> str:
     """Turn camelCase and snake_case field names into readable labels."""
-    if value in _FIELD_LABELS:
-        return _FIELD_LABELS[value]
-    words: list[str] = []
-    current = ""
-    for character in value.replace("_", " "):
-        if character == " ":
-            if current:
-                words.append(current)
-                current = ""
-        elif character.isupper() and current:
-            words.append(current)
-            current = character.lower()
-        else:
-            current += character
-    if current:
-        words.append(current)
-    return " ".join(words).capitalize()
-
-
-def _scalar_text(value: Any) -> str:
-    if value is True:
-        return "Yes"
-    if value is False:
-        return "No"
-    if value is None:
-        return "Not specified"
-    return str(value).strip()
+    return _DEFAULT_FORMATTER.field_names.present(value)
 
 
 def describe_fields(
@@ -63,66 +208,8 @@ def describe_fields(
     *,
     preferred_fields: Sequence[str] = (),
 ) -> tuple[str, ...]:
-    """Flatten structured data into labeled lines without JSON syntax."""
-    ordered_keys = [key for key in preferred_fields if key in payload]
-    ordered_keys.extend(key for key in payload if key not in ordered_keys)
-    lines: list[str] = []
-    for key in ordered_keys:
-        if key in _HIDDEN_TECHNICAL_FIELDS:
-            continue
-        value = payload[key]
-        if value in (None, "", [], {}):
-            continue
-        label = humanize_field(key)
-        decoded = _structured_string(value)
-        display_value = decoded if decoded is not None else value
-        if isinstance(display_value, Mapping):
-            nested = describe_fields(display_value)
-            if nested:
-                lines.append(f"{label}:")
-                lines.extend(f"  {line}" for line in nested)
-        elif _is_sequence(display_value):
-            lines.append(f"{label}:")
-            lines.extend(_describe_sequence(display_value, indent="  "))
-        else:
-            lines.append(f"{label}: {_scalar_text(display_value)}")
-    return tuple(lines)
-
-
-def _is_sequence(value: object) -> TypeGuard[Sequence[Any]]:
-    return isinstance(value, Sequence) and not isinstance(
-        value,
-        (str, bytes, bytearray),
-    )
-
-
-def _describe_sequence(values: Sequence[Any], *, indent: str) -> tuple[str, ...]:
-    """Render arbitrarily nested sequences without container repr syntax."""
-    lines: list[str] = []
-    for item in values:
-        decoded = _structured_string(item)
-        display_item = decoded if decoded is not None else item
-        if isinstance(display_item, Mapping):
-            nested = describe_fields(display_item)
-            if nested:
-                lines.append(f"{indent}- {nested[0]}")
-                lines.extend(f"{indent}  {line}" for line in nested[1:])
-        elif _is_sequence(display_item):
-            lines.append(f"{indent}- Items:")
-            lines.extend(_describe_sequence(display_item, indent=f"{indent}  "))
-        else:
-            lines.append(f"{indent}- {_scalar_text(display_item)}")
-    return tuple(lines)
-
-
-def _structured_string(value: Any) -> Any:
-    if not isinstance(value, str) or not value.lstrip().startswith(("{", "[")):
-        return None
-    try:
-        decoded = json.loads(value)
-    except (TypeError, ValueError):
-        return None
-    return decoded if isinstance(decoded, (dict, list)) else None
+    """Flatten structured data into labelled lines without JSON syntax."""
+    return _DEFAULT_FORMATTER.describe_fields(payload, preferred_fields=preferred_fields)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +221,6 @@ class ActivityPresentation:
 
     @property
     def text(self) -> str:
-        # Keep the activity heading visually distinct from its structured body.
         return "\n\n".join((self.title, "\n".join(self.lines)))
 
 
@@ -154,16 +240,14 @@ class CompletedActivityPresenter:
         "webSearch": ("query", "queries", "status", "result"),
     }
 
+    def __init__(self, formatter: PresentationFormatter | None = None) -> None:
+        self._formatter = formatter or PresentationFormatter()
+
     def present(self, item: Mapping[str, Any]) -> ActivityPresentation:
         item_type = str(item.get("type", "activity"))
-        title = self._TITLES.get(item_type, f"{humanize_field(item_type)} completed")
-        lines = describe_fields(
-            item,
-            preferred_fields=self._PREFERRED_FIELDS.get(item_type, ()),
-        )
+        title = self._TITLES.get(item_type, f"{self._formatter.field_names.present(item_type)} completed")
+        lines = self._formatter.describe_fields(item, preferred_fields=self._PREFERRED_FIELDS.get(item_type, ()))
         if not lines:
-            # Provider identifiers cannot help a person understand the activity
-            # and should never be exposed as a substitute for useful detail.
             lines = ("No additional details were provided.",)
         return ActivityPresentation(title, lines)
 
@@ -182,25 +266,21 @@ class PermissionRequestPresenter:
         "additional permissions": ("permissions", "reason"),
     }
 
+    def __init__(self, formatter: PresentationFormatter | None = None) -> None:
+        self._formatter = formatter or PresentationFormatter()
+
     def present(self, request: PermissionRequest) -> str:
         if request.request_type == "command execution":
             return self._present_command(request)
         if request.request_type == "file change":
             return self._present_file_change(request)
-        title = self._TITLES.get(
-            request.request_type,
-            f"{humanize_field(request.request_type)} approval",
-        )
-        lines = describe_fields(
-            request.request,
-            preferred_fields=self._PREFERRED_FIELDS.get(request.request_type, ()),
-        )
+        title = self._TITLES.get(request.request_type, f"{self._formatter.field_names.present(request.request_type)} approval")
+        lines = self._formatter.describe_fields(request.request, preferred_fields=self._PREFERRED_FIELDS.get(request.request_type, ()))
         if not lines:
             lines = ("The agent did not provide additional details.",)
         return "\n".join((title, *lines))
 
     def _present_command(self, request: PermissionRequest) -> str:
-        """Put the command, where it runs, and why first in approval prompts."""
         details = request.request
         lines = ["Allow this command to run?"]
         command = details.get("command")
@@ -208,49 +288,53 @@ class PermissionRequestPresenter:
             lines.extend(("Command:", str(command)))
         else:
             lines.append("The agent did not provide a command.")
-
-        for key, label in (
-            ("cwd", "Working directory"),
-            ("reason", "Why this is needed"),
-            ("justification", "Why this is needed"),
-            ("sandboxPermissions", "Sandbox permissions"),
-        ):
+        for key, label in (("cwd", "Working directory"), ("reason", "Why this is needed"), ("justification", "Why this is needed"), ("sandboxPermissions", "Sandbox permissions")):
             value = details.get(key)
             if value not in (None, "", [], {}):
-                lines.append(f"{label}: {_scalar_text(value)}")
-
+                lines.append(f"{label}: {self._formatter.scalar.present(value, self._formatter).lines[0]}")
         displayed = {"command", "cwd", "reason", "justification", "sandboxPermissions"}
         remaining = {key: value for key, value in details.items() if key not in displayed}
-        lines.extend(describe_fields(remaining))
+        lines.extend(self._formatter.describe_fields(remaining))
         return "\n".join(lines)
+
     def _present_file_change(self, request: PermissionRequest) -> str:
-        """Put the affected files and proposed edits before transport details."""
         details = request.request
         lines = ["Allow these file changes?"]
         path = details.get("path")
         paths = details.get("paths")
         if path not in (None, ""):
-            lines.append(f"Affected file: {_scalar_text(path)}")
+            lines.append(f"Affected file: {self._formatter.scalar.present(path, self._formatter).lines[0]}")
         if paths not in (None, "", [], {}):
             lines.append("Affected files:")
-            lines.extend(_describe_sequence(paths, indent="") if _is_sequence(paths) else (f"- {_scalar_text(paths)}",))
+            presented = self._formatter.present_value(paths)
+            lines.extend(presented.lines if presented.kind == "sequence" else (f"- {presented.lines[0]}",))
         changes = details.get("changes")
         if changes not in (None, "", [], {}):
-            lines.extend(describe_fields({"changes": changes}))
-
+            lines.extend(self._formatter.describe_fields({"changes": changes}))
         for key in ("reason", "justification", "rationale"):
             value = details.get(key)
             if value not in (None, "", [], {}):
-                lines.append(f"Why this is needed: {_scalar_text(value)}")
-
+                lines.append(f"Why this is needed: {self._formatter.scalar.present(value, self._formatter).lines[0]}")
         displayed = {"path", "paths", "changes", "reason", "justification", "rationale"}
         remaining = {key: value for key, value in details.items() if key not in displayed}
-        lines.extend(describe_fields(remaining))
+        lines.extend(self._formatter.describe_fields(remaining))
         if len(lines) == 1:
             lines.append("The agent did not provide file-change details.")
         return "\n".join(lines)
 
 
+class PermissionHistoryPresenter:
+    """Create the durable transcript entry for a pending approval."""
+
+    def __init__(self, request_presenter: PermissionRequestPresenter | None = None) -> None:
+        self._request_presenter = request_presenter or PermissionRequestPresenter()
+
+    def present(self, request: PermissionRequest) -> str:
+        return f"Approval requested\n{self._request_presenter.present(request)}"
+
+
 def permission_request_history_content(request: PermissionRequest) -> str:
     """Format the durable, human-readable history for an approval request."""
-    return f"Approval requested\n{PermissionRequestPresenter().present(request)}"
+    return PermissionHistoryPresenter().present(request)
+
+

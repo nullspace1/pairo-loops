@@ -44,3 +44,4 @@ class SessionCommand(SlashCommand):
             ),
             session_name=session_name,
         )
+

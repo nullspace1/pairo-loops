@@ -97,3 +97,4 @@ def add_github_mcp_server(
         env={"GITHUB_OAUTH_CALLBACK_PORT": port_text},
     )
     return add_server_to_agents(agents, server)
+

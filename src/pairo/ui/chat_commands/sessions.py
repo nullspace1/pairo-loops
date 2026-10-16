@@ -33,3 +33,4 @@ class SessionsCommand(SlashCommand):
                 {"type": "system"},
             )
         )
+

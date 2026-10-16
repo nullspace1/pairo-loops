@@ -21,3 +21,4 @@ class MessageSent(BaseModel):
         if not normalized:
             raise ValueError("Message source cannot be empty.")
         return normalized
+

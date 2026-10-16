@@ -48,3 +48,4 @@ def render_text_transcript(
     return TranscriptMessage(
         Static(Text.assemble(label, transcript.content), markup=False)
     )
+

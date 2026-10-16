@@ -15,3 +15,4 @@ class RoutedTranscriptEntry(Generic[MetadataT]):
     agent_id: UUID
     session_name: str
     entry: TranscriptEntry[MetadataT]
+

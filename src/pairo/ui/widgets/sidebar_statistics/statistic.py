@@ -45,3 +45,4 @@ class SidebarStatisticProvider(Protocol):
 
     async def statistic(self, context: SidebarStatisticContext) -> object:
         """Return this field's current value."""
+

@@ -21,3 +21,4 @@ class Hook(BaseModel):
         if not normalized:
             raise ValueError("Hook command cannot be empty.")
         return normalized
+

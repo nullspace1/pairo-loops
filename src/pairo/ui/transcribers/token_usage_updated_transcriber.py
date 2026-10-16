@@ -49,3 +49,4 @@ class TokenUsageUpdatedTranscriber(
         context: TranscriptRenderContext,
     ) -> Widget:
         return render_text_transcript(transcript, context)
+

@@ -15,3 +15,4 @@ class PermissionRequest(BaseModel):
     session_name: str
     request_type: PermissionRequestType
     request: JsonObject
+

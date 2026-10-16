@@ -13,3 +13,4 @@ class PermissionResponse(BaseModel):
     agent_id: UUID
     session_name: str
     decision: PermissionDecision
+

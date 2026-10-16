@@ -56,3 +56,4 @@ class TokenUsageStatistic:
             return "Unavailable"
         usage = self._usage_by_session.get((context.agent.id, context.session_name))
         return "Unavailable" if usage is None else f"{usage.total.total_tokens} tokens"
+

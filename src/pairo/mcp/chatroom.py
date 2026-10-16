@@ -178,3 +178,4 @@ class Chatroom(MCPHttpWrapper):
     def _is_in_chatroom(self, chatroom: str, agent_id: UUID) -> bool:
         registration = self.chatrooms.get(chatroom)
         return registration is not None and agent_id in registration.agent_ids
+

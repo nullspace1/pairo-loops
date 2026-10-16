@@ -29,3 +29,4 @@ class InterruptCommand(SlashCommand):
                 "system", message, EventDetailLevel.NORMAL, {"type": "system"}
             )
         )
+

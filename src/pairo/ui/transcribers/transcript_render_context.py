@@ -12,3 +12,4 @@ class TranscriptRenderContext:
     session_name: str
     event_pipeline: EventPipeline
     is_live: bool
+

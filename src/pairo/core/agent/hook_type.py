@@ -14,3 +14,4 @@ class HookType(str, Enum):
     SUBAGENT_STOP = "SubagentStop"
     STOP = "Stop"
     INTERRUPT = "Interrupt"
+

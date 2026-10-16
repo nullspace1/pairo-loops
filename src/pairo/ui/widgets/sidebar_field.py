@@ -24,3 +24,4 @@ class SidebarField(Vertical):
         if normalized != self._value:
             self._value = normalized
             self.query_one(".sidebar-field-value", Static).update(normalized)
+

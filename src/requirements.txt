@@ -2,3 +2,4 @@ openai_codex
 textual>=8.2.8,<9
 pytest
 mcp
+mypy>=1.13,<2

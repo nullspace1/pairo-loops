@@ -29,3 +29,4 @@ class MessageSentTranscriber(Transcriber[MessageSent, MessageTranscriptMetadata]
         context: TranscriptRenderContext,
     ) -> Widget:
         return render_text_transcript(transcript, context)
+

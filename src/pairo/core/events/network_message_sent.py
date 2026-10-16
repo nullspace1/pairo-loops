@@ -14,3 +14,4 @@ class NetworkMessageSent(BaseModel):
     session_name: str
     message: str
 
+

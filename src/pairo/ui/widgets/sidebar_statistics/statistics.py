@@ -49,3 +49,4 @@ class SidebarStatistics:
         for statistic in self.agent_information + self.current_session:
             statistic.setup(event_pipeline, agents)
         object.__setattr__(self, "_event_pipeline", event_pipeline)
+

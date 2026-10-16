@@ -33,3 +33,4 @@ class MCPPermissions(BaseModel):
 
 
 __all__ = ["MCPPermissions", "MCPToolApprovalMode"]
+

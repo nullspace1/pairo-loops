@@ -17,3 +17,4 @@ class EventListener(Protocol[ListenerEventT]):
         self,
         event: ListenerEventT,
     ) -> BaseModel | None | Awaitable[BaseModel | None]: ...
+

@@ -32,3 +32,4 @@ class ImageCommand(SlashCommand):
                 "user", f"Image: {argument}", EventDetailLevel.NORMAL, {"type": "message"}
             )
         )
+
