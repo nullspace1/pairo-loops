@@ -21,7 +21,6 @@ from pairo.core.events.agent_events import (
     SessionCompacted,
     SessionCreated,
     SessionUpdated,
-    route_client_event,
 )
 from pairo.core.events.event_pipeline import EventPipeline
 from pairo.core.events.message_sent import MessageSent
@@ -253,7 +252,7 @@ class Runner:
             await self._update_session(agent, run, notification.session)
             session_name = run.require_session_name()
             await self._pipeline.enqueue(
-                route_client_event(agent.id, session_name, notification.event)
+                notification.event.to_routed_event(agent.id, session_name)
             )
             await self._steer_pending_messages(agent, run)
             if isinstance(notification.event, ClientResponseCompleted):

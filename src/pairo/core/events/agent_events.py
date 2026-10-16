@@ -224,15 +224,6 @@ class AgentTokenUsageUpdated(RoutedAgentEvent):
     model_context_window: int | None = None
 
 
-def route_client_event(
-    agent_id: UUID,
-    session_name: str,
-    event: ClientEvent,
-) -> RoutedAgentEvent:
-    """Attach runner routing to a provider-neutral client notification."""
-    return event.to_routed_event(agent_id, session_name)
-
-
 class SessionUpdated(BaseModel):
     """The latest opaque provider identifier for an ID-routed session."""
 
@@ -284,7 +275,7 @@ __all__ = [
     "ClientActivityStarted", "ClientEvent", "ClientPlanDelta",
     "ClientReasoningDelta", "ClientResponseCompleted",
     "ClientResponseInterrupted", "ClientTextDelta", "ClientTokenUsageUpdated",
-    "RoutedAgentEvent", "route_client_event",
+    "RoutedAgentEvent",
     "SessionCompacted", "SessionCreated", "SessionDeleted", "SessionUpdated",
     "TokenUsage",
 ]

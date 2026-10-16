@@ -30,7 +30,6 @@ from pairo.core.events import (
     MessageSent,
     TokenUsage,
     UserInput,
-    route_client_event,
 )
 
 
@@ -38,7 +37,7 @@ AGENT_ID = uuid4()
 
 
 class CustomClientEvent(ClientEvent):
-    """Test-only event proving route_client_event uses the event contract."""
+    """Test-only event that implements the client routing contract."""
 
     text: str
 
@@ -58,8 +57,8 @@ class IncompleteClientEvent(ClientEvent):
     pass
 
 
-def test_route_client_event_delegates_to_the_client_event_contract() -> None:
-    routed = route_client_event(AGENT_ID, "session", CustomClientEvent(text="custom"))
+def test_custom_client_event_routes_through_its_contract() -> None:
+    routed = CustomClientEvent(text="custom").to_routed_event(AGENT_ID, "session")
 
     assert routed == AgentTextDelta(
         agent_id=AGENT_ID,
@@ -97,7 +96,7 @@ def test_every_client_event_has_a_concrete_routed_event() -> None:
     )
 
     for client_event, routed_type in cases:
-        routed = route_client_event(AGENT_ID, "session", client_event)
+        routed = client_event.to_routed_event(AGENT_ID, "session")
 
         assert type(routed) is routed_type
         assert routed.agent_id == AGENT_ID

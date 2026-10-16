@@ -26,8 +26,9 @@ from .agent_events import (
     SessionDeleted,
     SessionUpdated,
     TokenUsage,
-    route_client_event,
 )
+from .event_listener_registration import EventListenerRegistration
+from .event_listeners import AgentEventListeners, EventListeners
 from .event_lock import EventReceipt, EventSubscription
 from .event_pipeline import EventPipeline
 from .image_sent import ImageSent
@@ -45,10 +46,9 @@ __all__ = [
     "ClientActivityStarted", "ClientEvent", "ClientPlanDelta",
     "ClientReasoningDelta", "ClientResponseCompleted",
     "ClientResponseInterrupted", "ClientTextDelta", "ClientTokenUsageUpdated",
-    "EventPipeline", "EventReceipt",
+    "AgentEventListeners", "EventListeners", "EventListenerRegistration", "EventPipeline", "EventReceipt",
     "EventSubscription", "ImageSent", "MessageSent", "NetworkMessageSent",
-    "PermissionRequest", "PermissionResponse", "route_client_event",
+    "PermissionRequest", "PermissionResponse",
     "SessionCompacted", "SessionCreated",
     "SessionDeleted", "SessionUpdated", "TokenUsage", "UserInput",
 ]
-

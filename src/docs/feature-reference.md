@@ -167,3 +167,30 @@ that event type.
 | `PermissionRequestType` | `command execution`, `file change`, `additional permissions` |
 | `PermissionDecision` | `accept`, `acceptForSession`, `decline` |
 | Client event `kind` | `text_delta`, `plan_delta`, `reasoning_delta`, `activity_started`, `activity_progress`, `activity_completed`, `response_completed`, `response_interrupted` |
+
+### Agent-scoped event observers
+
+`EventListeners(pipeline)` provides future-only observer registrations without
+requiring event class imports or manual ID filters. Each `on_<event>` method
+accepts an `observer` and an optional `agent` to filter one agent:
+
+```python
+from pairo.core.events import EventListeners
+
+listeners = EventListeners(pipeline)
+registration = listeners.on_message_sent(handle_message, agent)
+registration.detach()  # safe to call more than once
+```
+
+Callbacks receive the concrete event and may be synchronous or asynchronous.
+They are observers: their return values are ignored, so they cannot consume or
+transform pipeline events. Agent matching uses immutable `Agent.id`; network
+message registrations match the destination `recipient_id`. Available methods
+are `on_message_sent`, `on_agent_text_delta`, `on_agent_plan_delta`,
+`on_agent_reasoning_delta`, `on_agent_activity_started`,
+`on_agent_activity_progress`, `on_agent_activity_completed`,
+`on_agent_response_completed`, `on_agent_response_interrupted`,
+`on_agent_token_usage_updated`, `on_agent_error`, `on_session_created`,
+`on_session_updated`, `on_session_compacted`, `on_session_deleted`,
+`on_permission_request`, `on_permission_response`, and
+`on_network_message_sent`.
