@@ -1,58 +1,115 @@
-"""High-level application lifecycle for a configured agent runner."""
+"""High-level lifecycle for a collection of asynchronous agents."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
+from types import MappingProxyType
+from uuid import UUID
 
-from .core.agent import Runner
-from .ui.app import run_ui
-from .ui.session_repository import SessionRepository
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
+from pairo.core.events import EventPipeline
+from pairo.ui.app import run_ui
+from pairo.ui.session_repository import SessionRepository
 
 
-UserInterfaceLauncher = Callable[[Runner, SessionRepository], Awaitable[None]]
+AgentMapping = Mapping[UUID, Agent[SessionIdentifier]]
+UserInterfaceLauncher = Callable[
+    [AgentMapping, EventPipeline, SessionRepository],
+    Awaitable[None],
+]
 
 
 class RuntimeLauncher:
-    """Launch one runner and reliably release its shared resources."""
+    """Start all agents and reliably close application-owned resources."""
 
     def __init__(
         self,
-        runner: Runner,
+        agents: AgentMapping,
+        event_pipeline: EventPipeline,
         session_repository: SessionRepository,
         user_interface_launcher: UserInterfaceLauncher,
     ) -> None:
-        self._runner = runner
+        configured = dict(agents)
+        if not configured:
+            raise ValueError("At least one agent is required.")
+        for agent_id, agent in configured.items():
+            if agent.configuration().id != agent_id:
+                raise ValueError(f"Agent mapping key '{agent_id}' does not match its agent ID.")
+        self._agents: AgentMapping = MappingProxyType(configured)
+        self._event_pipeline = event_pipeline
         self._session_repository = session_repository
         self._user_interface_launcher = user_interface_launcher
 
     async def launch(self, initial_session_name: str = "Conversation 1") -> None:
-        """Start the runner, host its UI, then close all owned resources."""
+        self._event_pipeline.bind()
         try:
-            await self._runner.start(initial_session_name)
-            await self._user_interface_launcher(self._runner, self._session_repository)
+            startup_results = await asyncio.gather(
+                *(
+                    agent.new_session(initial_session_name)
+                    for agent in self._agents.values()
+                ),
+                return_exceptions=True,
+            )
+            startup_failure = next(
+                (
+                    result
+                    for result in startup_results
+                    if isinstance(result, BaseException)
+                ),
+                None,
+            )
+            if startup_failure is not None:
+                raise startup_failure
+            await self._user_interface_launcher(
+                self._agents,
+                self._event_pipeline,
+                self._session_repository,
+            )
         finally:
             await self._close_resources()
 
     async def _close_resources(self) -> None:
         try:
-            await self._runner.close()
+            results = await asyncio.gather(
+                *(agent.close() for agent in self._agents.values()),
+                return_exceptions=True,
+            )
+            failure = next(
+                (result for result in results if isinstance(result, BaseException)),
+                None,
+            )
+            if failure is not None:
+                raise failure
         finally:
             try:
                 await self._session_repository.close()
             finally:
-                await self._runner.pipeline.close()
+                await self._event_pipeline.close()
 
 
-async def run_agents(
-    runner: Runner,
-    session_repository: SessionRepository,
-    *,
-    initial_session_name: str = "Conversation 1",
-) -> None:
-    """Compatibility entry point for launching the configured application."""
-    launcher = RuntimeLauncher(runner, session_repository, run_ui)
-    await launcher.launch(initial_session_name)
+class RunAgents:
+    """Callable public entry point for the complete application lifecycle."""
+
+    async def __call__(
+        self,
+        agents: AgentMapping,
+        event_pipeline: EventPipeline,
+        session_repository: SessionRepository,
+        *,
+        initial_session_name: str = "Conversation 1",
+    ) -> None:
+        launcher = RuntimeLauncher(
+            agents,
+            event_pipeline,
+            session_repository,
+            run_ui,
+        )
+        await launcher.launch(initial_session_name)
 
 
-__all__ = ["RuntimeLauncher", "run_agents"]
+run_agents = RunAgents()
 
+
+__all__ = ["AgentMapping", "RunAgents", "RuntimeLauncher", "run_agents"]

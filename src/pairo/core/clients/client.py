@@ -1,58 +1,65 @@
-"""Provider boundary consumed by the generic agent runtime."""
+"""Provider-neutral asynchronous agent contract."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Protocol
+from enum import Enum
+from typing import Generic, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
-from pairo.core.agent.agent import Agent
+from pairo.core.agent.agent import AgentConfiguration
 from pairo.core.agent.json_object import JsonObject
 from pairo.core.agent.session_identifier import SessionIdentifier
-from ..events.agent_events import ClientEvent
 
 
-
-
-class SessionNotification(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
-
-    session: SessionIdentifier
-    event: ClientEvent
-    
 MCP_AGENT_ID_HEADER = "X-Agent-ID"
 
 
-class AgentClient(Protocol):
-    async def new_session(
+class AgentStatus(str, Enum):
+    INACTIVE = "inactive"
+    IDLE = "idle"
+    GENERATING = "generating"
+
+
+IdentifierT = TypeVar("IdentifierT", bound=SessionIdentifier, covariant=True)
+
+
+class ActiveSession(BaseModel, Generic[IdentifierT]):
+    """The only application session retained by one agent."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    name: str
+    identifier: IdentifierT
+
+
+class Agent(Protocol[IdentifierT]):
+    def configuration(self) -> AgentConfiguration: ...
+
+    def current_session(self) -> ActiveSession[IdentifierT] | None: ...
+
+    def status(self) -> AgentStatus: ...
+
+    async def new_session(self, name: str) -> ActiveSession[IdentifierT]: ...
+
+    async def activate_session(
         self,
-        agent: Agent,
-    ) -> SessionIdentifier: ...
+        name: str,
+        identifier_json: JsonObject,
+    ) -> ActiveSession[IdentifierT]: ...
 
-    async def restore_session(
-        self, agent: Agent, identifier_json: JsonObject
-    ) -> SessionIdentifier: ...
+    async def send_message(self, message: str, source: str = "user") -> None: ...
 
-    async def start(self, session: SessionIdentifier, message: str) -> SessionIdentifier: ...
+    async def interrupt(self) -> bool: ...
 
-    async def interrupt(self, session: SessionIdentifier) -> SessionIdentifier: ...
-
-    async def compact(self, session: SessionIdentifier) -> None: ...
-
-    async def steer(self, session: SessionIdentifier, message: str) -> SessionIdentifier: ...
-
-    def notifications(
-        self, session: SessionIdentifier
-    ) -> AsyncIterator[SessionNotification]: ...
+    async def compact(self) -> None: ...
 
     async def close(self) -> None: ...
 
 
 __all__ = [
-    "AgentClient",
+    "ActiveSession",
+    "Agent",
+    "AgentStatus",
     "MCP_AGENT_ID_HEADER",
-    "SessionIdentifier",
-    "SessionNotification",
 ]
-

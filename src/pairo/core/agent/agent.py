@@ -27,7 +27,7 @@ from pairo.core.mcp.servers import MCPServer
 from pairo.core.permissions.permission_requester import PermissionRequester
 
 
-class Agent(BaseModel):
+class AgentConfiguration(BaseModel):
     """Agent identity and configuration.
 
     The model is externally frozen so configuration cannot be changed without
@@ -124,7 +124,7 @@ class Agent(BaseModel):
         )
 
     @model_validator(mode="after")
-    def require_interactive_requester(self) -> "Agent":
+    def require_interactive_requester(self) -> "AgentConfiguration":
         if self.approval_mode is ApprovalMode.USER and self.permission_requester is None:
             raise ValueError("User approval mode requires a permission requester.")
         # Pydantic materializes abstract mappings as dictionaries. Re-wrap the
@@ -228,7 +228,7 @@ class Agent(BaseModel):
             configured.pop(hook_type, None)
         self.set_hooks(configured)
 
-    def snapshot(self) -> "Agent":
+    def snapshot(self) -> "AgentConfiguration":
         """Return an independent configuration snapshot for a provider session."""
         return type(self).model_validate(self._field_values())
 
@@ -255,5 +255,5 @@ class Agent(BaseModel):
         return f"{current.rstrip()}\n\n{normalized}"
 
 
-__all__ = ["Agent"]
+__all__ = ["AgentConfiguration"]
 

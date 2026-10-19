@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from pairo.core.agent import Agent, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxMode
 from pairo.core.events import (
     AgentActivityCompleted, AgentActivityProgress, AgentActivityStarted, AgentError,
     AgentPlanDelta, AgentReasoningDelta, AgentResponseCompleted,
@@ -18,8 +18,29 @@ from pairo.core.events import (
 from pairo.core.permissions import PermissionDecision, PermissionRequestType
 
 
-def _agent(workspace: Path) -> Agent:
-    return Agent(name="same display name", sandbox=SandboxMode.READ_ONLY, workspace=workspace, model="test-model")
+class ObservedAgent:
+    def __init__(self, workspace: Path) -> None:
+        self._configuration = AgentConfiguration(
+            name="same display name",
+            sandbox=SandboxMode.READ_ONLY,
+            workspace=workspace,
+            model="test-model",
+        )
+
+    @property
+    def id(self):
+        return self._configuration.id
+
+    @property
+    def name(self):
+        return self._configuration.name
+
+    def configuration(self) -> AgentConfiguration:
+        return self._configuration
+
+
+def _agent(workspace: Path) -> ObservedAgent:
+    return ObservedAgent(workspace)
 
 
 def _usage() -> TokenUsage:
@@ -29,6 +50,7 @@ def _usage() -> TokenUsage:
 def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         listeners = EventListeners(pipeline)
         agent = _agent(tmp_path)
         observed: list[BaseModel] = []
@@ -88,6 +110,7 @@ def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_
 def test_message_filtering_uses_id_and_registrations_are_future_only(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         first_agent = _agent(tmp_path)
         second_agent = _agent(tmp_path)
         early = MessageSent(agent_id=first_agent.id, session_name="s", message="early")
@@ -115,6 +138,7 @@ def test_async_observers_are_awaited_in_order_and_preserve_events(
 ) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         listeners = EventListeners(pipeline)
         agent = _agent(tmp_path)
         calls: list[str] = []
@@ -145,6 +169,7 @@ def test_async_observers_are_awaited_in_order_and_preserve_events(
 def test_observers_preserve_events_and_duplicate_detach_is_independent(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         listeners = EventListeners(pipeline)
         agent = _agent(tmp_path)
         calls: list[MessageSent] = []
@@ -173,6 +198,7 @@ def test_observers_preserve_events_and_duplicate_detach_is_independent(tmp_path:
 def test_observer_failures_use_receipts_and_closed_pipeline_rejects_registration(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         agent = _agent(tmp_path)
         listeners = EventListeners(pipeline)
 
@@ -193,6 +219,7 @@ def test_observer_failures_use_receipts_and_closed_pipeline_rejects_registration
 def test_network_messages_match_recipient_identity(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         listeners = EventListeners(pipeline)
         recipient = _agent(tmp_path)
         other = _agent(tmp_path)

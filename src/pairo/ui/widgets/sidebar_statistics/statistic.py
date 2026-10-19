@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Protocol, TypeAlias
 from uuid import UUID
 
-from pairo.core.agent import Agent, Runner
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
 from pairo.core.events import EventPipeline
 
 from ...models import SessionMetadata
@@ -20,8 +21,7 @@ StatisticValue: TypeAlias = Awaitable[object]
 class SidebarStatisticContext:
     """The current sidebar state made available to statistic providers."""
 
-    agent: Agent
-    runner: Runner
+    agent: Agent[SessionIdentifier]
     event_pipeline: EventPipeline
     session_name: str | None
     session: SessionMetadata | None
@@ -39,7 +39,7 @@ class SidebarStatisticProvider(Protocol):
     def setup(
         self,
         event_pipeline: EventPipeline,
-        agents: Mapping[UUID, Agent],
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
     ) -> None:
         """Connect the statistic to the current application resources."""
 

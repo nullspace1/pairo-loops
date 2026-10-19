@@ -6,7 +6,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from pairo.core.agent import Agent
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
 from pairo.core.events import EventPipeline
 
 from .statistic import SidebarStatisticProvider
@@ -39,7 +40,7 @@ class SidebarStatistics:
     def setup(
         self,
         event_pipeline: EventPipeline,
-        agents: Mapping[UUID, Agent],
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
     ) -> None:
         """Configure every provider once for this application event pipeline."""
         if self._event_pipeline is event_pipeline:

@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from pairo import (
-    Agent,
+    AgentConfiguration,
     ApprovalMode,
     ReasoningEffort,
     SandboxMode,
@@ -16,7 +16,7 @@ def get_product_owner(pipeline, repository):
     agent_directory = Path(__file__).resolve().parent
     instructions = (agent_directory / "product_owner.md").read_text(encoding="utf-8")
 
-    return Agent(
+    return AgentConfiguration(
         name="product_owner",
         sandbox=SandboxMode.READ_ONLY,
         approval_mode=ApprovalMode.USER,

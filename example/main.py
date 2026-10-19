@@ -11,8 +11,7 @@ if str(SOURCE_ROOT) not in sys.path:
 from agents.developer.developer import get_developer
 from agents.planner.planner import get_planner
 from pairo import (
-    CodexAgentClient,
-    Runner,
+    CodexAgent,
     WorkerVerifierPair,
     install_spec_manager,
     run_agents,
@@ -25,22 +24,28 @@ from pairo.ui import SqliteSessionRepository
 async def run_async() -> None:
     pipeline = EventPipeline()
     repository = SqliteSessionRepository()
-    planner = get_planner(pipeline, repository)
-    developer = get_developer("developer", pipeline, repository)
-    verifier = get_developer("verifier", pipeline, repository)
-    agents = [planner, developer, verifier]
-
-    runner = Runner(agents, pipeline, CodexAgentClient())
+    configurations = [
+        get_planner(pipeline, repository),
+        get_developer("developer", pipeline, repository),
+        get_developer("verifier", pipeline, repository),
+    ]
+    add_github_mcp_server(configurations)
+    configured_agents = [
+        CodexAgent(configuration, pipeline) for configuration in configurations
+    ]
+    agents = {
+        agent.configuration().id: agent for agent in configured_agents
+    }
+    planner, developer, verifier = configured_agents
     spec_manager = install_spec_manager(
         folder=SOURCE_ROOT / "pairo",
-        runner=runner,
+        agents=agents,
         director=planner,
         pairs=[WorkerVerifierPair("pair-1", developer, verifier)],
     )
-    add_github_mcp_server(agents)
     await spec_manager.boot_up()
     try:
-        await run_agents(runner, repository)
+        await run_agents(agents, pipeline, repository)
     finally:
         await spec_manager.close()
 

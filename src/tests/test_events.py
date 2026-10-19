@@ -1,6 +1,7 @@
 """Tests for ordered asyncio-native event delivery."""
 
 import asyncio
+from threading import Thread, get_ident
 from uuid import UUID, uuid4
 
 import pytest
@@ -109,6 +110,7 @@ def test_every_client_event_has_a_concrete_routed_event() -> None:
 def test_listener_order_consumption_and_one_shot_waiters() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         calls: list[str] = []
 
         async def first(event):
@@ -140,6 +142,7 @@ def test_listener_order_consumption_and_one_shot_waiters() -> None:
 def test_listener_can_process_existing_events_on_registration() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         first = MessageSent(
             agent_id=AGENT_ID,
             session_name="s",
@@ -184,6 +187,7 @@ def test_listener_can_process_existing_events_on_registration() -> None:
 def test_enqueue_is_non_blocking_and_receipt_waits_for_processing() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         listener_started = asyncio.Event()
         release_listener = asyncio.Event()
 
@@ -211,6 +215,7 @@ def test_enqueue_is_non_blocking_and_receipt_waits_for_processing() -> None:
 def test_listener_removal_base_class_delivery_and_transformation() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         calls: list[str] = []
 
         def removed(event):
@@ -244,6 +249,7 @@ def test_listener_removal_base_class_delivery_and_transformation() -> None:
 def test_multiple_waiters_receive_one_event_and_cancelled_waiters_are_safe() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         first = pipeline.listen(MessageSent)
         second = pipeline.listen(MessageSent)
         cancelled = pipeline.listen(MessageSent)
@@ -263,6 +269,7 @@ def test_multiple_waiters_receive_one_event_and_cancelled_waiters_are_safe() -> 
 def test_listener_errors_propagate_without_recording_the_event() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
 
         def fail(_event):
             raise RuntimeError("listener failed")
@@ -281,6 +288,7 @@ def test_listener_errors_propagate_without_recording_the_event() -> None:
 def test_close_cancels_waiters_and_rejects_future_operations() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         waiting = pipeline.listen(UserInput)
         await pipeline.close()
         with pytest.raises(asyncio.CancelledError):
@@ -291,5 +299,73 @@ def test_close_cancels_waiters_and_rejects_future_operations() -> None:
             pipeline.add_listener(UserInput, lambda event: event)
         with pytest.raises(RuntimeError, match="closed"):
             pipeline.enqueue(UserInput(message="late"))
+
+    asyncio.run(scenario())
+
+
+def test_cross_thread_events_and_coroutines_execute_on_the_bound_loop() -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        pipeline.bind()
+        principal_thread = get_ident()
+        listener_threads: list[int] = []
+        receipts = []
+        submitted_results: list[int] = []
+
+        def observe(event: UserInput) -> UserInput:
+            listener_threads.append(get_ident())
+            return event
+
+        async def submitted() -> int:
+            assert get_ident() == principal_thread
+            return 42
+
+        pipeline.add_listener(UserInput, observe)
+
+        def sdk_thread() -> None:
+            for index in range(3):
+                receipts.append(pipeline.enqueue(UserInput(message=str(index))))
+            submitted_results.append(pipeline.submit(submitted()).result())
+
+        callback = Thread(target=sdk_thread)
+        callback.start()
+        while callback.is_alive():
+            await asyncio.sleep(0)
+        callback.join()
+        await asyncio.gather(*(receipt.wait() for receipt in receipts))
+
+        assert [event.message for event in pipeline.events] == ["0", "1", "2"]
+        assert listener_threads == [principal_thread] * 3
+        assert submitted_results == [42]
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_pipeline_rejects_rebinding_to_another_loop() -> None:
+    pipeline = EventPipeline()
+
+    async def bind_once() -> None:
+        pipeline.bind()
+
+    asyncio.run(bind_once())
+    with pytest.raises(RuntimeError, match="another event loop"):
+        asyncio.run(bind_once())
+
+
+def test_join_waits_for_finite_pipeline_owned_tasks() -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        pipeline.bind()
+
+        async def publish_later() -> None:
+            await asyncio.sleep(0)
+            await pipeline.enqueue(UserInput(message="from task"))
+
+        pipeline.create_task(publish_later(), name="finite-publisher")
+        await pipeline.join()
+
+        assert pipeline.events == [UserInput(message="from task")]
+        await pipeline.close()
 
     asyncio.run(scenario())

@@ -12,7 +12,7 @@ from ..agent.json_object import JsonObject
 
 
 class ClientEvent(BaseModel, ABC):
-    """A provider-neutral client notification that can be routed by a runner."""
+    """A provider-neutral notification that can be routed by an agent."""
 
     @abstractmethod
     def to_routed_event(
@@ -20,7 +20,11 @@ class ClientEvent(BaseModel, ABC):
         agent_id: UUID,
         session_name: str,
     ) -> RoutedAgentEvent:
-        """Create this event's runner-routed counterpart."""
+        """Create this event's agent-routed counterpart."""
+
+    def transcript_message(self) -> str | None:
+        """Return a terminal transcript message when this event supplies one."""
+        return None
 
 
 class ClientTextDelta(ClientEvent):
@@ -134,6 +138,9 @@ class ClientResponseCompleted(ClientEvent):
             message=self.message,
         )
 
+    def transcript_message(self) -> str:
+        return self.message
+
 
 class ClientResponseInterrupted(ClientEvent):
     kind: Literal["response_interrupted"] = "response_interrupted"
@@ -178,7 +185,7 @@ class ClientTokenUsageUpdated(ClientEvent):
 
 
 class RoutedAgentEvent(BaseModel):
-    """Common routing fields for events published by the runner."""
+    """Common routing fields for events published by an agent."""
 
     model_config = ConfigDict(frozen=True)
 

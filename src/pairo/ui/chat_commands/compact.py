@@ -24,7 +24,12 @@ class CompactCommand(SlashCommand):
     ) -> CommandOutcome:
         if argument:
             raise ValueError("Usage: /compact")
-        session_name = await controller.runner.compact_session(agent_id)
+        agent = controller.agent(agent_id)
+        active = agent.current_session()
+        if active is None:
+            raise RuntimeError("The selected agent has no active session.")
+        await agent.compact()
+        session_name = active.name
         return CommandOutcome(
             TranscriptEntry[SystemTranscriptMetadata](
                 "system",

@@ -26,7 +26,7 @@ class SessionCommand(SlashCommand):
         value = value.strip()
         if action == "new":
             session_name = value or await controller.default_session_name(agent_id)
-            selected = await controller.runner.create_session(agent_id, session_name)
+            selected = await controller.create_session(agent_id, session_name)
             return self._selection_outcome("Created", selected)
         if action == "switch" and value:
             selected = await controller.select_session(agent_id, value)

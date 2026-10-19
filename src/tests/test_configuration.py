@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from pairo.core.agent import (
-    Agent,
+    AgentConfiguration,
     ApprovalMode,
     Hook,
     HookType,
@@ -21,11 +21,11 @@ from pairo.core.permissions import PermissionDecision, PermissionRequester
 
 
 class AllowRequester(PermissionRequester):
-    async def request(self, request):
+    def request(self, request):
         return PermissionDecision.ACCEPT
 
 
-def make_agent(tmp_path: Path, **changes) -> Agent:
+def make_agent(tmp_path: Path, **changes) -> AgentConfiguration:
     values = {
         "name": " agent ",
         "sandbox": SandboxMode.READ_ONLY,
@@ -33,7 +33,7 @@ def make_agent(tmp_path: Path, **changes) -> Agent:
         "model": " model ",
     }
     values.update(changes)
-    return Agent(**values)
+    return AgentConfiguration(**values)
 
 
 def test_agent_defaults_identity_and_collection_isolation(tmp_path: Path) -> None:
@@ -184,8 +184,6 @@ def test_neutral_core_modules_do_not_import_codex() -> None:
     root = Path(__file__).parents[1] / "pairo" / "core"
     neutral_files = [
         "agent/agent.py",
-        "agent/runner.py",
-        "agent/run.py",
         "clients/client.py",
         "mcp/mcp_permissions.py",
         "mcp/servers.py",

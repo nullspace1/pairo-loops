@@ -1,6 +1,8 @@
 """Provider-neutral translation and repository-routed permission tests."""
 
 import asyncio
+from threading import Thread
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -9,8 +11,8 @@ from pairo.core.clients.codex_permissions import (
     translate_permission_decision,
     translate_permission_request,
 )
-from pairo.core.clients.codex_client import CodexAgentClient, CodexSessionIdentifier
-from pairo.core.agent import Agent, ApprovalMode, SandboxMode
+from pairo.core.clients.codex_client import CodexAgent, CodexSessionIdentifier
+from pairo.core.agent import AgentConfiguration, ApprovalMode, SandboxMode
 from pairo.core.events import EventPipeline, PermissionRequest
 from pairo.core.permissions import (
     PermissionDecision,
@@ -27,7 +29,7 @@ class RecordingRequester(PermissionRequester):
         self.decision = decision
         self.requests = []
 
-    async def request(self, request):
+    def request(self, request):
         self.requests.append(request)
         return self.decision
 
@@ -35,6 +37,7 @@ class RecordingRequester(PermissionRequester):
 def test_concurrent_permission_requests_are_routed_by_identifier() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         repository = SqliteSessionRepository()
         agent_id = uuid4()
         identifier = {"provider": "fake", "thread_id": "thread-1", "turn_id": "turn-1"}
@@ -52,8 +55,8 @@ def test_concurrent_permission_requests_are_routed_by_identifier() -> None:
             identifier,
         )
         assert command is not None and file_change is not None
-        first = asyncio.create_task(requester.request(command))
-        second = asyncio.create_task(requester.request(file_change))
+        first = asyncio.create_task(requester._request(command))
+        second = asyncio.create_task(requester._request(file_change))
         while len(
             [event for event in pipeline.events if isinstance(event, PermissionRequest)]
         ) < 2:
@@ -149,6 +152,7 @@ def test_build_permission_response_validates_decisions() -> None:
 def test_cancelled_permission_request_cleans_pending_response() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         repository = SqliteSessionRepository()
         agent_id = uuid4()
         identifier = {"provider": "fake", "thread": "thread-1"}
@@ -158,7 +162,7 @@ def test_cancelled_permission_request_cleans_pending_response() -> None:
             "item/fileChange/requestApproval", {"path": "x"}, identifier
         )
         assert request is not None
-        task = asyncio.create_task(requester.request(request))
+        task = asyncio.create_task(requester._request(request))
         while not requester._responses:
             await asyncio.sleep(0)
         task.cancel()
@@ -174,6 +178,7 @@ def test_cancelled_permission_request_cleans_pending_response() -> None:
 def test_permission_response_must_match_request_agent_and_session() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
         repository = SqliteSessionRepository()
         agent_id = uuid4()
         identifier = {"provider": "fake", "thread": "thread-1"}
@@ -183,7 +188,7 @@ def test_permission_response_must_match_request_agent_and_session() -> None:
             "item/fileChange/requestApproval", {"path": "x"}, identifier
         )
         assert request is not None
-        task = asyncio.create_task(requester.request(request))
+        task = asyncio.create_task(requester._request(request))
         while not any(isinstance(event, PermissionRequest) for event in pipeline.events):
             await asyncio.sleep(0)
         published = next(
@@ -214,17 +219,67 @@ def test_permission_response_must_match_request_agent_and_session() -> None:
     asyncio.run(scenario())
 
 
-def test_codex_client_wraps_the_configured_neutral_requester() -> None:
+def test_codex_agent_calls_the_permission_requester_directly() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
+        pipeline.bind()
+        requester = RecordingRequester(PermissionDecision.ACCEPT)
+        configured = AgentConfiguration(
+            name="reviewer",
+            sandbox=SandboxMode.READ_ONLY,
+            workspace=".",
+            model="test",
+            approval_mode=ApprovalMode.USER,
+            permission_requester=requester,
+        )
+
+        class Client:
+            async def start(self):
+                pass
+
+            async def initialize(self):
+                pass
+
+            async def close(self):
+                pass
+
+            async def thread_resume(self, _thread_id, _params):
+                return SimpleNamespace(thread=SimpleNamespace(id="thread-1"))
+
+        adapter = CodexAgent(configured, pipeline, Client())
+        await adapter.activate_session(
+            "Conversation 1",
+            {"provider": "codex", "thread_id": "thread-1"},
+        )
+
+        response = adapter._route_permission(
+            "item/commandExecution/requestApproval",
+            {"threadId": "thread-1", "command": "pytest"},
+        )
+
+        assert response == {"decision": "accept"}
+        assert len(requester.requests) == 1
+        assert requester.requests[0].details == {
+            "threadId": "thread-1",
+            "command": "pytest",
+        }
+        await adapter.close()
+        await pipeline.close()
+
+    asyncio.run(scenario())
+
+
+def test_textual_requester_hands_sdk_callback_to_the_principal_loop() -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        pipeline.bind()
         repository = SqliteSessionRepository()
         identifier = {
             "provider": "codex",
             "thread_id": "thread-1",
-            "turn_id": "turn-1",
         }
         requester = TextualPermissionRequester(pipeline, repository)
-        agent = Agent(
+        agent = AgentConfiguration(
             name="reviewer",
             sandbox=SandboxMode.READ_ONLY,
             workspace=".",
@@ -235,17 +290,31 @@ def test_codex_client_wraps_the_configured_neutral_requester() -> None:
         await repository.save_session(agent.id, "Conversation 1", identifier)
         assert "permission_requester" not in agent.model_dump()
 
-        adapter = CodexAgentClient()
-        adapter._loop = asyncio.get_running_loop()
-        session = CodexSessionIdentifier.model_validate(identifier)
-        adapter._register_session(agent, session)
-        response_task = asyncio.create_task(
-            asyncio.to_thread(
-                adapter._route_permission,
-                "item/commandExecution/requestApproval",
-                {"threadId": session.thread_id, "command": "pytest"},
+        class Client:
+            async def start(self):
+                pass
+
+            async def initialize(self):
+                pass
+
+            async def close(self):
+                pass
+
+            async def thread_resume(self, _thread_id, _params):
+                return SimpleNamespace(thread=SimpleNamespace(id="thread-1"))
+
+        adapter = CodexAgent(agent, pipeline, Client())
+        await adapter.activate_session("Conversation 1", identifier)
+        responses = []
+        callback = Thread(
+            target=lambda: responses.append(
+                adapter._route_permission(
+                    "item/commandExecution/requestApproval",
+                    {"threadId": "thread-1", "command": "pytest"},
+                )
             )
         )
+        callback.start()
         while not any(
             isinstance(event, PermissionRequest) for event in pipeline.events
         ):
@@ -255,7 +324,10 @@ def test_codex_client_wraps_the_configured_neutral_requester() -> None:
         )
         await pipeline.enqueue(build_permission_response(request, "accept"))
 
-        assert await response_task == {"decision": "accept"}
+        while callback.is_alive():
+            await asyncio.sleep(0)
+        callback.join()
+        assert responses == [{"decision": "accept"}]
         await adapter.close()
         await repository.close()
         await pipeline.close()
@@ -263,56 +335,22 @@ def test_codex_client_wraps_the_configured_neutral_requester() -> None:
     asyncio.run(scenario())
 
 
-def test_shared_codex_client_routes_permissions_to_each_agent() -> None:
+def test_permission_failure_defaults_to_decline() -> None:
     async def scenario() -> None:
-        first_requester = RecordingRequester(PermissionDecision.ACCEPT)
-        second_requester = RecordingRequester(PermissionDecision.DECLINE)
-        first_agent = Agent(
-            name="first",
+        pipeline = EventPipeline()
+        pipeline.bind()
+        configured = AgentConfiguration(
+            name="agent",
             sandbox=SandboxMode.READ_ONLY,
             workspace=".",
             model="test",
-            approval_mode=ApprovalMode.USER,
-            permission_requester=first_requester,
         )
-        second_agent = Agent(
-            name="second",
-            sandbox=SandboxMode.READ_ONLY,
-            workspace=".",
-            model="test",
-            approval_mode=ApprovalMode.USER,
-            permission_requester=second_requester,
-        )
-        first_session = CodexSessionIdentifier(
-            thread_id="thread-1",
-            turn_id="turn-1",
-        )
-        second_session = CodexSessionIdentifier(
-            thread_id="thread-2",
-            turn_id="turn-2",
-        )
-        adapter = CodexAgentClient()
-        adapter._loop = asyncio.get_running_loop()
-        adapter._register_session(first_agent, first_session)
-        adapter._register_session(second_agent, second_session)
-
-        first_response, second_response = await asyncio.gather(
-            asyncio.to_thread(
-                adapter._route_permission,
-                "item/commandExecution/requestApproval",
-                {"threadId": "thread-1", "command": "one"},
-            ),
-            asyncio.to_thread(
-                adapter._route_permission,
-                "item/commandExecution/requestApproval",
-                {"threadId": "thread-2", "command": "two"},
-            ),
-        )
-
-        assert first_response == {"decision": "accept"}
-        assert second_response == {"decision": "decline"}
-        assert first_requester.requests[0].session_identifier["thread_id"] == "thread-1"
-        assert second_requester.requests[0].session_identifier["thread_id"] == "thread-2"
+        adapter = CodexAgent(configured, pipeline)
+        assert adapter._route_permission(
+            "item/commandExecution/requestApproval",
+            {"threadId": "unknown", "command": "pytest"},
+        ) == {"decision": "decline"}
         await adapter.close()
+        await pipeline.close()
 
     asyncio.run(scenario())

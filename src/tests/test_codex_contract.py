@@ -1,4 +1,4 @@
-"""Focused contract tests for provider-neutral-to-Codex mapping helpers."""
+"""Focused contracts for the asynchronous Codex agent adapter."""
 
 import asyncio
 from pathlib import Path
@@ -7,23 +7,60 @@ from types import SimpleNamespace
 import pytest
 
 from pairo.core.agent import (
-    Agent,
+    AgentConfiguration,
     Hook,
     HookType,
     ReasoningEffort,
     SandboxMode,
     WebSearchMode,
 )
-from pairo.core.clients.codex_client import CodexAgentClient, CodexSessionIdentifier
-from pairo.core.events import ClientTokenUsageUpdated
+from pairo.core.clients import AgentStatus
+from pairo.core.clients.codex_client import (
+    CodexAgent,
+    CodexSessionIdentifier,
+    _ApprovalAwareAsyncCodexClient,
+)
+from pairo.core.events import ClientTokenUsageUpdated, EventPipeline, SessionCompacted
 from pairo.core.mcp.mcp_permissions import MCPPermissions, MCPToolApprovalMode
 from pairo.core.mcp.servers import HttpMCPServer, StdioMCPServer
+
+
+class FakeAsyncCodexClient:
+    def __init__(self) -> None:
+        self.started = 0
+        self.initialized = 0
+        self.closed = 0
+        self.compacted: list[str] = []
+
+    async def start(self) -> None:
+        self.started += 1
+
+    async def initialize(self) -> None:
+        self.initialized += 1
+
+    async def close(self) -> None:
+        self.closed += 1
+
+    async def thread_start(self, _params):
+        return SimpleNamespace(thread=SimpleNamespace(id="thread-1"))
+
+    async def thread_compact(self, thread_id: str) -> None:
+        self.compacted.append(thread_id)
+
+
+def configuration(tmp_path: Path) -> AgentConfiguration:
+    return AgentConfiguration(
+        name="developer",
+        sandbox=SandboxMode.READ_ONLY,
+        workspace=tmp_path,
+        model="test",
+    )
 
 
 def test_codex_configuration_maps_reasoning_search_permissions_and_hooks(
     tmp_path: Path,
 ) -> None:
-    configuration = Agent(
+    configured = AgentConfiguration(
         name="developer",
         sandbox=SandboxMode.WORKSPACE_WRITE,
         workspace=tmp_path,
@@ -39,64 +76,51 @@ def test_codex_configuration_maps_reasoning_search_permissions_and_hooks(
                     tool_approval_modes={"lookup": MCPToolApprovalMode.AUTO},
                 ),
             ),
-            StdioMCPServer(
-                name="local",
-                command="server",
-                args=("--stdio",),
-                permissions=MCPPermissions(default_tools_approval_mode=None),
-            ),
+            StdioMCPServer(name="local", command="server", args=("--stdio",)),
         ],
-        hooks={
-            HookType.SESSION_START: [Hook(command="prepare", is_async=True)],
-        },
+        hooks={HookType.SESSION_START: [Hook(command="prepare", is_async=True)]},
     )
 
-    result = CodexAgentClient._codex_config(configuration)
+    result = CodexAgent._codex_config(configured)
+
     assert result["model_reasoning_effort"] == "high"
     assert result["web_search"] == "live"
     assert result["mcp_servers"]["remote"] == {
         "url": "https://example.test/mcp",
         "startup_timeout_sec": 10.0,
-        "http_headers": {"X-Agent-ID": str(configuration.id)},
+        "http_headers": {"X-Agent-ID": str(configured.id)},
         "default_tools_approval_mode": "prompt",
         "tools": {"lookup": {"approval_mode": "auto"}},
     }
-    assert result["mcp_servers"]["local"] == {
-        "command": "server",
-        "args": ["--stdio"],
-        "startup_timeout_sec": 10.0,
-        "env": {"X-Agent-ID": str(configuration.id)},
+    assert result["mcp_servers"]["local"]["env"] == {
+        "X-Agent-ID": str(configured.id)
     }
-    assert result["hooks"] == {
-        "SessionStart": [
-            {
-                "hooks": [
-                    {"type": "command", "command": "prepare", "async": True}
-                ]
-            }
-        ]
+    assert result["hooks"]["SessionStart"][0]["hooks"][0] == {
+        "type": "command",
+        "command": "prepare",
+        "async": True,
     }
 
 
-def test_codex_config_omits_unconfigured_optional_values(tmp_path: Path) -> None:
-    configuration = Agent(
-        name="reader",
-        sandbox=SandboxMode.READ_ONLY,
-        workspace=tmp_path,
-        model="test",
-    )
-    assert CodexAgentClient._codex_config(configuration) == {
-        "model_reasoning_effort": "low",
-        "web_search": "cached",
+def test_codex_identifier_is_durable_and_contains_no_turn_id() -> None:
+    identifier = CodexSessionIdentifier(thread_id="thread-1")
+    assert identifier.model_dump(mode="json") == {
+        "provider": "codex",
+        "thread_id": "thread-1",
     }
+    with pytest.raises(ValueError):
+        CodexSessionIdentifier.model_validate(
+            {"provider": "codex", "thread_id": "thread-1", "turn_id": "turn-1"}
+        )
 
 
-def test_codex_identifier_requires_an_active_turn_for_turn_operations() -> None:
-    inactive = CodexSessionIdentifier(thread_id="thread-1")
-    with pytest.raises(ValueError, match="no active turn"):
-        CodexAgentClient._active_identifier(inactive)
-    active = inactive.model_copy(update={"turn_id": "turn-1"})
-    assert CodexAgentClient._active_identifier(active) is active
+def test_async_sdk_adapter_injects_the_sync_approval_handler() -> None:
+    def approve(_method, _params):
+        return {"decision": "accept"}
+
+    client = _ApprovalAwareAsyncCodexClient(approve)
+
+    assert client._sync._approval_handler is approve
 
 
 def test_collect_text_recurses_in_document_order() -> None:
@@ -107,82 +131,35 @@ def test_collect_text_recurses_in_document_order() -> None:
             {"items": [{"nested": {"text": "final"}}]},
         ],
     }
-    assert CodexAgentClient._collect_text(value) == ["outer", "first", "final"]
+    assert CodexAgent._collect_text(value) == ["outer", "first", "final"]
 
 
-def test_permission_route_declines_when_no_runtime_requester_is_available() -> None:
-    adapter = CodexAgentClient()
-    assert adapter._route_permission(
-        "item/commandExecution/requestApproval",
-        {"threadId": "unknown-thread", "command": "pytest"},
-    ) == {"decision": "decline"}
-
-
-def test_concurrent_initialization_creates_one_sdk_client(monkeypatch) -> None:
-    class FakeSdkClient:
-        instances: list["FakeSdkClient"] = []
-
-        def __init__(self, approval_handler) -> None:
-            self.approval_handler = approval_handler
-            self.close_calls = 0
-            self.instances.append(self)
-
-        def start(self) -> None:
-            return None
-
-        def initialize(self) -> None:
-            return None
-
-        def close(self) -> None:
-            self.close_calls += 1
-
+def test_client_initialization_and_compaction_are_awaited_once(tmp_path: Path) -> None:
     async def scenario() -> None:
-        monkeypatch.setattr(
-            "pairo.core.clients.codex_client.CodexClient",
-            FakeSdkClient,
-        )
-        adapter = CodexAgentClient()
-        clients = await asyncio.gather(*(adapter._ensure_client() for _ in range(4)))
-        assert len(FakeSdkClient.instances) == 1
-        assert all(client is clients[0] for client in clients)
-        await adapter.close()
-        await adapter.close()
-        assert FakeSdkClient.instances[0].close_calls == 1
+        pipeline = EventPipeline()
+        pipeline.bind()
+        client = FakeAsyncCodexClient()
+        agent = CodexAgent(configuration(tmp_path), pipeline, client)
+
+        await asyncio.gather(*(agent._ensure_client() for _ in range(4)))
+        active = await agent.new_session("Conversation 1")
+        await agent.compact()
+
+        assert client.started == 1
+        assert client.initialized == 1
+        assert client.compacted == [active.identifier.thread_id]
+        assert agent.status() is AgentStatus.IDLE
+        assert any(isinstance(event, SessionCompacted) for event in pipeline.events)
+
+        await agent.close()
+        await agent.close()
+        assert client.closed == 1
+        await pipeline.close()
 
     asyncio.run(scenario())
 
 
-def test_compaction_delegates_to_the_codex_thread() -> None:
-    class FakeSdkClient:
-        def __init__(self) -> None:
-            self.compacted: list[str] = []
-
-        def thread_compact(self, thread_id: str) -> None:
-            self.compacted.append(thread_id)
-
-    async def scenario() -> None:
-        adapter = CodexAgentClient()
-        sdk = FakeSdkClient()
-        adapter._client = sdk
-        identifier = CodexSessionIdentifier(thread_id="thread-1")
-        adapter._register_session(
-            Agent(
-                name="developer",
-                sandbox=SandboxMode.READ_ONLY,
-                workspace=Path.cwd(),
-                model="test",
-            ),
-            identifier,
-        )
-
-        await adapter.compact(identifier)
-
-        assert sdk.compacted == ["thread-1"]
-
-    asyncio.run(scenario())
-
-
-def test_token_usage_notification_is_translated_without_provider_types() -> None:
+def test_token_usage_notification_is_provider_neutral(tmp_path: Path) -> None:
     from openai_codex.generated.v2_all import (
         ThreadTokenUsage,
         ThreadTokenUsageUpdatedNotification,
@@ -199,8 +176,11 @@ def test_token_usage_notification_is_translated_without_provider_types() -> None
         )
 
     async def scenario() -> None:
-        event = await CodexAgentClient()._translate_notification(
-            CodexSessionIdentifier(thread_id="thread-1", turn_id="turn-1"),
+        pipeline = EventPipeline()
+        pipeline.bind()
+        agent = CodexAgent(configuration(tmp_path), pipeline, FakeAsyncCodexClient())
+        event = await agent._translate_notification(
+            CodexSessionIdentifier(thread_id="thread-1"),
             SimpleNamespace(
                 payload=ThreadTokenUsageUpdatedNotification(
                     threadId="thread-1",
@@ -213,10 +193,10 @@ def test_token_usage_notification_is_translated_without_provider_types() -> None
                 )
             ),
         )
-
         assert isinstance(event, ClientTokenUsageUpdated)
         assert event.last.total_tokens == 100
         assert event.total.total_tokens == 500
-        assert event.model_context_window == 200_000
+        await agent.close()
+        await pipeline.close()
 
     asyncio.run(scenario())

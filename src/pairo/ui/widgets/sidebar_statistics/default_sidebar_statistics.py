@@ -6,7 +6,8 @@ from datetime import datetime
 from enum import Enum
 from uuid import UUID
 
-from pairo.core.agent import Agent
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
 
 from .fixed_statistic import FixedStatistic
 from .statistic import SidebarStatisticContext, SidebarStatisticProvider
@@ -54,11 +55,12 @@ class DefaultSidebarStatisticsFactory:
 
     def __init__(
         self,
-        agent: Agent,
+        agent: Agent[SessionIdentifier],
         timestamp_formatter: TimestampFormatter | None = None,
         duration_formatter: DurationFormatter | None = None,
     ) -> None:
         self._agent = agent
+        self._configuration = agent.configuration()
         self._timestamp_formatter = timestamp_formatter or TimestampFormatter()
         self._duration_formatter = duration_formatter or DurationFormatter()
 
@@ -95,7 +97,7 @@ class DefaultSidebarStatisticsFactory:
                 f"MCP server: {server.name}",
                 ConstantStatisticValue(server.description),
             )
-            for server in self._agent.mcp_servers
+            for server in self._configuration.mcp_servers
         )
         return statistics or (
             FixedStatistic(
@@ -116,40 +118,40 @@ class DefaultSidebarStatisticsFactory:
         )
 
     async def _agent_name(self, context: SidebarStatisticContext) -> str:
-        return context.agent.name
+        return context.agent.configuration().name
 
     async def _agent_id(self, context: SidebarStatisticContext) -> UUID:
-        return context.agent.id
+        return context.agent.configuration().id
 
     async def _agent_state(self, context: SidebarStatisticContext) -> str:
-        return self._display_enum(context.runner.state(context.agent.id))
+        return self._display_enum(context.agent.status())
 
     async def _agent_model(self, context: SidebarStatisticContext) -> str:
-        return context.agent.model
+        return context.agent.configuration().model
 
     async def _reasoning_effort(self, context: SidebarStatisticContext) -> str:
-        return self._display_enum(context.agent.reasoning_effort)
+        return self._display_enum(context.agent.configuration().reasoning_effort)
 
     async def _sandbox(self, context: SidebarStatisticContext) -> str:
-        return self._display_enum(context.agent.sandbox)
+        return self._display_enum(context.agent.configuration().sandbox)
 
     async def _workspace(self, context: SidebarStatisticContext) -> str:
-        return str(context.agent.workspace)
+        return str(context.agent.configuration().workspace)
 
     async def _approval_mode(self, context: SidebarStatisticContext) -> str:
-        return self._display_enum(context.agent.approval_mode)
+        return self._display_enum(context.agent.configuration().approval_mode)
 
     async def _web_search(self, context: SidebarStatisticContext) -> str:
-        return self._display_enum(context.agent.web_search)
+        return self._display_enum(context.agent.configuration().web_search)
 
     async def _prompt(self, context: SidebarStatisticContext) -> str:
-        return context.agent.base_instructions or "Not set"
+        return context.agent.configuration().base_instructions or "Not set"
 
     async def _developer_instructions(
         self,
         context: SidebarStatisticContext,
     ) -> str:
-        return context.agent.developer_instructions or "Not set"
+        return context.agent.configuration().developer_instructions or "Not set"
 
     async def _session_name(self, context: SidebarStatisticContext) -> str:
         if context.session is not None:
@@ -180,9 +182,14 @@ class DefaultSidebarStatisticsFactory:
         return "Default" if value is None else str(value.value)
 
 
-def default_sidebar_statistics(agent: Agent) -> SidebarStatistics:
-    """Compatibility entry point for the standard sidebar statistics."""
-    return DefaultSidebarStatisticsFactory(agent).build()
+class DefaultSidebarStatistics:
+    """Callable public entry point for standard statistics."""
+
+    def __call__(self, agent: Agent[SessionIdentifier]) -> SidebarStatistics:
+        return DefaultSidebarStatisticsFactory(agent).build()
+
+
+default_sidebar_statistics = DefaultSidebarStatistics()
 
 
 def format_time(value: datetime | None) -> str:
@@ -197,6 +204,7 @@ def format_duration(seconds: float) -> str:
 
 __all__ = [
     "ConstantStatisticValue",
+    "DefaultSidebarStatistics",
     "DefaultSidebarStatisticsFactory",
     "DurationFormatter",
     "TimestampFormatter",

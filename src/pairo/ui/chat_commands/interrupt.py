@@ -22,7 +22,7 @@ class InterruptCommand(SlashCommand):
         agent_id: UUID,
         argument: str,
     ) -> CommandOutcome:
-        interrupted = await controller.runner.interrupt(agent_id)
+        interrupted = await controller.agent(agent_id).interrupt()
         message = "Interrupt requested." if interrupted else "Agent is already idle."
         return CommandOutcome(
             TranscriptEntry[SystemTranscriptMetadata](

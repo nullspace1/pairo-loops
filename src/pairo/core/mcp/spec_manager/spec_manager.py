@@ -7,13 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import re
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 from uuid import UUID, uuid4
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 
-from pairo.core.agent import Agent, Runner
+from pairo.core.agent import JsonObject, SessionIdentifier
+from pairo.core.clients import Agent
 from pairo.core.clients.client import MCP_AGENT_ID_HEADER
 from pairo.core.mcp.mcp_http_wrapper import MCPHttpWrapper
 
@@ -31,8 +32,8 @@ class WorkerVerifierPair:
     """A stable worker/verifier pairing exposed to the director by ``pair_id``."""
 
     pair_id: str
-    worker: Agent
-    verifier: Agent
+    worker: Agent[SessionIdentifier]
+    verifier: Agent[SessionIdentifier]
 
     def __post_init__(self) -> None:
         normalized = self.pair_id.strip()
@@ -155,8 +156,8 @@ class SpecManager(MCPHttpWrapper):
     def __init__(
         self,
         folder: str | Path,
-        runner: Runner,
-        director: Agent,
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        director: Agent[SessionIdentifier],
         pairs: Sequence[WorkerVerifierPair],
         port: int = 8082,
         verification_timeout: float = 300,
@@ -166,39 +167,47 @@ class SpecManager(MCPHttpWrapper):
             raise ValueError("Spec manager folder must be an existing directory.")
         if verification_timeout <= 0:
             raise ValueError("Verification timeout must be greater than zero.")
-        self._validate_registration(runner, director, pairs)
-        self._runner = runner
+        self._validate_registration(agents, director, pairs)
         self._director = director
         self._pairs = {pair.pair_id: pair for pair in pairs}
-        self._worker_pairs = {pair.worker.id: pair for pair in pairs}
-        self._verifier_pairs = {pair.verifier.id: pair for pair in pairs}
+        self._worker_pairs = {pair.worker.configuration().id: pair for pair in pairs}
+        self._verifier_pairs = {pair.verifier.configuration().id: pair for pair in pairs}
         self._assignments: dict[str, _Assignment] = {}
         self._store = _FeatureStore(root)
         self._verification_timeout = verification_timeout
         self._lock = asyncio.Lock()
         super().__init__(port=port)
 
-    @staticmethod
+    @classmethod
     def _validate_registration(
-        runner: Runner, director: Agent, pairs: Sequence[WorkerVerifierPair]
+        cls,
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        director: Agent[SessionIdentifier],
+        pairs: Sequence[WorkerVerifierPair],
     ) -> None:
-        if runner.agents.get(director.id) is not director:
-            raise ValueError("Director is not registered with the runner.")
+        director_configuration = director.configuration()
+        if agents.get(director_configuration.id) is not director:
+            raise ValueError("Director is not registered with the agent mapping.")
         pair_ids: set[str] = set()
-        participant_ids: set[UUID] = {director.id}
+        participant_ids: set[UUID] = {director_configuration.id}
         for pair in pairs:
             pair_id = pair.pair_id.strip()
             if not pair_id or pair_id in pair_ids:
                 raise ValueError("Worker/verifier pair IDs must be non-empty and unique.")
             pair_ids.add(pair_id)
-            if pair.worker.id == pair.verifier.id:
+            if pair.worker.configuration().id == pair.verifier.configuration().id:
                 raise ValueError(f"Pair '{pair_id}' must use distinct agents.")
             for agent in (pair.worker, pair.verifier):
-                if runner.agents.get(agent.id) is not agent:
-                    raise ValueError(f"Agent '{agent.name}' is not registered with the runner.")
-                if agent.id in participant_ids:
-                    raise ValueError(f"Agent '{agent.name}' has more than one spec-manager role.")
-                participant_ids.add(agent.id)
+                configuration = agent.configuration()
+                if agents.get(configuration.id) is not agent:
+                    raise ValueError(
+                        f"Agent '{configuration.name}' is not registered with the agent mapping."
+                    )
+                if configuration.id in participant_ids:
+                    raise ValueError(
+                        f"Agent '{configuration.name}' has more than one spec-manager role."
+                    )
+                participant_ids.add(configuration.id)
 
     def build_mcp_server(self) -> MCPServer:
         mcp = MCPServer("spec_manager", "Spec Manager", "Coordinate feature tasks and reviews.")
@@ -267,7 +276,7 @@ class SpecManager(MCPHttpWrapper):
                 return f"Could not delete task: {error_value}"
 
         @mcp.tool("list_workers", "List worker/verifier pairs and their status.")
-        async def list_workers(ctx: Context) -> list[dict[str, object]] | str:
+        async def list_workers(ctx: Context) -> list[JsonObject] | str:
             error = self._require_role(ctx, "director")
             if error:
                 return error
@@ -328,20 +337,19 @@ class SpecManager(MCPHttpWrapper):
                 return f"Task '{task_name}' does not exist."
             if task.status != "pending":
                 return f"Task '{task_name}' is {task.status}, not pending."
-            worker_session = self._session_name("work", pair_id, task.name)
-            verifier_session = self._session_name("verify", pair_id, task.name)
             try:
-                await self._runner.create_session(pair.worker.id, worker_session)
-                await self._runner.create_session(pair.verifier.id, verifier_session)
-                await self._runner.send_message(
-                    pair.worker.id, self._worker_message(task), source=self._director.name
+                await pair.worker.new_session(
+                    self._session_name("work", pair_id, task.name)
+                )
+                await pair.verifier.new_session(
+                    self._session_name("verify", pair_id, task.name)
+                )
+                await pair.worker.send_message(
+                    self._worker_message(task),
+                    source=self._director.configuration().name,
                 )
                 self._store.set_status(task.name, "working")
             except Exception as error:
-                if worker_session in self._runner.session_names(pair.worker.id):
-                    await self._safe_delete(pair.worker.id, worker_session)
-                if verifier_session in self._runner.session_names(pair.verifier.id):
-                    await self._safe_delete(pair.verifier.id, verifier_session)
                 return f"Could not assign task '{task.name}': {error}"
             self._assignments[pair_id] = _Assignment(
                 task.name,
@@ -377,8 +385,9 @@ class SpecManager(MCPHttpWrapper):
             task = self._store.tasks()[assignment.task_name]
             future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
             try:
-                await self._runner.send_message(
-                    pair.verifier.id, self._verifier_message(task), source=pair.worker.name
+                await pair.verifier.send_message(
+                    self._verifier_message(task),
+                    source=pair.worker.configuration().name,
                 )
                 self._store.set_status(task.name, "verifying")
             except Exception as error:
@@ -408,10 +417,10 @@ class SpecManager(MCPHttpWrapper):
             try:
                 self._store.set_status(task_name, "accepted" if accepted else "working")
                 if not accepted:
-                    await self._runner.send_message(
-                        pair.worker.id,
-                        f"Task '{task_name}' was rejected by {pair.verifier.name}: {feedback}",
-                        source=pair.verifier.name,
+                    await pair.worker.send_message(
+                        f"Task '{task_name}' was rejected by "
+                        f"{pair.verifier.configuration().name}: {feedback}",
+                        source=pair.verifier.configuration().name,
                     )
             except Exception as error:
                 return f"Could not record verification decision: {error}"
@@ -434,25 +443,21 @@ class SpecManager(MCPHttpWrapper):
             if not assignment.completion.done():
                 assignment.completion.cancel()
 
-    async def _safe_delete(self, agent_id: UUID, session: str) -> None:
-        try:
-            await self._runner.delete_session(agent_id, session)
-        except Exception:
-            pass
-
-    def _pair_summary(self, pair: WorkerVerifierPair) -> dict[str, object]:
+    def _pair_summary(self, pair: WorkerVerifierPair) -> JsonObject:
         assignment = self._assignments.get(pair.pair_id)
+        worker = pair.worker.configuration()
+        verifier = pair.verifier.configuration()
         return {
             "pair_id": pair.pair_id,
-            "worker": {"id": str(pair.worker.id), "name": pair.worker.name},
-            "verifier": {"id": str(pair.verifier.id), "name": pair.verifier.name},
+            "worker": {"id": str(worker.id), "name": worker.name},
+            "verifier": {"id": str(verifier.id), "name": verifier.name},
             "status": assignment.status if assignment else "idle",
             "task": assignment.task_name if assignment else None,
         }
 
     def _require_role(self, ctx: Context, role: str) -> str | None:
         agent_id = self._agent_id(ctx)
-        allowed = role == "director" and agent_id == self._director.id
+        allowed = role == "director" and agent_id == self._director.configuration().id
         return None if allowed else f"Only the registered {role} may use this tool."
 
     @staticmethod
@@ -502,40 +507,63 @@ _ROLE_INSTRUCTIONS = {
 }
 
 
-def install_spec_manager(
-    folder: str | Path,
-    runner: Runner,
-    director: Agent,
-    pairs: Sequence[WorkerVerifierPair],
-    port: int = 8082,
-    verification_timeout: float = 300,
-) -> SpecManager:
-    """Create and install a role-configured spec manager on all participants."""
-    manager = SpecManager(folder, runner, director, pairs, port, verification_timeout)
-    participants = [(director, "director")]
-    participants.extend((pair.worker, "worker") for pair in pairs)
-    participants.extend((pair.verifier, "verifier") for pair in pairs)
-    server = manager.as_http_mcp_server()
-    skills_root = Path(__file__).with_name("spec_manager_skills")
+class SpecManagerInstaller:
+    """Create a manager and configure every participant for its role."""
 
-    # Validation above makes the configuration pass safe from role conflicts.
-    for agent, role in participants:
-        configured = next((item for item in agent.mcp_servers if item.name == server.name), None)
-        if configured is not None and configured != server:
-            raise ValueError(
-                f"Agent '{agent.name}' already has a different MCP server named '{server.name}'."
+    def __call__(
+        self,
+        folder: str | Path,
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        director: Agent[SessionIdentifier],
+        pairs: Sequence[WorkerVerifierPair],
+        port: int = 8082,
+        verification_timeout: float = 300,
+    ) -> SpecManager:
+        manager = SpecManager(
+            folder,
+            agents,
+            director,
+            pairs,
+            port,
+            verification_timeout,
+        )
+        participants = [(director, "director")]
+        participants.extend((pair.worker, "worker") for pair in pairs)
+        participants.extend((pair.verifier, "verifier") for pair in pairs)
+        server = manager.as_http_mcp_server()
+        skills_root = Path(__file__).with_name("spec_manager_skills")
+
+        for agent, role in participants:
+            configuration = agent.configuration()
+            configured = next(
+                (item for item in configuration.mcp_servers if item.name == server.name),
+                None,
             )
-    for agent, role in participants:
-        if server not in agent.mcp_servers:
-            agent.add_mcp_server(server)
-        role_skills = skills_root / role
-        if role_skills not in agent.skill_folders:
-            agent.add_skill_folder(role_skills)
-        instructions = _ROLE_INSTRUCTIONS[role]
-        if instructions not in (agent.developer_instructions or ""):
-            agent.append_developer_instructions(instructions)
-    return manager
+            if configured is not None and configured != server:
+                raise ValueError(
+                    f"Agent '{configuration.name}' already has a different MCP server "
+                    f"named '{server.name}'."
+                )
+        for agent, role in participants:
+            configuration = agent.configuration()
+            if server not in configuration.mcp_servers:
+                configuration.add_mcp_server(server)
+            role_skills = skills_root / role
+            if role_skills not in configuration.skill_folders:
+                configuration.add_skill_folder(role_skills)
+            instructions = _ROLE_INSTRUCTIONS[role]
+            if instructions not in (configuration.developer_instructions or ""):
+                configuration.append_developer_instructions(instructions)
+        return manager
 
 
-__all__ = ["SpecManager", "WorkerVerifierPair", "install_spec_manager"]
+install_spec_manager = SpecManagerInstaller()
+
+
+__all__ = [
+    "SpecManager",
+    "SpecManagerInstaller",
+    "WorkerVerifierPair",
+    "install_spec_manager",
+]
 

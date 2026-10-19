@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from pairo import (
-    Agent,
+    AgentConfiguration,
     ApprovalMode,
     ReasoningEffort,
     SandboxMode,
@@ -16,7 +16,7 @@ def get_planner(pipeline, repository):
     agent_directory = Path(__file__).resolve().parent
     instructions = (agent_directory / "planner.md").read_text(encoding="utf-8")
 
-    return Agent(
+    return AgentConfiguration(
         name="planner",
         sandbox=SandboxMode.READ_ONLY,
         approval_mode=ApprovalMode.USER,

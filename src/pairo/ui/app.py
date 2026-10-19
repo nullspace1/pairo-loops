@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -11,9 +12,11 @@ from textual.app import App, ComposeResult
 from textual.css.query import NoMatches
 from textual.widgets import Footer, Header, Input, TabbedContent, TabPane
 
-from pairo.core.agent import Runner
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
 from pairo.core.events import (
     AgentTokenUsageUpdated,
+    EventPipeline,
     PermissionRequest,
     PermissionResponse,
     SessionCreated,
@@ -97,17 +100,17 @@ class AgentChatApp(App[None]):
 
     def __init__(
         self,
-        runner: Runner,
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        event_pipeline: EventPipeline,
         session_repository: SessionRepository | None = None,
         *,
         transcribers: TranscriberRegistry | None = None,
         sidebar_statistics: SidebarStatistics | None = None,
     ) -> None:
         super().__init__()
-        agents_by_id = dict(runner.agents)
-        self._runner = runner
+        agents_by_id = dict(agents)
         self._agents = agents_by_id
-        self._event_pipeline = runner.pipeline
+        self._event_pipeline = event_pipeline
         self._owns_repository = session_repository is None
         self.session_repository = session_repository or SqliteSessionRepository()
         self.history = self.session_repository
@@ -121,17 +124,18 @@ class AgentChatApp(App[None]):
         if self._sidebar_statistics is not None:
             self._sidebar_statistics.setup(self._event_pipeline, agents_by_id)
         self._controller = AgentCommandController(
-            runner,
+            agents_by_id,
+            event_pipeline,
             self.session_repository,
         )
         self._pane_ids = {
-            agent.id: f"agent-chat-{index}"
+            agent.configuration().id: f"agent-chat-{index}"
             for index, agent in enumerate(agents_by_id.values())
         }
         self.chats = {
-            agent.id: AgentChatPane(
+            agent.configuration().id: AgentChatPane(
                 agent,
-                runner,
+                agents_by_id,
                 self.session_repository,
                 self._event_pipeline,
                 self._transcribers,
@@ -149,7 +153,7 @@ class AgentChatApp(App[None]):
         yield Header()
         with TabbedContent(initial=next(iter(self._pane_ids.values())), id="agent-tabs"):
             for agent_id, pane_id in self._pane_ids.items():
-                with TabPane(self._agents[agent_id].name, id=pane_id):
+                with TabPane(self._agents[agent_id].configuration().name, id=pane_id):
                     yield self.chats[agent_id]
         yield Footer()
 
@@ -244,7 +248,9 @@ class AgentChatApp(App[None]):
         )
 
     def _receive_session_created(self, event: SessionCreated) -> SessionCreated:
-        if event.session_name in self._runner.session_names(event.agent_id):
+        agent = self._agents.get(event.agent_id)
+        active = agent.current_session() if agent is not None else None
+        if active is not None and active.name == event.session_name:
             self.call_later(self._apply_session_created, event)
         return event
 
@@ -444,16 +450,25 @@ class AgentChatApp(App[None]):
                 continue
 
 
-async def run_ui(
-    runner: Runner,
-    session_repository: SessionRepository | None = None,
-    *,
-    transcribers: TranscriberRegistry | None = None,
-    sidebar_statistics: SidebarStatistics | None = None,
-) -> None:
-    await AgentChatApp(
-        runner,
-        session_repository,
-        transcribers=transcribers,
-        sidebar_statistics=sidebar_statistics,
-    ).run_async()
+class UserInterfaceLauncher:
+    """Callable entry point for the default Textual interface."""
+
+    async def __call__(
+        self,
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        event_pipeline: EventPipeline,
+        session_repository: SessionRepository | None = None,
+        *,
+        transcribers: TranscriberRegistry | None = None,
+        sidebar_statistics: SidebarStatistics | None = None,
+    ) -> None:
+        await AgentChatApp(
+            agents,
+            event_pipeline,
+            session_repository,
+            transcribers=transcribers,
+            sidebar_statistics=sidebar_statistics,
+        ).run_async()
+
+
+run_ui = UserInterfaceLauncher()

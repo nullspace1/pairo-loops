@@ -1,12 +1,12 @@
 # Pairo Loops
 
 Pairo Loops is an asyncio-native orchestration layer and Textual interface for
-provider-neutral development agents. `Agent` stores an agent's identity and
-configuration, `Runner` owns conversations, and one `AgentClient` handles
-provider sessions for every agent.
+provider-neutral development agents. An `AgentConfiguration` describes a
+provider persona; an `Agent` owns one active provider session and turn; the
+session repository remains the authoritative catalog of durable sessions.
 
-See the [feature reference](src/docs/feature-reference.md) for the component
-map, conversation lifecycle, public interfaces, and operational constraints.
+See the [feature reference](src/docs/feature-reference.md) for the complete
+component and lifecycle contracts.
 
 ## Setup
 
@@ -25,7 +25,13 @@ Authenticate the local Codex CLI before starting Codex-backed agents.
 ```python
 import asyncio
 
-from pairo import Agent, ApprovalMode, CodexAgentClient, Runner, SandboxMode, run_agents
+from pairo import (
+    AgentConfiguration,
+    ApprovalMode,
+    CodexAgent,
+    SandboxMode,
+    run_agents,
+)
 from pairo.core.events import EventPipeline
 from pairo.ui import SqliteSessionRepository, TextualPermissionRequester
 
@@ -34,7 +40,7 @@ async def main() -> None:
     pipeline = EventPipeline()
     repository = SqliteSessionRepository()
     permissions = TextualPermissionRequester(pipeline, repository)
-    agent = Agent(
+    configuration = AgentConfiguration(
         name="reviewer",
         sandbox=SandboxMode.WORKSPACE_WRITE,
         workspace=".",
@@ -42,97 +48,53 @@ async def main() -> None:
         approval_mode=ApprovalMode.USER,
         permission_requester=permissions,
     )
-    client = CodexAgentClient()
-    runner = Runner([agent], pipeline, client)
-    await run_agents(runner, repository)
+    agent = CodexAgent(configuration, pipeline)
+    await run_agents({configuration.id: agent}, pipeline, repository)
 
 
 asyncio.run(main())
 ```
 
-## Configuration and conversations
+`run_agents` binds the pipeline to the application loop, creates each initial
+session concurrently, launches the UI, and closes agents, persistence, and the
+pipeline on success or failure.
 
-Each Agent receives an immutable UUID in `agent.id`. Names are immutable display
-labels and do not need to be unique; Runner operations and events use the agent
-ID. Other configuration is changed through validated setters such as
-`set_model`, `set_workspace`, and `set_approval_mode`; use
-`set_*`, `add_*`, and `remove_*` methods for MCP servers, skill folders, and
-hooks. Collection properties are immutable views. Each successful update is
-validated atomically, including cross-field approval and permission-requester
-requirements.
+## Sessions and commands
 
-Packaged MCP implementations receive the agents they should configure and add
-their server configuration directly. For example,
-`add_github_mcp_server(agents)` and `context7(agents, api_key, timeout)` attach
-their stdio configuration, while `Chatroom.add_chatroom(name, runner, agents)`
-attaches the chatroom HTTP configuration and registers the room membership.
+Only the active session is retained by an agent. The SQLite repository stores
+all session metadata and resolves a session switch before calling
+`agent.activate_session(...)`.
 
-The core spec-manager server coordinates a director and worker/verifier pairs:
+- `/session new [NAME]` creates and selects a session.
+- `/session switch NAME` activates a persisted session.
+- `/sessions` lists repository sessions.
+- `/compact` compacts the current idle session.
+- `/delete [NAME]` deletes metadata and transcript history, then selects or
+  creates a replacement when necessary.
+- `/interrupt` requests interruption of the active generation.
 
-```python
-from pairo import WorkerVerifierPair, install_spec_manager
+Provider identifiers are intentionally opaque outside their agent adapter.
+Codex persists only `thread_id`; fake sessions persist only `session_id`.
 
-spec_manager = install_spec_manager(
-    folder=".",
-    runner=runner,
-    director=director,
-    pairs=[WorkerVerifierPair("pair-1", worker, verifier)],
-)
-await spec_manager.boot_up()
-```
+## Events and approvals
 
-The installer adds role-specific skills and instructions to each participant.
-Tasks are stored in `FEATURES.md`; each assignment creates fresh worker and
-verifier sessions, which remain available until that role receives another
-task. Close the returned server during application cleanup.
+`EventPipeline.bind()` establishes the principal asyncio loop. Events may then
+be enqueued from any thread, but queue operations, listeners, history, waiters,
+and created tasks execute only on that loop. Notification consumers await each
+event receipt, providing backpressure and preserving provider order.
 
-`Runner` is the entry point for creating, restoring, switching, deleting,
-compacting, messaging, waiting on, and interrupting conversations. `new_session(agent)` and
-`restore_session(agent, identifier_json)` receive the Agent directly. The
-client snapshots its configuration at session creation or restoration, so
-later Agent updates apply to subsequent sessions only.
-
-Configure multiple skill folders with `agent.add_skill_folder(path)`. Codex
-merges folders into `<workspace>/.codex/skills` in order; later folders
-override earlier files with the same name. Configure lifecycle commands with
-`Hook` and `HookType`, adding and removing entries through the Agent methods.
-
-`run_agents(runner, repository)` starts initial conversations, launches the
-Textual UI, and closes the Runner, repository, and event pipeline when the
-application exits.
-
-## Sessions
-
-Session names are application-owned identities. Provider identifiers are
-opaque `SessionIdentifier` values and are persisted as JSON without being
-interpreted outside the provider client.
-
-- `/session new [NAME]` creates a session. Without a name, the UI chooses the
-  lowest unused `Conversation N`.
-- `/session switch NAME` restores or selects a known session.
-- `/sessions` lists persisted and loaded sessions.
-- `/compact` asks the provider client to compact the current idle session.
-- `/delete [NAME]` deletes the named or current session and its transcript.
-  Deleting the last available session immediately creates a replacement.
-- `/interrupt` interrupts the active generation.
-
-Each session row also has an `X` deletion button. Provider token-usage updates
-are recorded as debug-level transcript entries for the session that generated
-them. The chatroom MCP server can create and select named sessions for agents
-registered in the room.
-
-The SQLite schema is intentionally new and does not migrate the former thread
-schema.
-
-## Permission approvals
-
-Permission prompts appear inline in the agent's active session. Outstanding
-requests can be answered independently; completed cards remain as decision
-records in session history. Replayed history does not expose stale approval
-controls.
+The Codex SDK invokes approval callbacks synchronously on its own callback
+thread. `CodexAgent` translates the provider request, invokes the configured
+synchronous `PermissionRequester`, and translates its decision back to Codex.
+The Textual requester owns the UI-specific handoff to the principal pipeline
+loop while the SDK callback thread waits for the user's decision.
 
 ## Tests
 
+From `src`:
+
 ```powershell
-python -m pytest -q
+python -m pytest -q --basetemp .verify-tmp\pytest
+mypy --strict pairo
+python scripts\quality_gate.py
 ```

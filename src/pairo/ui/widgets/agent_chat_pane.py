@@ -1,5 +1,6 @@
 """Composite workspace for one agent."""
 
+from collections.abc import Mapping
 from uuid import UUID
 
 from textual import on
@@ -8,7 +9,8 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.widgets import Input, Select
 
-from pairo.core.agent import Agent, Runner
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
 from pairo.core.events import EventPipeline
 
 from ..models import EventDetailLevel, TranscriptEntry, TranscriptMetadata
@@ -27,8 +29,8 @@ class AgentChatPane(Vertical):
 
     def __init__(
         self,
-        agent: Agent,
-        runner: Runner,
+        agent: Agent[SessionIdentifier],
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
         repository: SessionRepository,
         event_pipeline: EventPipeline,
         transcribers: TranscriberRegistry,
@@ -49,9 +51,10 @@ class AgentChatPane(Vertical):
             markup=markup,
         )
         self.agent = agent
-        self._runner = runner
-        self.agent_id = agent.id
-        self.session_name = runner.session_name(agent.id)
+        self._agents = agents
+        self.agent_id = agent.configuration().id
+        active = agent.current_session()
+        self.session_name = active.name if active is not None else None
         self._repository = repository
         self._event_pipeline = event_pipeline
         self._transcribers = transcribers
@@ -82,7 +85,7 @@ class AgentChatPane(Vertical):
                     )
             yield AgentSidebar(
                 self.agent,
-                self._runner,
+                self._agents,
                 self._repository,
                 self._detail_level,
                 self._event_pipeline,

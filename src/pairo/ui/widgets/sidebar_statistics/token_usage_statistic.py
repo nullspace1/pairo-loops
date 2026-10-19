@@ -6,7 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from uuid import UUID
 
-from pairo.core.agent import Agent
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
 from pairo.core.events import (
     AgentTokenUsageUpdated,
     EventPipeline,
@@ -31,7 +32,7 @@ class TokenUsageStatistic:
     def setup(
         self,
         event_pipeline: EventPipeline,
-        agents: Mapping[UUID, Agent],
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
     ) -> None:
         """Register once and replay pipeline history for immediately useful values."""
         self._event_pipeline = event_pipeline
@@ -54,6 +55,8 @@ class TokenUsageStatistic:
     async def statistic(self, context: SidebarStatisticContext) -> str:
         if context.session_name is None:
             return "Unavailable"
-        usage = self._usage_by_session.get((context.agent.id, context.session_name))
+        usage = self._usage_by_session.get(
+            (context.agent.configuration().id, context.session_name)
+        )
         return "Unavailable" if usage is None else f"{usage.total.total_tokens} tokens"
 

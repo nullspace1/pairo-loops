@@ -1,15 +1,16 @@
-"""Provider-specific implementations of the neutral AgentClient protocol."""
+"""Provider-specific implementations of the neutral Agent protocol."""
 
-from .codex_client import CodexAgentClient, CodexSessionIdentifier
-from .client import AgentClient, SessionNotification
-from .fake_client import FakeAgentClient, FakeSessionIdentifier
+from .codex_client import CodexAgent, CodexSessionIdentifier
+from .client import ActiveSession, Agent, AgentStatus
+from .fake_client import FakeAgent, FakeSessionIdentifier
 
 __all__ = [
-    "AgentClient",
-    "CodexAgentClient",
+    "ActiveSession",
+    "Agent",
+    "AgentStatus",
+    "CodexAgent",
     "CodexSessionIdentifier",
-    "FakeAgentClient",
+    "FakeAgent",
     "FakeSessionIdentifier",
-    "SessionNotification",
 ]
 

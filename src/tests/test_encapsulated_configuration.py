@@ -4,7 +4,8 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pairo.core.agent import Agent, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.clients import AgentStatus
 from pairo.core.events import EventPipeline
 from pairo.core.mcp.servers import StdioMCPServer
 from pairo.mcp._agent_configuration import MCPServerAttacher
@@ -19,16 +20,25 @@ from pairo.ui.widgets.sidebar_statistics.default_sidebar_statistics import (
 )
 
 
-class _Runner:
-    def __init__(self, calls: list[str]) -> None:
+class _Agent:
+    def __init__(self, calls: list[str], configured: AgentConfiguration) -> None:
         self.calls = calls
-        self.pipeline = EventPipeline()
+        self._configuration = configured
 
-    async def start(self, name: str) -> None:
+    def configuration(self) -> AgentConfiguration:
+        return self._configuration
+
+    def current_session(self):
+        return None
+
+    def status(self) -> AgentStatus:
+        return AgentStatus.INACTIVE
+
+    async def new_session(self, name: str) -> None:
         self.calls.append(f"start:{name}")
 
     async def close(self) -> None:
-        self.calls.append("close:runner")
+        self.calls.append("close:agent")
 
 
 class _Repository:
@@ -42,24 +52,33 @@ class _Repository:
 def test_runtime_launcher_uses_its_injected_ui_launcher() -> None:
     async def scenario() -> None:
         calls: list[str] = []
-        runner = _Runner(calls)
+        pipeline = EventPipeline()
+        configured = AgentConfiguration(
+            name="agent",
+            model="test",
+            sandbox=SandboxMode.READ_ONLY,
+            workspace=Path.cwd(),
+        )
+        agent = _Agent(calls, configured)
+        agents = {configured.id: agent}
         repository = _Repository(calls)
 
-        async def launch_ui(received_runner, received_repository) -> None:
-            assert received_runner is runner
+        async def launch_ui(received_agents, received_pipeline, received_repository) -> None:
+            assert received_agents == agents
+            assert received_pipeline is pipeline
             assert received_repository is repository
             calls.append("ui")
 
-        await RuntimeLauncher(runner, repository, launch_ui).launch("Initial")
+        await RuntimeLauncher(agents, pipeline, repository, launch_ui).launch("Initial")
 
-        assert calls == ["start:Initial", "ui", "close:runner", "close:repository"]
-        assert runner.pipeline._closed
+        assert calls == ["start:Initial", "ui", "close:agent", "close:repository"]
+        assert pipeline._closed
 
     asyncio.run(scenario())
 
 
 def test_mcp_server_attacher_attaches_its_injected_server() -> None:
-    agent = Agent(
+    agent = AgentConfiguration(
         name="developer",
         model="test",
         sandbox=SandboxMode.READ_ONLY,
@@ -74,14 +93,15 @@ def test_mcp_server_attacher_attaches_its_injected_server() -> None:
 
 
 def test_default_statistics_factory_and_formatters_keep_legacy_behavior() -> None:
-    agent = Agent(
+    agent = AgentConfiguration(
         name="developer",
         model="test",
         sandbox=SandboxMode.READ_ONLY,
         workspace=Path.cwd(),
     )
     timestamp = datetime(2026, 10, 15, 12, 30, 45, tzinfo=UTC)
-    statistics = DefaultSidebarStatisticsFactory(agent).build()
+    runtime_agent = _Agent([], agent)
+    statistics = DefaultSidebarStatisticsFactory(runtime_agent).build()
 
     assert [statistic.key for statistic in statistics.agent_information][-1] == (
         "mcp_servers"
@@ -105,5 +125,5 @@ def test_default_statistics_factory_and_formatters_keep_legacy_behavior() -> Non
     assert format_duration(3661.9) == DurationFormatter().format(3661.9)
     assert [
         statistic.key
-        for statistic in default_sidebar_statistics(agent).agent_information
+        for statistic in default_sidebar_statistics(runtime_agent).agent_information
     ] == [statistic.key for statistic in statistics.agent_information]

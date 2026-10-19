@@ -6,7 +6,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
-from pairo.core.agent import Agent
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
 from pairo.core.events import EventPipeline
 
 from .statistic import SidebarStatisticContext, StatisticValue
@@ -23,7 +24,7 @@ class FixedStatistic:
     def setup(
         self,
         event_pipeline: EventPipeline,
-        agents: Mapping[UUID, Agent],
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
     ) -> None:
         """Satisfy the provider lifecycle; fixed values need no resources."""
 

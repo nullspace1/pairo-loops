@@ -1,12 +1,13 @@
-"""Async command dispatch through the shared agent runner."""
+"""Asynchronous command dispatch through provider-neutral agents."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 from uuid import UUID
 
-from pairo.core.agent import Agent, Runner
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
 from pairo.core.events import EventPipeline, SessionDeleted, SessionUpdated
 
 from .models import EventDetailLevel, TranscriptEntry, TranscriptMetadata
@@ -41,10 +42,12 @@ class AgentCommandController:
 
     def __init__(
         self,
-        runner: Runner,
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        event_pipeline: EventPipeline,
         session_repository: SessionRepository,
     ) -> None:
-        self._runner = runner
+        self._agents = agents
+        self._event_pipeline = event_pipeline
         self._session_repository = session_repository
         self._commands: list[SlashCommand] = [
             HelpCommand(),
@@ -57,65 +60,67 @@ class AgentCommandController:
             ImageCommand(),
         ]
         self._commands_by_name = {command.name: command for command in self._commands}
-        self._session_replay = self._runner.pipeline.add_listener(
+        self._session_replay = self._event_pipeline.add_listener(
             SessionUpdated,
             self._persist_session,
             process_existing_events=True,
         )
 
     async def wait_until_ready(self) -> None:
-        """Wait until sessions published before construction are persisted."""
         if self._session_replay is not None:
             await self._session_replay
             self._session_replay = None
 
     @property
-    def agents(self) -> Mapping[UUID, Agent]:
-        return self._runner.agents
-
-    @property
-    def runner(self) -> Runner:
-        return self._runner
+    def agents(self) -> Mapping[UUID, Agent[SessionIdentifier]]:
+        return self._agents
 
     @property
     def event_pipeline(self) -> EventPipeline:
-        return self._runner.pipeline
+        return self._event_pipeline
 
     @property
     def session_repository(self) -> SessionRepository:
         return self._session_repository
+
+    def agent(self, agent_id: UUID) -> Agent[SessionIdentifier]:
+        try:
+            return self._agents[agent_id]
+        except KeyError as error:
+            raise KeyError(f"Agent '{agent_id}' is not configured.") from error
+
+    def current_session_name(self, agent_id: UUID) -> str | None:
+        active = self.agent(agent_id).current_session()
+        return active.name if active is not None else None
 
     async def execute(self, agent_id: UUID, submitted: str) -> CommandOutcome:
         text = submitted.strip()
         if not text:
             raise ValueError("Message cannot be empty.")
         if not text.startswith("/"):
-            await self._runner.send_message(agent_id, text)
-            return CommandOutcome(
-                None,
-                session_name=self._runner.session_name(agent_id),
-            )
-
+            agent = self.agent(agent_id)
+            await agent.send_message(text)
+            return CommandOutcome(None, session_name=self.current_session_name(agent_id))
         command_name, _, argument = text.partition(" ")
         command = self._commands_by_name.get(command_name)
         if command is None:
             raise ValueError(f"Unknown command '{command_name}'. Use /help.")
         return await command.invoke(self, agent_id, argument.strip())
 
+    async def create_session(self, agent_id: UUID, session_name: str) -> str:
+        return (await self.agent(agent_id).new_session(session_name)).name
+
     async def select_session(self, agent_id: UUID, session_name: str) -> str:
-        if session_name in self._runner.session_names(agent_id):
-            return await self._runner.switch_session(agent_id, session_name)
+        agent = self.agent(agent_id)
+        active = agent.current_session()
+        if active is not None and active.name == session_name:
+            return active.name
         metadata = await self._session_repository.get_session(agent_id, session_name)
-        return await self._runner.restore_session(
-            agent_id,
-            session_name,
-            metadata.identifier,
-        )
+        return (await agent.activate_session(session_name, metadata.identifier)).name
 
     async def default_session_name(self, agent_id: UUID) -> str:
         persisted = await self._session_repository.sessions_for(agent_id)
         names = {session.session_name for session in persisted}
-        names.update(self._runner.session_names(agent_id))
         index = 1
         while f"Conversation {index}" in names:
             index += 1
@@ -126,41 +131,40 @@ class AgentCommandController:
         agent_id: UUID,
         session_name: str | None = None,
     ) -> tuple[str, str]:
-        """Delete one session and guarantee that the agent still has a selection."""
-        target = session_name or self._runner.session_name(agent_id)
+        agent = self.agent(agent_id)
+        active = agent.current_session()
+        target = session_name or (active.name if active is not None else None)
         if target is None:
             raise RuntimeError("The selected agent has no active session.")
-
-        loaded_names = self._runner.session_names(agent_id)
-        current_name = self._runner.session_name(agent_id)
-        selected_name = current_name
-        if target in loaded_names:
-            selected_name = await self._runner.delete_session(agent_id, target)
-        else:
+        persisted = await self._session_repository.sessions_for(agent_id)
+        if target not in {session.session_name for session in persisted}:
             await self._session_repository.get_session(agent_id, target)
 
-        await self._session_repository.delete_session(agent_id, target)
-
-        if selected_name is None:
-            remaining = await self._session_repository.sessions_for(agent_id)
+        if active is not None and active.name != target:
+            selected = active.name
+        else:
+            remaining = [
+                session for session in persisted if session.session_name != target
+            ]
             if remaining:
-                selected_name = await self.select_session(
+                selected = await self.select_session(
                     agent_id,
                     remaining[-1].session_name,
                 )
             else:
-                selected_name = await self._runner.create_session(
+                selected = await self.create_session(
                     agent_id,
                     await self.default_session_name(agent_id),
                 )
-        await self._runner.pipeline.enqueue(
+        await self._session_repository.delete_session(agent_id, target)
+        await self._event_pipeline.enqueue(
             SessionDeleted(
                 agent_id=agent_id,
                 session_name=target,
-                selected_session_name=selected_name,
+                selected_session_name=selected,
             )
         )
-        return target, selected_name
+        return target, selected
 
     async def _persist_session(self, event: SessionUpdated) -> SessionUpdated:
         await self._session_repository.save_session(

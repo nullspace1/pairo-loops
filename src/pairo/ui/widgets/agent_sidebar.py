@@ -1,4 +1,5 @@
 """Agent information and session-selection sidebar."""
+from collections.abc import Mapping
 from uuid import UUID
 
 from textual import on
@@ -8,7 +9,8 @@ from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Button, Select, Static
 
-from pairo.core.agent import Agent, Runner
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent, AgentStatus
 from pairo.core.events import EventPipeline
 
 from ..models import EventDetailLevel
@@ -39,8 +41,8 @@ class AgentSidebar(Vertical):
 
     def __init__(
         self,
-        agent: Agent,
-        runner: Runner,
+        agent: Agent[SessionIdentifier],
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
         repository: SessionRepository,
         detail_level: EventDetailLevel,
         event_pipeline: EventPipeline,
@@ -60,12 +62,12 @@ class AgentSidebar(Vertical):
             markup=markup,
         )
         self.agent = agent
-        self._runner = runner
+        self._agents = agents
         self._repository = repository
         self._detail_level = detail_level
         self._event_pipeline = event_pipeline
         self._statistics = statistics or default_sidebar_statistics(agent)
-        self._statistics.setup(event_pipeline, runner.agents)
+        self._statistics.setup(event_pipeline, agents)
         self._session_snapshot: object | None = None
         self._information_mode = self._AGENT_INFORMATION
 
@@ -100,32 +102,40 @@ class AgentSidebar(Vertical):
     def select_session(self, event: Button.Pressed) -> None:
         if event.button.name is not None:
             event.stop()
-            self.post_message(self.SessionSelected(self.agent.id, event.button.name))
+            self.post_message(
+                self.SessionSelected(self.agent.configuration().id, event.button.name)
+            )
 
     @on(Button.Pressed, ".session-delete-button")
     def delete_session(self, event: Button.Pressed) -> None:
         if event.button.name is not None:
             event.stop()
             self.post_message(
-                self.SessionDeletionRequested(self.agent.id, event.button.name)
+                self.SessionDeletionRequested(
+                    self.agent.configuration().id,
+                    event.button.name,
+                )
             )
 
     async def refresh_data(self) -> None:
         await self._refresh_information_fields()
-        generating = self._runner.is_generating(self.agent.id)
+        generating = self.agent.status() is AgentStatus.GENERATING
+        configuration = self.agent.configuration()
+        active = self.agent.current_session()
+        current_name = active.name if active is not None else None
         self.query_one(".session-switch-note", Static).update(
             "Finish or interrupt the current response to switch sessions."
             if generating
             else "Select a session to resume it."
         )
         sessions = sorted(
-            await self._repository.sessions_for(self.agent.id),
+            await self._repository.sessions_for(configuration.id),
             key=lambda session: session.last_updated_at,
             reverse=True,
         )
         snapshot = (
             generating,
-            self._runner.session_name(self.agent.id),
+            current_name,
             tuple((session.session_name, session.last_updated_at) for session in sessions),
         )
         if snapshot == self._session_snapshot:
@@ -140,11 +150,11 @@ class AgentSidebar(Vertical):
                     name=session.session_name,
                     disabled=(
                         generating
-                        or session.session_name == self._runner.session_name(self.agent.id)
+                        or session.session_name == current_name
                     ),
                     classes=(
                         "session-button current-session"
-                        if session.session_name == self._runner.session_name(self.agent.id)
+                        if session.session_name == current_name
                         else "session-button"
                     ),
                 ),
@@ -184,22 +194,22 @@ class AgentSidebar(Vertical):
     async def _statistic_context(
         self, *, include_session: bool
     ) -> SidebarStatisticContext:
-        session_name = self._runner.session_name(self.agent.id)
+        configuration = self.agent.configuration()
+        active = self.agent.current_session()
+        session_name = active.name if active is not None else None
         if session_name is None or not include_session:
             return SidebarStatisticContext(
                 self.agent,
-                self._runner,
                 self._event_pipeline,
                 None,
                 None,
             )
         try:
-            session = await self._repository.get_session(self.agent.id, session_name)
+            session = await self._repository.get_session(configuration.id, session_name)
         except SessionNotFoundError:
             session = None
         return SidebarStatisticContext(
             self.agent,
-            self._runner,
             self._event_pipeline,
             session_name,
             session,

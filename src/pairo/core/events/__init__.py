@@ -30,7 +30,7 @@ from .agent_events import (
 from .event_listener_registration import EventListenerRegistration
 from .event_listeners import AgentEventListeners, EventListeners
 from .event_lock import EventReceipt, EventSubscription
-from .event_pipeline import EventPipeline
+from .event_pipeline import EventPipeline, PipelineTask
 from .image_sent import ImageSent
 from .message_sent import MessageSent
 from .network_message_sent import NetworkMessageSent
@@ -47,6 +47,7 @@ __all__ = [
     "ClientReasoningDelta", "ClientResponseCompleted",
     "ClientResponseInterrupted", "ClientTextDelta", "ClientTokenUsageUpdated",
     "AgentEventListeners", "EventListeners", "EventListenerRegistration", "EventPipeline", "EventReceipt",
+    "PipelineTask",
     "EventSubscription", "ImageSent", "MessageSent", "NetworkMessageSent",
     "PermissionRequest", "PermissionResponse",
     "SessionCompacted", "SessionCreated",

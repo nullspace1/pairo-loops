@@ -1,21 +1,20 @@
-"""Codex SDK implementation of the provider-neutral AgentClient protocol."""
+"""Codex SDK implementation of the asynchronous Agent protocol."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, ItemsView, KeysView, ValuesView
-from concurrent.futures import TimeoutError as FutureTimeoutError
+import json
+from collections.abc import ItemsView, KeysView, ValuesView
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
-import json
 from pathlib import Path
 from shutil import copytree
-from threading import Event, Lock
+from threading import Lock
 from typing import Literal, cast
-from uuid import UUID
 
-from openai_codex.client import CodexClient
+from openai_codex.async_client import AsyncCodexClient
+from openai_codex.client import ApprovalHandler, CodexClient
 from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
     ApprovalsReviewer,
@@ -41,11 +40,12 @@ from openai_codex.models import JsonValue as CodexJsonValue
 from openai_codex.models import Notification
 from pydantic import ConfigDict, JsonValue
 
-from ..agent.agent import Agent
-from ..agent.approval_mode import ApprovalMode
-from ..agent.json_object import JsonObject
-from .client import MCP_AGENT_ID_HEADER, SessionIdentifier, SessionNotification
-from ..events import (
+from pairo.core.agent.agent import AgentConfiguration
+from pairo.core.agent.approval_mode import ApprovalMode
+from pairo.core.agent.json_object import JsonObject
+from pairo.core.agent.session_identifier import SessionIdentifier
+from pairo.core.events import (
+    AgentError,
     ClientActivityCompleted,
     ClientActivityProgress,
     ClientActivityStarted,
@@ -56,10 +56,16 @@ from ..events import (
     ClientResponseInterrupted,
     ClientTextDelta,
     ClientTokenUsageUpdated,
+    EventPipeline,
+    MessageSent,
+    SessionCompacted,
+    SessionCreated,
+    SessionUpdated,
     TokenUsage,
 )
-from ..mcp.servers import HttpMCPServer
-from ..permissions import PermissionRequester
+from pairo.core.permissions import PermissionRequester
+
+from .client import ActiveSession, AgentStatus, MCP_AGENT_ID_HEADER
 from .codex_permissions import (
     translate_permission_decision,
     translate_permission_request,
@@ -67,338 +73,287 @@ from .codex_permissions import (
 
 
 class CodexSessionIdentifier(SessionIdentifier):
-    """The only component allowed to understand Codex conversation state."""
-
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     provider: Literal["codex"] = "codex"
     thread_id: str
-    turn_id: str | None = None
 
 
-class _TurnStreamState:
-    """Share the latest steered identifier with the blocking reader."""
+class _ApprovalAwareAsyncCodexClient(AsyncCodexClient):
+    """Add approval injection missing from the SDK's async constructor."""
 
-    def __init__(self, identifier: CodexSessionIdentifier) -> None:
-        self._identifier = identifier
-        self._lock = Lock()
-        self.resume_reading = Event()
-
-    def current(self) -> CodexSessionIdentifier:
-        with self._lock:
-            return self._identifier
-
-    def update(self, identifier: CodexSessionIdentifier) -> None:
-        with self._lock:
-            self._identifier = identifier
+    def __init__(self, approval_handler: ApprovalHandler) -> None:
+        # The SDK async client is a thin wrapper over this field in 0.159.x.
+        # Keeping the compatibility dependency here makes an SDK change fail
+        # one focused contract test instead of leaking into CodexAgent.
+        self._sync = CodexClient(approval_handler=approval_handler)
 
 
 @dataclass(frozen=True, slots=True)
-class _SessionContext:
-    agent_id: UUID
-    permission_requester: PermissionRequester | None
-    identifier: CodexSessionIdentifier
+class _PermissionContext:
+    active_session: ActiveSession[CodexSessionIdentifier]
+    requester: PermissionRequester | None
 
 
-class CodexAgentClient:
-    """Translate neutral operations and models to the synchronous Codex SDK."""
+class CodexAgent:
+    """Own one configured Codex agent and its currently active conversation."""
 
-    def __init__(self) -> None:
-        self._client: CodexClient | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
+    def __init__(
+        self,
+        configuration: AgentConfiguration,
+        event_pipeline: EventPipeline,
+        client: AsyncCodexClient | None = None,
+    ) -> None:
+        self._configuration = configuration
+        self._pipeline = event_pipeline
+        self._client = client or _ApprovalAwareAsyncCodexClient(self._route_permission)
+        self._client_started = False
         self._client_lock = asyncio.Lock()
+        self._state_lock = asyncio.Lock()
+        self._active_session: ActiveSession[CodexSessionIdentifier] | None = None
+        self._turn_id: str | None = None
+        self._notification_task: asyncio.Task[None] | None = None
+        self._status = AgentStatus.INACTIVE
         self._closed = False
-        self._session_contexts: dict[str, _SessionContext] = {}
-        self._session_context_lock = Lock()
-        self._turn_streams: dict[str, _TurnStreamState] = {}
+        self._permission_lock = Lock()
+        self._permission_context: _PermissionContext | None = None
 
-    async def new_session(
-        self,
-        agent: Agent,
-    ) -> SessionIdentifier:
-        configuration = agent.snapshot()
-        await self._apply_configuration(configuration)
-        client = await self._ensure_client()
-        response = await asyncio.to_thread(
-            client.thread_start,
-            self._thread_start_params(configuration),
-        )
-        identifier = CodexSessionIdentifier(thread_id=response.thread.id)
-        self._register_session(configuration, identifier)
-        return identifier
+    def configuration(self) -> AgentConfiguration:
+        return self._configuration
 
-    async def restore_session(
-        self,
-        agent: Agent,
-        identifier_json: JsonObject,
-    ) -> SessionIdentifier:
-        configuration = agent.snapshot()
-        await self._apply_configuration(configuration)
-        identifier = CodexSessionIdentifier.model_validate(identifier_json)
-        client = await self._ensure_client()
-        response = await asyncio.to_thread(
-            client.thread_resume,
-            identifier.thread_id,
-            self._thread_resume_params(configuration, identifier.thread_id),
-        )
-        restored = identifier.model_copy(
-            update={"thread_id": response.thread.id, "turn_id": None}
-        )
-        self._register_session(configuration, restored)
-        return restored
+    def current_session(self) -> ActiveSession[CodexSessionIdentifier] | None:
+        return self._active_session
 
-    async def start(
-        self,
-        session: SessionIdentifier,
-        message: str,
-    ) -> SessionIdentifier:
-        identifier = self._identifier(session)
-        self._require_session_context(identifier.thread_id)
-        client = await self._ensure_client()
-        response = await asyncio.to_thread(
-            client.turn_start,
-            identifier.thread_id,
-            message,
-        )
-        updated = identifier.model_copy(update={"turn_id": response.turn.id})
-        self._update_session_identifier(updated)
-        return updated
+    def status(self) -> AgentStatus:
+        return self._status
 
-    async def steer(
-        self,
-        session: SessionIdentifier,
-        message: str,
-    ) -> SessionIdentifier:
-        identifier = self._active_identifier(session)
-        client = await self._ensure_client()
-        response = await asyncio.to_thread(
-            client.turn_steer,
-            identifier.thread_id,
-            self._turn_id(identifier),
-            message,
-        )
-        updated = identifier.model_copy(update={"turn_id": response.turn_id})
-        stream = self._turn_streams.get(identifier.thread_id)
-        if stream is not None:
-            stream.update(updated)
-        self._update_session_identifier(updated)
-        return updated
-
-    async def compact(self, session: SessionIdentifier) -> None:
-        identifier = self._identifier(session)
-        self._require_session_context(identifier.thread_id)
-        client = await self._ensure_client()
-        await asyncio.to_thread(client.thread_compact, identifier.thread_id)
-
-    async def interrupt(self, session: SessionIdentifier) -> SessionIdentifier:
-        identifier = self._active_identifier(session)
-        client = await self._ensure_client()
-        await asyncio.to_thread(
-            client.turn_interrupt,
-            identifier.thread_id,
-            self._turn_id(identifier),
-        )
-        return identifier
-
-    async def notifications(
-        self,
-        session: SessionIdentifier,
-    ) -> AsyncIterator[SessionNotification]:
-        identifier = self._active_identifier(session)
-        client = await self._ensure_client()
-        self._require_session_context(identifier.thread_id)
-        if identifier.thread_id in self._turn_streams:
-            raise RuntimeError("A notification stream is already active for this session.")
-        stream = _TurnStreamState(identifier)
-        self._turn_streams[identifier.thread_id] = stream
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[Notification | BaseException] = asyncio.Queue(
-            maxsize=128
-        )
-        stop_requested = Event()
-
-        def enqueue(value: Notification | BaseException) -> bool:
-            delivery = asyncio.run_coroutine_threadsafe(queue.put(value), loop)
-            while not stop_requested.is_set():
-                try:
-                    delivery.result(timeout=0.1)
-                    return True
-                except FutureTimeoutError:
-                    continue
-            delivery.cancel()
-            return False
-
-        def read_turn() -> None:
-            try:
-                while not stop_requested.is_set():
-                    current = stream.current()
-                    notification = client.next_turn_notification(
-                        self._turn_id(current)
-                    )
-                    if not enqueue(notification):
-                        return
-                    if notification.method == "turn/completed":
-                        return
-                    while not stop_requested.is_set():
-                        if stream.resume_reading.wait(timeout=0.1):
-                            stream.resume_reading.clear()
-                            break
-            except BaseException as error:
-                enqueue(error)
-
-        # Each active turn needs an independent blocking reader. The default
-        # executor can grow beyond one worker, unlike the former single-agent
-        # executor which serialized every agent's notifications.
-        reader = loop.run_in_executor(None, read_turn)
-        terminal_received = False
+    async def new_session(self, name: str) -> ActiveSession[CodexSessionIdentifier]:
+        normalized = self._validated_session_name(name)
         try:
-            while True:
-                item = await queue.get()
-                if isinstance(item, BaseException):
-                    raise item
-                current = stream.current()
-                event = await self._translate_notification(current, item)
-                terminal_received = isinstance(
-                    event,
-                    (ClientResponseCompleted, ClientResponseInterrupted),
+            async with self._state_lock:
+                self._require_open()
+                self._require_not_generating()
+                configuration = self._configuration.snapshot()
+                self._apply_configuration(configuration)
+                await self._ensure_client()
+                response = await self._client.thread_start(
+                    self._thread_start_params(configuration)
                 )
-                updated = (
-                    current.model_copy(update={"turn_id": None})
-                    if terminal_received
-                    else current
+                active = ActiveSession[CodexSessionIdentifier](
+                    name=normalized,
+                    identifier=CodexSessionIdentifier(thread_id=response.thread.id),
                 )
-                stream.update(updated)
-                self._update_session_identifier(updated)
-                yield SessionNotification(session=updated, event=event)
-                if terminal_received:
-                    return
-                stream.resume_reading.set()
-        finally:
-            stop_requested.set()
-            stream.resume_reading.set()
-            if not terminal_received and not reader.done():
-                current = stream.current()
-                with suppress(Exception):
-                    await asyncio.shield(
-                        asyncio.to_thread(
-                            client.turn_interrupt,
-                            current.thread_id,
-                            self._turn_id(current),
-                        )
+                self._activate(active, configuration)
+        except Exception as error:
+            await self._publish_session_error(normalized, error)
+            raise
+        await self._pipeline.enqueue(self._session_created(active))
+        return active
+
+    async def activate_session(
+        self,
+        name: str,
+        identifier_json: JsonObject,
+    ) -> ActiveSession[CodexSessionIdentifier]:
+        normalized = self._validated_session_name(name)
+        identifier = CodexSessionIdentifier.model_validate(identifier_json)
+        try:
+            async with self._state_lock:
+                self._require_open()
+                self._require_not_generating()
+                configuration = self._configuration.snapshot()
+                self._apply_configuration(configuration)
+                await self._ensure_client()
+                response = await self._client.thread_resume(
+                    identifier.thread_id,
+                    self._thread_resume_params(configuration, identifier.thread_id),
+                )
+                active = ActiveSession[CodexSessionIdentifier](
+                    name=normalized,
+                    identifier=CodexSessionIdentifier(thread_id=response.thread.id),
+                )
+                self._activate(active, configuration)
+        except Exception as error:
+            await self._publish_session_error(normalized, error)
+            raise
+        await self._pipeline.enqueue(self._session_updated(active))
+        return active
+
+    async def send_message(self, message: str, source: str = "user") -> None:
+        normalized_message = self._validated_message(message)
+        normalized_source = self._validated_source(source)
+        async with self._state_lock:
+            self._require_open()
+            active = self._require_session()
+            await self._pipeline.enqueue(
+                MessageSent(
+                    agent_id=self._configuration.id,
+                    session_name=active.name,
+                    message=normalized_message,
+                    source=normalized_source,
+                )
+            )
+            await self._ensure_client()
+            if self._status is AgentStatus.GENERATING:
+                turn_id = self._require_turn_id()
+                try:
+                    steer_response = await self._client.turn_steer(
+                        active.identifier.thread_id,
+                        turn_id,
+                        normalized_message,
                     )
-            with suppress(asyncio.CancelledError, Exception):
-                await reader
-            if self._turn_streams.get(identifier.thread_id) is stream:
-                self._turn_streams.pop(identifier.thread_id, None)
+                except Exception as error:
+                    await self._publish_error(active, error)
+                    raise
+                else:
+                    self._turn_id = steer_response.turn_id
+                return
+            try:
+                start_response = await self._client.turn_start(
+                    active.identifier.thread_id,
+                    normalized_message,
+                )
+                self._turn_id = start_response.turn.id
+                self._status = AgentStatus.GENERATING
+                self._notification_task = self._pipeline.create_task(
+                    self._consume_notifications(active),
+                    name=f"codex-agent-{self._configuration.id}",
+                    joinable=False,
+                )
+            except Exception as error:
+                self._status = AgentStatus.IDLE
+                self._turn_id = None
+                await self._publish_error(active, error)
+                raise
+
+    async def interrupt(self) -> bool:
+        try:
+            async with self._state_lock:
+                self._require_open()
+                if self._status is not AgentStatus.GENERATING:
+                    return False
+                active = self._require_session()
+                turn_id = self._require_turn_id()
+                await self._ensure_client()
+                await self._client.turn_interrupt(
+                    active.identifier.thread_id,
+                    turn_id,
+                )
+                return True
+        except Exception as error:
+            active_session = self._active_session
+            if active_session is not None:
+                await self._publish_error(active_session, error)
+            raise
+
+    async def compact(self) -> None:
+        try:
+            async with self._state_lock:
+                self._require_open()
+                self._require_not_generating()
+                active = self._require_session()
+                await self._ensure_client()
+                await self._client.thread_compact(active.identifier.thread_id)
+        except Exception as error:
+            session_name = (
+                self._active_session.name
+                if self._active_session is not None
+                else "unknown"
+            )
+            await self._publish_session_error(session_name, error)
+            raise
+        await self._pipeline.enqueue(
+            SessionCompacted(
+                agent_id=self._configuration.id,
+                session_name=active.name,
+            )
+        )
 
     async def close(self) -> None:
-        async with self._client_lock:
+        async with self._state_lock:
             if self._closed:
                 return
             self._closed = True
-            if self._client is not None:
-                client, self._client = self._client, None
-                await asyncio.to_thread(client.close)
-            with self._session_context_lock:
-                self._session_contexts.clear()
+            task = self._notification_task
+            self._notification_task = None
+            self._status = AgentStatus.INACTIVE
+            self._turn_id = None
+            self._active_session = None
+            with self._permission_lock:
+                self._permission_context = None
+        if self._client_started:
+            await self._client.close()
+            self._client_started = False
+        if task is not None:
+            with suppress(asyncio.CancelledError, Exception):
+                await task
 
-
-    async def _ensure_client(self) -> CodexClient:
-        if self._client is not None:
-            return self._client
+    async def _ensure_client(self) -> None:
+        if self._client_started:
+            return
         async with self._client_lock:
-            if self._client is not None:
-                return self._client
-            if self._closed:
-                raise RuntimeError("The Codex client is closed.")
-            self._loop = asyncio.get_running_loop()
-            client = CodexClient(approval_handler=self._route_permission)
+            if self._client_started:
+                return
+            self._require_open()
             try:
-                await asyncio.to_thread(client.start)
-                await asyncio.to_thread(client.initialize)
+                await self._client.start()
+                await self._client.initialize()
             except BaseException:
                 with suppress(Exception):
-                    await asyncio.to_thread(client.close)
+                    await self._client.close()
                 raise
-            self._client = client
-            return client
+            self._client_started = True
 
-    def _route_permission(
+    async def _consume_notifications(
         self,
-        method: str,
-        params: CodexJsonObject | None,
-    ) -> CodexJsonObject:
-        thread_id = self._permission_thread_id(params)
-        context = self._session_context(thread_id) if thread_id is not None else None
-        if context is None or context.permission_requester is None or self._loop is None:
-            return {"decision": "decline"}
-        request = translate_permission_request(
-            method,
-            params,
-            context.identifier.model_dump(mode="json"),
-        )
-        if request is None:
-            return {"decision": "decline"}
-        future = asyncio.run_coroutine_threadsafe(
-            context.permission_requester.request(request),
-            self._loop,
-        )
-        return translate_permission_decision(request, future.result())
-
-    async def _apply_configuration(self, configuration: Agent) -> None:
-        for skill_folder in configuration.skill_folders:
-            await asyncio.to_thread(
-                self._install_skills,
-                skill_folder,
-                configuration.workspace,
-            )
-
-    @staticmethod
-    def _install_skills(skill_folder: Path, workspace: Path) -> None:
-        """Copy project skills into Codex's workspace-local skill directory."""
-        destination = workspace / ".codex" / "skills"
-        if destination == skill_folder or destination.is_relative_to(skill_folder):
-            raise ValueError("skill_folder cannot contain the destination directory.")
-        copytree(skill_folder, destination, dirs_exist_ok=True)
-
-    def _register_session(self, agent: Agent, identifier: CodexSessionIdentifier) -> None:
-        context = _SessionContext(
-            agent_id=agent.id,
-            permission_requester=agent.permission_requester,
-            identifier=identifier,
-        )
-        with self._session_context_lock:
-            self._session_contexts[identifier.thread_id] = context
-
-    def _update_session_identifier(self, identifier: CodexSessionIdentifier) -> None:
-        with self._session_context_lock:
-            current = self._session_contexts.get(identifier.thread_id)
-            if current is None:
-                raise ValueError(
-                    f"Codex session '{identifier.thread_id}' is not registered."
+        active: ActiveSession[CodexSessionIdentifier],
+    ) -> None:
+        try:
+            while True:
+                async with self._state_lock:
+                    if self._closed or self._active_session != active:
+                        return
+                    turn_id = self._require_turn_id()
+                notification = await self._client.next_turn_notification(turn_id)
+                async with self._state_lock:
+                    if self._closed or self._active_session != active:
+                        return
+                event = await self._translate_notification(active.identifier, notification)
+                terminal = isinstance(
+                    event,
+                    (ClientResponseCompleted, ClientResponseInterrupted),
                 )
-            self._session_contexts[identifier.thread_id] = _SessionContext(
-                agent_id=current.agent_id,
-                permission_requester=current.permission_requester,
-                identifier=identifier,
-            )
-
-    def _require_session_context(self, thread_id: str) -> _SessionContext:
-        context = self._session_context(thread_id)
-        if context is None:
-            raise ValueError(f"Codex session '{thread_id}' is not registered.")
-        return context
-
-    def _session_context(self, thread_id: str) -> _SessionContext | None:
-        with self._session_context_lock:
-            return self._session_contexts.get(thread_id)
-
-    @staticmethod
-    def _permission_thread_id(params: CodexJsonObject | None) -> str | None:
-        if params is None:
-            return None
-        value = params.get("threadId")
-        return value if isinstance(value, str) and value else None
+                await self._pipeline.enqueue(
+                    event.to_routed_event(self._configuration.id, active.name)
+                )
+                transcript_message = event.transcript_message()
+                if transcript_message is not None:
+                    await self._pipeline.enqueue(
+                        MessageSent(
+                            agent_id=self._configuration.id,
+                            session_name=active.name,
+                            message=transcript_message,
+                            source=self._configuration.name,
+                        )
+                    )
+                if terminal:
+                    async with self._state_lock:
+                        if self._active_session == active:
+                            self._status = AgentStatus.IDLE
+                            self._turn_id = None
+                            self._notification_task = None
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            async with self._state_lock:
+                closing = self._closed
+                if self._active_session == active:
+                    self._status = AgentStatus.INACTIVE if closing else AgentStatus.IDLE
+                    self._turn_id = None
+                    self._notification_task = None
+            if not closing:
+                await self._publish_error(active, error)
 
     async def _translate_notification(
         self,
@@ -442,8 +397,137 @@ class CodexAgentClient:
             )
         return ClientActivityProgress(activity=self._dump(payload))
 
-    @staticmethod
-    def _token_usage(usage: TokenUsageBreakdown) -> TokenUsage:
+    async def _read_final_response(self, thread_id: str) -> str:
+        response = await self._client.thread_read(thread_id, include_turns=True)
+        values = cast(CodexJsonObject, response.model_dump(by_alias=True))
+        messages = self._collect_text(values)
+        return messages[-1] if messages else "Codex completed without a text response."
+
+    def _apply_configuration(self, configuration: AgentConfiguration) -> None:
+        for skill_folder in configuration.skill_folders:
+            self._install_skills(
+                skill_folder,
+                configuration.workspace,
+            )
+
+    def _activate(
+        self,
+        active: ActiveSession[CodexSessionIdentifier],
+        configuration: AgentConfiguration,
+    ) -> None:
+        self._active_session = active
+        self._turn_id = None
+        self._status = AgentStatus.IDLE
+        with self._permission_lock:
+            self._permission_context = _PermissionContext(
+                active_session=active,
+                requester=configuration.permission_requester,
+            )
+
+    def _route_permission(
+        self,
+        method: str,
+        params: CodexJsonObject | None,
+    ) -> CodexJsonObject:
+        with self._permission_lock:
+            context = self._permission_context
+        if context is None or context.requester is None:
+            return {"decision": "decline"}
+        request = translate_permission_request(
+            method,
+            params,
+            context.active_session.identifier.model_dump(mode="json"),
+        )
+        if request is None:
+            return {"decision": "decline"}
+        try:
+            decision = context.requester.request(request)
+            return translate_permission_decision(request, decision)
+        except Exception:
+            return {"decision": "decline"}
+
+    async def _publish_error(
+        self,
+        active: ActiveSession[CodexSessionIdentifier],
+        error: Exception,
+    ) -> None:
+        await self._publish_session_error(active.name, error)
+
+    async def _publish_session_error(
+        self,
+        session_name: str,
+        error: Exception,
+    ) -> None:
+        await self._pipeline.enqueue(
+            AgentError(
+                agent_id=self._configuration.id,
+                session_name=session_name,
+                message=str(error),
+            )
+        )
+
+    def _session_created(
+        self,
+        active: ActiveSession[CodexSessionIdentifier],
+    ) -> SessionCreated:
+        return SessionCreated(
+            agent_id=self._configuration.id,
+            session_name=active.name,
+            identifier=active.identifier.model_dump(mode="json"),
+        )
+
+    def _session_updated(
+        self,
+        active: ActiveSession[CodexSessionIdentifier],
+    ) -> SessionUpdated:
+        return SessionUpdated(
+            agent_id=self._configuration.id,
+            session_name=active.name,
+            identifier=active.identifier.model_dump(mode="json"),
+        )
+
+    def _require_session(self) -> ActiveSession[CodexSessionIdentifier]:
+        if self._active_session is None:
+            raise RuntimeError("The agent does not have an active session.")
+        return self._active_session
+
+    def _require_turn_id(self) -> str:
+        if self._turn_id is None:
+            raise RuntimeError("The Codex agent has no active turn.")
+        return self._turn_id
+
+    def _require_not_generating(self) -> None:
+        if self._status is AgentStatus.GENERATING:
+            raise RuntimeError("Cannot change sessions while the agent is generating.")
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("The Codex agent is closed.")
+
+    def _validated_session_name(self, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Session name cannot be empty.")
+        return normalized
+
+    def _validated_message(self, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Message cannot be empty.")
+        return value
+
+    def _validated_source(self, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Message source cannot be empty.")
+        return normalized
+
+    def _install_skills(self, skill_folder: Path, workspace: Path) -> None:
+        destination = workspace / ".codex" / "skills"
+        if destination == skill_folder or destination.is_relative_to(skill_folder):
+            raise ValueError("skill_folder cannot contain the destination directory.")
+        copytree(skill_folder, destination, dirs_exist_ok=True)
+
+    def _token_usage(self,usage: TokenUsageBreakdown) -> TokenUsage:
         return TokenUsage(
             input_tokens=usage.input_tokens,
             cached_input_tokens=usage.cached_input_tokens,
@@ -453,125 +537,86 @@ class CodexAgentClient:
             cache_write_input_tokens=usage.cache_write_input_tokens,
         )
 
-    async def _read_final_response(self, thread_id: str) -> str:
-        client = await self._ensure_client()
-        response = await asyncio.to_thread(
-            client.thread_read,
-            thread_id,
-            include_turns=True,
-        )
-        values = cast(CodexJsonObject, response.model_dump(by_alias=True))
-        messages = self._collect_text(values)
-        return messages[-1] if messages else "Codex completed without a text response."
+    def _collect_text(self, value: CodexJsonValue) -> list[str]:
+        match value:
+            case dict() as mapping:
+                text = mapping.get("text")
+                nested = [
+                    message
+                    for item in mapping.values()
+                    for message in self._collect_text(item)
+                ]
+                return ([text] if isinstance(text, str) else []) + nested
+            case list() as items:
+                return [
+                    message
+                    for item in items
+                    for message in self._collect_text(item)
+                ]
+            case _:
+                return []
 
-    @classmethod
-    def _collect_text(cls, value: CodexJsonValue) -> list[str]:
-        if isinstance(value, dict):
-            text = value.get("text")
-            nested = [
-                message
-                for item in value.values()
-                for message in cls._collect_text(item)
-            ]
-            return ([text] if isinstance(text, str) else []) + nested
-        if isinstance(value, list):
-            return [
-                message
-                for item in value
-                for message in cls._collect_text(item)
-            ]
-        return []
-
-    @classmethod
-    def _dump(cls, value: object) -> JsonObject:
-        """Convert provider activity data to a recursively JSON-safe object."""
-        serialized = json.dumps(value, default=cls._json_default)
+    # invariant: boundary-exception[external-sdk] -- generated notification payloads expose heterogeneous runtime models
+    def _dump(self, value: object) -> JsonObject:
+        serialized = json.dumps(value, default=self._json_default)
         dumped = json.loads(serialized)
         if isinstance(dumped, dict):
             return cast(JsonObject, dumped)
         return {"value": cast(JsonValue, dumped)}
 
-    @staticmethod
-    def _json_default(value: object) -> object:
+    # invariant: boundary-exception[external-sdk] -- json serialization receives unconstrained generated SDK values
+    def _json_default(self, value: object) -> object:
         model_dump = getattr(value, "model_dump", None)
         if callable(model_dump):
-            return model_dump(
-                mode="python",
-                by_alias=True,
-                exclude_none=True,
-            )
-        if isinstance(value, Enum):
-            return value.value
-        if isinstance(value, (ItemsView, KeysView, ValuesView)):
-            return list(value)
-        return str(value)
+            return model_dump(mode="python", by_alias=True, exclude_none=True)
+        match value:
+            case Enum() as member:
+                return member.value
+            case ItemsView() | KeysView() | ValuesView():
+                return list(value)
+            case _:
+                return str(value)
 
-    @staticmethod
-    def _identifier(session: SessionIdentifier) -> CodexSessionIdentifier:
-        if isinstance(session, CodexSessionIdentifier):
-            return session
-        return CodexSessionIdentifier.model_validate(session.model_dump(mode="json"))
-
-    @classmethod
-    def _active_identifier(
-        cls,
-        session: SessionIdentifier,
-    ) -> CodexSessionIdentifier:
-        identifier = cls._identifier(session)
-        if identifier.turn_id is None:
-            raise ValueError("The Codex session has no active turn.")
-        return identifier
-
-    @staticmethod
-    def _turn_id(identifier: CodexSessionIdentifier) -> str:
-        if identifier.turn_id is None:
-            raise ValueError("The Codex session has no active turn.")
-        return identifier.turn_id
-
-    @classmethod
     def _thread_start_params(
-        cls,
-        config: Agent,
+        self,
+        config: AgentConfiguration,
     ) -> ThreadStartParams:
         return ThreadStartParams(
-            approval_policy=cls._approval_policy(),
-            approvals_reviewer=cls._reviewer(config),
+            approval_policy=self._approval_policy(),
+            approvals_reviewer=self._reviewer(config),
             base_instructions=config.base_instructions,
-            config=cls._codex_config(config) or None,
+            config=self._codex_config(config) or None,
             cwd=str(config.workspace),
             developer_instructions=config.developer_instructions,
             model=config.model,
             sandbox=CodexSandboxMode(config.sandbox.value),
         )
 
-    @classmethod
     def _thread_resume_params(
-        cls,
-        config: Agent,
+        self,
+        config: AgentConfiguration,
         thread_id: str,
     ) -> ThreadResumeParams:
         return ThreadResumeParams(
             thread_id=thread_id,
-            approval_policy=cls._approval_policy(),
-            approvals_reviewer=cls._reviewer(config),
+            approval_policy=self._approval_policy(),
+            approvals_reviewer=self._reviewer(config),
             base_instructions=config.base_instructions,
-            config=cls._codex_config(config) or None,
+            config=self._codex_config(config) or None,
             cwd=str(config.workspace),
             developer_instructions=config.developer_instructions,
             model=config.model,
             sandbox=CodexSandboxMode(config.sandbox.value),
         )
 
-    @staticmethod
-    def _reviewer(config: Agent) -> ApprovalsReviewer:
+    def _reviewer(self, config: AgentConfiguration) -> ApprovalsReviewer:
         return (
             ApprovalsReviewer.user
             if config.approval_mode is ApprovalMode.USER
             else ApprovalsReviewer.auto_review
         )
 
-    @staticmethod
-    def _approval_policy() -> AskForApproval:
+    def _approval_policy(self) -> AskForApproval:
         return AskForApproval.model_validate(
             {
                 "granular": {
@@ -584,33 +629,26 @@ class CodexAgentClient:
             }
         )
 
-    @staticmethod
-    def _codex_config(
-        config: Agent,
-    ) -> CodexJsonObject:
-        result: CodexJsonObject = {}
-        if config.reasoning_effort is not None:
-            result["model_reasoning_effort"] = config.reasoning_effort.value
-        if config.web_search is not None:
-            result["web_search"] = config.web_search.value
+
+    def _codex_config(self, config: AgentConfiguration) -> CodexJsonObject:
+        result: CodexJsonObject = {
+            "model_reasoning_effort": config.reasoning_effort.value,
+            "web_search": config.web_search.value,
+        }
         if config.mcp_servers:
             servers: CodexJsonObject = {}
             for server in config.mcp_servers:
                 connection: CodexJsonObject
-                if isinstance(server, HttpMCPServer):
+                if server.transport == "http":
                     connection = {
                         "url": server.url,
                         "startup_timeout_sec": server.startup_timeout_sec,
+                        "http_headers": {MCP_AGENT_ID_HEADER: str(config.id)},
                     }
                     if server.env:
                         connection["env_http_headers"] = dict(server.env)
-                    connection["http_headers"] = {
-                        MCP_AGENT_ID_HEADER: str(config.id),
-                    }
                 else:
-                    environment: CodexJsonObject = {}
-                    if server.env:
-                        environment.update(server.env)
+                    environment: CodexJsonObject = dict(server.env or {})
                     environment[MCP_AGENT_ID_HEADER] = str(config.id)
                     connection = {
                         "command": server.command,
@@ -650,5 +688,4 @@ class CodexAgentClient:
         return result
 
 
-__all__ = ["CodexAgentClient", "CodexSessionIdentifier"]
-
+__all__ = ["CodexAgent", "CodexSessionIdentifier"]

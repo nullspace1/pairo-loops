@@ -41,7 +41,12 @@ class TextualPermissionRequester(PermissionRequester):
         self._responses: dict[str, _PendingPermissionResponse] = {}
         self._event_pipeline.add_listener(PermissionResponse, self._capture_response)
 
-    async def request(self, request: ApprovalRequest) -> PermissionDecision:
+    def request(self, request: ApprovalRequest) -> PermissionDecision:
+        """Block the SDK callback thread while the principal loop asks the user."""
+        operation = self._event_pipeline.submit(self._request(request))
+        return operation.result()
+
+    async def _request(self, request: ApprovalRequest) -> PermissionDecision:
         session = await self._session_repository.session_for_identifier(
             request.session_identifier
         )

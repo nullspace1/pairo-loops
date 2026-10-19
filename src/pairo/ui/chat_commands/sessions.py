@@ -24,7 +24,7 @@ class SessionsCommand(SlashCommand):
     ) -> CommandOutcome:
         sessions = await controller.session_repository.sessions_for(agent_id)
         known = ", ".join(session.session_name for session in sessions)
-        current = controller.runner.session_name(agent_id) or "none"
+        current = controller.current_session_name(agent_id) or "none"
         return CommandOutcome(
             TranscriptEntry[SystemTranscriptMetadata](
                 "system",

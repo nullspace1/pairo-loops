@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Generic, TypeVar
 from uuid import UUID
 
-from pairo.core.agent import Agent
+from pairo.core.agent import AgentConfiguration
 from pairo.core.mcp.servers import MCPServer
 
 
@@ -19,7 +19,7 @@ class MCPServerAttacher(Generic[MCPServerT]):
     def __init__(self, server: MCPServerT) -> None:
         self._server = server
 
-    def attach(self, agents: Sequence[Agent]) -> MCPServerT:
+    def attach(self, agents: Sequence[AgentConfiguration]) -> MCPServerT:
         """Validate every agent before adding the server to any of them."""
         unique_agents = self._unique_agents(agents)
         agents_to_update = self._agents_requiring_server(unique_agents)
@@ -27,8 +27,8 @@ class MCPServerAttacher(Generic[MCPServerT]):
             agent.add_mcp_server(self._server)
         return self._server
 
-    def _unique_agents(self, agents: Sequence[Agent]) -> tuple[Agent, ...]:
-        agents_by_id: dict[UUID, Agent] = {}
+    def _unique_agents(self, agents: Sequence[AgentConfiguration]) -> tuple[AgentConfiguration, ...]:
+        agents_by_id: dict[UUID, AgentConfiguration] = {}
         for agent in agents:
             configured_agent = agents_by_id.get(agent.id)
             if configured_agent is not None and configured_agent is not agent:
@@ -36,8 +36,8 @@ class MCPServerAttacher(Generic[MCPServerT]):
             agents_by_id[agent.id] = agent
         return tuple(agents_by_id.values())
 
-    def _agents_requiring_server(self, agents: Sequence[Agent]) -> tuple[Agent, ...]:
-        agents_to_update: list[Agent] = []
+    def _agents_requiring_server(self, agents: Sequence[AgentConfiguration]) -> tuple[AgentConfiguration, ...]:
+        agents_to_update: list[AgentConfiguration] = []
         for agent in agents:
             configured_server = next(
                 (
@@ -57,13 +57,23 @@ class MCPServerAttacher(Generic[MCPServerT]):
         return tuple(agents_to_update)
 
 
-def add_server_to_agents(
-    agents: Sequence[Agent],
-    server: MCPServerT,
-) -> MCPServerT:
-    """Compatibility entry point for attaching a server to agents."""
-    return MCPServerAttacher(server).attach(agents)
+class MCPServerAttachmentEntryPoint:
+    """Callable public entry point for atomic server attachment."""
+
+    def __call__(
+        self,
+        agents: Sequence[AgentConfiguration],
+        server: MCPServerT,
+    ) -> MCPServerT:
+        return MCPServerAttacher(server).attach(agents)
 
 
-__all__ = ["MCPServerAttacher", "add_server_to_agents"]
+add_server_to_agents = MCPServerAttachmentEntryPoint()
+
+
+__all__ = [
+    "MCPServerAttacher",
+    "MCPServerAttachmentEntryPoint",
+    "add_server_to_agents",
+]
 

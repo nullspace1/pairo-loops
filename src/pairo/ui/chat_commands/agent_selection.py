@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pairo.core.agent import Agent
 from uuid import UUID
 
 from ..commands import CommandOutcome
@@ -28,7 +27,9 @@ class AgentSelectionCommand(SlashCommand):
             selected_id = UUID(argument)
         except ValueError as error:
             options = [
-                agent for agent in controller.agents.values() if agent.name == argument
+                agent
+                for agent in controller.agents.values()
+                if agent.configuration().name == argument
             ]
             if len(options) == 0:
                 raise ValueError(f"Unknown agent '{argument}'.") from error
@@ -44,9 +45,9 @@ class AgentSelectionCommand(SlashCommand):
         return CommandOutcome(
             TranscriptEntry[SystemTranscriptMetadata](
                 "system",
-                f"Selected agent {selected.name} ({selected.id}).",
+                f"Selected agent {selected.configuration().name} ({selected.configuration().id}).",
                 EventDetailLevel.NORMAL,
                 {"type": "system"},
             ),
-            selected_agent=selected.id,
+            selected_agent=selected.configuration().id,
         )

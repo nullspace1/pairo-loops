@@ -7,15 +7,15 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from pairo.core.agent import Agent, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxMode
 from pairo.core.mcp.servers import StdioMCPServer
 from pairo.mcp.chatroom import Chatroom
 from pairo.mcp.context7 import context7
 from pairo.mcp.github import add_github_mcp_server
 
 
-def configured_agent(tmp_path: Path, name: str = "developer") -> Agent:
-    return Agent(
+def configured_agent(tmp_path: Path, name: str = "developer") -> AgentConfiguration:
+    return AgentConfiguration(
         name=name,
         sandbox=SandboxMode.READ_ONLY,
         workspace=tmp_path,
@@ -71,51 +71,59 @@ def test_context7_factory_rejects_non_positive_timeouts(timeout) -> None:
         context7([], "secret", timeout)
 
 
-def test_chatroom_registers_runner_agent_ids() -> None:
-    agent = configured_agent(Path.cwd())
-    runner = type("RunnerStub", (), {"agents": {agent.id: agent}})()
+class ChatroomAgentStub:
+    def __init__(self, configured: AgentConfiguration) -> None:
+        self._configuration = configured
+        self.created: list[str] = []
+        self.messages: list[tuple[str, str]] = []
+
+    def configuration(self) -> AgentConfiguration:
+        return self._configuration
+
+    async def new_session(self, name: str):
+        self.created.append(name)
+        return SimpleNamespace(name=name)
+
+    async def send_message(self, message: str, source: str = "user") -> None:
+        self.messages.append((message, source))
+
+
+def test_chatroom_registers_agent_ids() -> None:
+    configured = configured_agent(Path.cwd())
+    agent = ChatroomAgentStub(configured)
     chatroom = Chatroom(port=8081)
 
-    chatroom.add_chatroom("main", runner, [agent])
-    assert chatroom._is_in_chatroom("main", agent.id)
+    chatroom.add_chatroom("main", {configured.id: agent})
+    assert chatroom._is_in_chatroom("main", configured.id)
     assert not chatroom._is_in_chatroom("main", configured_agent(Path.cwd()).id)
-    assert agent.mcp_servers == (chatroom.as_http_mcp_server(),)
+    assert configured.mcp_servers == (chatroom.as_http_mcp_server(),)
 
-    unknown_agent = configured_agent(Path.cwd(), "planner")
-    with pytest.raises(ValueError, match="Unknown chatroom agents"):
-        chatroom.add_chatroom("invalid", runner, [unknown_agent])
-    assert unknown_agent.mcp_servers == ()
+    with pytest.raises(ValueError, match="does not match"):
+        chatroom.add_chatroom("invalid", {configured_agent(Path.cwd()).id: agent})
 
 
 def test_chatroom_can_create_a_session_for_a_registered_agent() -> None:
     async def scenario() -> None:
-        sender = configured_agent(Path.cwd(), "sender")
-        recipient = configured_agent(Path.cwd(), "recipient")
-
-        class RunnerStub:
-            agents = {sender.id: sender, recipient.id: recipient}
-
-            def __init__(self) -> None:
-                self.created = []
-
-            async def create_session(self, agent_id, session_name):
-                self.created.append((agent_id, session_name))
-                return session_name
-
-        runner = RunnerStub()
+        sender_config = configured_agent(Path.cwd(), "sender")
+        recipient_config = configured_agent(Path.cwd(), "recipient")
+        sender = ChatroomAgentStub(sender_config)
+        recipient = ChatroomAgentStub(recipient_config)
         chatroom = Chatroom(port=8081)
-        chatroom.add_chatroom("main", runner, [sender, recipient])
+        chatroom.add_chatroom(
+            "main",
+            {sender_config.id: sender, recipient_config.id: recipient},
+        )
         server = chatroom.build_mcp_server()
         tool = server._tool_manager.get_tool("create_session")
 
         result = await tool.fn(
             "main",
-            str(recipient.id),
+            str(recipient_config.id),
             "Review branch",
-            SimpleNamespace(headers={"X-Agent-ID": str(sender.id)}),
+            SimpleNamespace(headers={"X-Agent-ID": str(sender_config.id)}),
         )
 
-        assert runner.created == [(recipient.id, "Review branch")]
+        assert recipient.created == ["Review branch"]
         assert "Created session 'Review branch'" in result
 
     asyncio.run(scenario())
