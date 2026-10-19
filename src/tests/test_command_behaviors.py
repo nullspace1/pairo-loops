@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import FakeAgent
 from pairo.core.events import EventPipeline, ImageSent, SessionDeleted
 from pairo.ui.commands import AgentCommandController
@@ -18,7 +18,7 @@ def configured_agent(name: str, tmp_path: Path, pipeline: EventPipeline) -> Fake
         AgentConfiguration(
             name=name,
             description="Writes code" if name == "developer" else "",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,
             model="test",
         ),

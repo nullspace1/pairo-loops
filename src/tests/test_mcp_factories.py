@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.mcp.servers import StdioMCPServer
 from pairo.mcp.chatroom import Chatroom
 from pairo.mcp.context7 import context7
@@ -17,7 +17,7 @@ from pairo.mcp.github import add_github_mcp_server
 def configured_agent(tmp_path: Path, name: str = "developer") -> AgentConfiguration:
     return AgentConfiguration(
         name=name,
-        sandbox=SandboxMode.READ_ONLY,
+        sandbox=SandboxPermission.READ_ONLY,
         workspace=tmp_path,
         model="test",
     )

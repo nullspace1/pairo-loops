@@ -12,7 +12,7 @@ from pairo.core.clients.codex_permissions import (
     translate_permission_request,
 )
 from pairo.core.clients.codex_client import CodexAgent, CodexSessionIdentifier
-from pairo.core.agent import AgentConfiguration, ApprovalMode, SandboxMode
+from pairo.core.agent import AgentConfiguration, ApprovalMode, SandboxPermission
 from pairo.core.events import (
     EventPipeline,
     PermissionRequest,
@@ -231,7 +231,7 @@ def test_codex_agent_calls_the_permission_requester_directly() -> None:
         requester = RecordingRequester(PermissionDecision.ACCEPT)
         configured = AgentConfiguration(
             name="reviewer",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=".",
             model="test",
             approval_mode=ApprovalMode.USER,
@@ -293,7 +293,7 @@ def test_textual_requester_hands_sdk_callback_to_the_principal_loop() -> None:
         requester = TextualPermissionRequester(pipeline, repository)
         agent = AgentConfiguration(
             name="reviewer",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=".",
             model="test",
             approval_mode=ApprovalMode.USER,
@@ -347,7 +347,7 @@ def test_permission_failure_defaults_to_decline() -> None:
         pipeline = EventPipeline()
         configured = AgentConfiguration(
             name="agent",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=".",
             model="test",
         )

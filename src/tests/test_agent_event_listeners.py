@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.events import (
     AgentActivityCompleted, AgentActivityProgress, AgentActivityStarted, AgentError,
     AgentPlanDelta, AgentReasoningDelta, AgentResponseCompleted,
@@ -22,7 +22,7 @@ class ObservedAgent:
     def __init__(self, workspace: Path) -> None:
         self._configuration = AgentConfiguration(
             name="same display name",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=workspace,
             model="test-model",
         )

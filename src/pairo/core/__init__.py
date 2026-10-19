@@ -7,7 +7,7 @@ from .agent import (
     HookType,
     JsonObject,
     ReasoningEffort,
-    SandboxMode,
+    SandboxPermission,
     SessionIdentifier,
     WebSearchMode,
 )
@@ -64,7 +64,7 @@ __all__ = [
     "PermissionRequester",
     "PermissionRequestType",
     "ReasoningEffort",
-    "SandboxMode",
+    "SandboxPermission",
     "SessionIdentifier",
     "StdioMCPServer",
     "Subscription",

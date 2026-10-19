@@ -7,7 +7,7 @@ import pytest
 
 from pairo import run_agents
 from pairo import runtime
-from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import ActiveSession, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
 
@@ -23,7 +23,7 @@ class StubAgent:
         self.calls = calls
         self._configuration = AgentConfiguration(
             name="agent",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=workspace,
             model="test",
         )

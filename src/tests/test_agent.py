@@ -3,7 +3,7 @@
 import asyncio
 from pathlib import Path
 
-from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import Agent, AgentStatus, FakeAgent, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
 
@@ -13,7 +13,7 @@ def test_fake_agent_satisfies_the_runtime_protocol(tmp_path: Path) -> None:
         pipeline = EventPipeline()
         configured = AgentConfiguration(
             name="fake",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,
             model="fake",
         )

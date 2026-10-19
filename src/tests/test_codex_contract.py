@@ -11,7 +11,7 @@ from pairo.core.agent import (
     Hook,
     HookType,
     ReasoningEffort,
-    SandboxMode,
+    SandboxPermission,
     WebSearchMode,
 )
 from pairo.core.clients import AgentStatus
@@ -51,7 +51,7 @@ class FakeAsyncCodexClient:
 def configuration(tmp_path: Path) -> AgentConfiguration:
     return AgentConfiguration(
         name="developer",
-        sandbox=SandboxMode.READ_ONLY,
+        sandbox=SandboxPermission.READ_ONLY,
         workspace=tmp_path,
         model="test",
     )
@@ -60,13 +60,19 @@ def configuration(tmp_path: Path) -> AgentConfiguration:
 def test_codex_configuration_maps_reasoning_search_permissions_and_hooks(
     tmp_path: Path,
 ) -> None:
+    writable_folder = tmp_path / "shared-output"
+    writable_folder.mkdir()
     configured = AgentConfiguration(
         name="developer",
-        sandbox=SandboxMode.WORKSPACE_WRITE,
+        sandbox=SandboxPermission.WORKSPACE_WRITE,
         workspace=tmp_path,
         model="gpt-test",
         reasoning_effort=ReasoningEffort.HIGH,
         web_search=WebSearchMode.LIVE,
+        folder_permissions={
+            writable_folder: SandboxPermission.WORKSPACE_WRITE,
+            tmp_path: SandboxPermission.READ_ONLY,
+        },
         mcp_servers=[
             HttpMCPServer(
                 name="remote",
@@ -92,6 +98,9 @@ def test_codex_configuration_maps_reasoning_search_permissions_and_hooks(
 
     assert result["model_reasoning_effort"] == "high"
     assert result["web_search"] == "live"
+    assert result["sandbox_workspace_write"] == {
+        "writable_roots": [str(writable_folder.resolve())]
+    }
     assert result["mcp_servers"]["remote"] == {
         "url": "https://example.test/mcp",
         "startup_timeout_sec": 10.0,
@@ -143,7 +152,7 @@ def test_collect_text_recurses_in_document_order() -> None:
         agent = CodexAgent(
             AgentConfiguration(
                 name="test",
-                sandbox=SandboxMode.READ_ONLY,
+                sandbox=SandboxPermission.READ_ONLY,
                 workspace=".",
                 model="test",
             ),

@@ -12,7 +12,7 @@ from pairo.core.agent import (
     Hook,
     HookType,
     ReasoningEffort,
-    SandboxMode,
+    SandboxPermission,
     WebSearchMode,
 )
 from pairo.core.mcp.mcp_permissions import MCPPermissions, MCPToolApprovalMode
@@ -28,7 +28,7 @@ class AllowRequester(PermissionRequester):
 def make_agent(tmp_path: Path, **changes) -> AgentConfiguration:
     values = {
         "name": " agent ",
-        "sandbox": SandboxMode.READ_ONLY,
+        "sandbox": SandboxPermission.READ_ONLY,
         "workspace": tmp_path,
         "model": " model ",
     }
@@ -51,6 +51,7 @@ def test_agent_defaults_identity_and_collection_isolation(tmp_path: Path) -> Non
     assert first.mcp_servers == ()
     assert first.skill_folders == ()
     assert dict(first.hooks) == {}
+    assert dict(first.folder_permissions) == {}
     assert first.mcp_servers is not second.mcp_servers or first.mcp_servers == ()
 
     with pytest.raises(ValidationError, match="frozen"):
@@ -68,7 +69,7 @@ def test_scalar_setters_validate_and_commit(tmp_path: Path) -> None:
     requester = AllowRequester()
 
     agent.set_description("Reviewer")
-    agent.set_sandbox(SandboxMode.WORKSPACE_WRITE)
+    agent.set_sandbox(SandboxPermission.WORKSPACE_WRITE)
     agent.set_workspace(other_workspace)
     agent.set_model(" updated ")
     agent.set_base_instructions("base")
@@ -79,7 +80,7 @@ def test_scalar_setters_validate_and_commit(tmp_path: Path) -> None:
     agent.set_approval_mode(ApprovalMode.USER)
 
     assert agent.description == "Reviewer"
-    assert agent.sandbox is SandboxMode.WORKSPACE_WRITE
+    assert agent.sandbox is SandboxPermission.WORKSPACE_WRITE
     assert agent.workspace == other_workspace.resolve()
     assert agent.model == "updated"
     assert agent.base_instructions == "base"
@@ -154,6 +155,35 @@ def test_mcp_skill_and_hook_mutators_expose_immutable_collections(tmp_path: Path
         agent.hooks[HookType.STOP] = (hook,)
     agent.remove_hook(HookType.SESSION_START, hook)
     assert dict(agent.hooks) == {}
+
+
+def test_folder_permission_mutators_normalize_and_isolate_paths(tmp_path: Path) -> None:
+    agent = make_agent(tmp_path)
+    writable = tmp_path / "writable"
+    readable = tmp_path / "readable"
+    writable.mkdir()
+    readable.mkdir()
+
+    agent.add_folder_permission(writable, SandboxPermission.WORKSPACE_WRITE)
+    agent.add_folder_permission(readable, SandboxPermission.READ_ONLY)
+
+    assert dict(agent.folder_permissions) == {
+        writable.resolve(): SandboxPermission.WORKSPACE_WRITE,
+        readable.resolve(): SandboxPermission.READ_ONLY,
+    }
+    with pytest.raises(TypeError):
+        agent.folder_permissions[tmp_path] = SandboxPermission.DANGER_FULL_ACCESS
+
+    agent.remove_folder_permission(readable)
+    assert dict(agent.folder_permissions) == {
+        writable.resolve(): SandboxPermission.WORKSPACE_WRITE
+    }
+
+    with pytest.raises(ValidationError, match="existing directories"):
+        agent.add_folder_permission(tmp_path / "missing", SandboxPermission.READ_ONLY)
+    assert dict(agent.folder_permissions) == {
+        writable.resolve(): SandboxPermission.WORKSPACE_WRITE
+    }
 
 
 def test_snapshot_is_independent_from_later_mutation(tmp_path: Path) -> None:

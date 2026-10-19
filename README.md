@@ -29,7 +29,7 @@ from pairo import (
     AgentConfiguration,
     ApprovalMode,
     CodexAgent,
-    SandboxMode,
+    SandboxPermission,
     run_agents,
 )
 from pairo.core.events import EventPipeline
@@ -42,7 +42,7 @@ async def main() -> None:
     permissions = TextualPermissionRequester(pipeline, repository)
     configuration = AgentConfiguration(
         name="reviewer",
-        sandbox=SandboxMode.WORKSPACE_WRITE,
+        sandbox=SandboxPermission.WORKSPACE_WRITE,
         workspace=".",
         model="gpt-5.6",
         approval_mode=ApprovalMode.USER,

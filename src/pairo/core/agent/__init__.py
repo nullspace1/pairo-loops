@@ -6,7 +6,7 @@ from .hook import Hook
 from .hook_type import HookType
 from .json_object import JsonObject
 from .reasoning_effort import ReasoningEffort
-from .sandbox_mode import SandboxMode
+from .sandbox_permission import SandboxPermission
 from .session_identifier import SessionIdentifier
 from .web_search_mode import WebSearchMode
 
@@ -17,7 +17,7 @@ __all__ = [
     "HookType",
     "JsonObject",
     "ReasoningEffort",
-    "SandboxMode",
+    "SandboxPermission",
     "SessionIdentifier",
     "WebSearchMode",
 ]

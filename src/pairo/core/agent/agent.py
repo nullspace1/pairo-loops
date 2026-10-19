@@ -21,7 +21,7 @@ from pairo.core.agent.approval_mode import ApprovalMode
 from pairo.core.agent.hook import Hook
 from pairo.core.agent.hook_type import HookType
 from pairo.core.agent.reasoning_effort import ReasoningEffort
-from pairo.core.agent.sandbox_mode import SandboxMode
+from pairo.core.agent.sandbox_permission import SandboxPermission
 from pairo.core.agent.web_search_mode import WebSearchMode
 from pairo.core.mcp.servers import MCPServer
 from pairo.core.permissions.permission_requester import PermissionRequester
@@ -45,7 +45,7 @@ class AgentConfiguration(BaseModel):
     id: UUID = Field(default_factory=uuid4, frozen=True)
     name: str = Field(frozen=True)
     description: str = ""
-    sandbox: SandboxMode
+    sandbox: SandboxPermission
     workspace: Path
     model: str
     base_instructions: str | None = None
@@ -61,6 +61,7 @@ class AgentConfiguration(BaseModel):
     mcp_servers: tuple[MCPServer, ...] = ()
     skill_folders: tuple[Path, ...] = ()
     hooks: Mapping[HookType, tuple[Hook, ...]] = Field(default_factory=dict)
+    folder_permissions: Mapping[Path, SandboxPermission] = Field(default_factory=dict)
 
     @field_validator("name")
     @classmethod
@@ -123,6 +124,17 @@ class AgentConfiguration(BaseModel):
             {hook_type: tuple(configured_hooks) for hook_type, configured_hooks in hooks.items()}
         )
 
+    @field_validator("folder_permissions", mode="before")
+    @classmethod
+    def normalize_folder_permissions(
+        cls,
+        permissions: Mapping[Path, SandboxPermission],
+    ) -> Mapping[Path, SandboxPermission]:
+        normalized = {Path(folder).resolve(): permission for folder, permission in permissions.items()}
+        if any(not folder.is_dir() for folder in normalized):
+            raise ValueError("permission folders must be existing directories.")
+        return MappingProxyType(normalized)
+
     @model_validator(mode="after")
     def require_interactive_requester(self) -> "AgentConfiguration":
         if self.approval_mode is ApprovalMode.USER and self.permission_requester is None:
@@ -131,6 +143,11 @@ class AgentConfiguration(BaseModel):
         # validated value so plugins must use the mutation API and cannot
         # bypass cross-field validation with an in-place edit.
         object.__setattr__(self, "hooks", MappingProxyType(dict(self.hooks)))
+        object.__setattr__(
+            self,
+            "folder_permissions",
+            MappingProxyType(dict(self.folder_permissions)),
+        )
         return self
 
     @field_serializer("hooks")
@@ -140,11 +157,41 @@ class AgentConfiguration(BaseModel):
     ) -> dict[HookType, tuple[Hook, ...]]:
         return dict(hooks)
 
+    @field_serializer("folder_permissions")
+    def serialize_folder_permissions(
+        self,
+        permissions: Mapping[Path, SandboxPermission],
+    ) -> dict[Path, SandboxPermission]:
+        return dict(permissions)
+
     def set_description(self, description: str) -> None:
         self._replace(description=description)
 
-    def set_sandbox(self, sandbox: SandboxMode) -> None:
+    def set_sandbox(self, sandbox: SandboxPermission) -> None:
         self._replace(sandbox=sandbox)
+
+    def set_folder_permissions(
+        self,
+        permissions: Mapping[Path, SandboxPermission],
+    ) -> None:
+        self._replace(folder_permissions=permissions)
+
+    def add_folder_permission(
+        self,
+        folder: str | Path,
+        permission: SandboxPermission,
+    ) -> None:
+        configured = dict(self.folder_permissions)
+        configured[Path(folder).resolve()] = permission
+        self.set_folder_permissions(configured)
+
+    def remove_folder_permission(self, folder: str | Path) -> None:
+        target = Path(folder).resolve()
+        if target not in self.folder_permissions:
+            raise KeyError(f"Folder permission '{target}' is not configured.")
+        configured = dict(self.folder_permissions)
+        configured.pop(target)
+        self.set_folder_permissions(configured)
 
     def set_workspace(self, workspace: str | Path) -> None:
         self._replace(workspace=workspace)

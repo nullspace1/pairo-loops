@@ -7,7 +7,7 @@ from pairo import (
     ApprovalMode,
     CodexAgent,
     ReasoningEffort,
-    SandboxMode,
+    SandboxPermission,
     WebSearchMode,
 )
 from pairo.ui.permissions import TextualPermissionRequester
@@ -19,7 +19,7 @@ def get_product_owner(pipeline, repository):
 
     configuration = AgentConfiguration(
         name="product_owner",
-        sandbox=SandboxMode.READ_ONLY,
+        sandbox=SandboxPermission.READ_ONLY,
         approval_mode=ApprovalMode.USER,
         permission_requester=TextualPermissionRequester(pipeline, repository),
         workspace=agent_directory.parents[2] / "src",

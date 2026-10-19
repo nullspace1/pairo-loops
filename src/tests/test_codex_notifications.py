@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from pydantic import BaseModel
 
-from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import AgentStatus
 from pairo.core.clients.codex_client import CodexAgent
 from pairo.core.events import (
@@ -59,7 +59,7 @@ class NotificationClient:
 def make_agent(tmp_path: Path, pipeline: EventPipeline, client: NotificationClient) -> CodexAgent:
     configured = AgentConfiguration(
         name="codex",
-        sandbox=SandboxMode.READ_ONLY,
+        sandbox=SandboxPermission.READ_ONLY,
         workspace=tmp_path,
         model="test",
     )

@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import ActiveSession, AgentStatus, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
 from pairo.core.mcp.servers import StdioMCPServer
@@ -63,7 +63,7 @@ def test_runtime_launcher_uses_its_injected_ui_launcher() -> None:
         configured = AgentConfiguration(
             name="agent",
             model="test",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=Path.cwd(),
         )
         agent = _Agent(calls, configured)
@@ -94,7 +94,7 @@ def test_mcp_server_attacher_attaches_its_injected_server() -> None:
     agent = AgentConfiguration(
         name="developer",
         model="test",
-        sandbox=SandboxMode.READ_ONLY,
+        sandbox=SandboxPermission.READ_ONLY,
         workspace=Path.cwd(),
     )
     server = StdioMCPServer(name="example", command="example")
@@ -109,7 +109,7 @@ def test_default_statistics_factory_and_formatters_keep_legacy_behavior() -> Non
     agent = AgentConfiguration(
         name="developer",
         model="test",
-        sandbox=SandboxMode.READ_ONLY,
+        sandbox=SandboxPermission.READ_ONLY,
         workspace=Path.cwd(),
     )
     timestamp = datetime(2026, 10, 15, 12, 30, 45, tzinfo=UTC)

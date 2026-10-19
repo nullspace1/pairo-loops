@@ -3,7 +3,7 @@
 import asyncio
 from pathlib import Path
 
-from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import FakeAgent
 from pairo.core.events import EventPipeline, MessageSent
 from pairo.ui.app import AgentChatApp
@@ -15,7 +15,7 @@ def make_agent(tmp_path: Path, pipeline: EventPipeline) -> FakeAgent:
     return FakeAgent(
         AgentConfiguration(
             name="reviewer",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,
             model="test",
         ),

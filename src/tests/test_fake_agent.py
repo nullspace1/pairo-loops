@@ -7,7 +7,7 @@ from threading import active_count
 import pytest
 from pydantic import BaseModel
 
-from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import AgentStatus, FakeAgent
 from pairo.core.events import (
     AgentError,
@@ -29,7 +29,7 @@ def make_agent(
     return FakeAgent(
         AgentConfiguration(
             name="fake",
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,
             model="fake",
         ),

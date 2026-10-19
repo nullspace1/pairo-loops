@@ -43,6 +43,7 @@ from pydantic import ConfigDict, JsonValue
 from pairo.core.agent.agent import AgentConfiguration
 from pairo.core.agent.approval_mode import ApprovalMode
 from pairo.core.agent.json_object import JsonObject
+from pairo.core.agent.sandbox_permission import SandboxPermission
 from pairo.core.agent.session_identifier import SessionIdentifier
 from pairo.core.events import (
     AgentError,
@@ -638,6 +639,15 @@ class CodexAgent:
             "model_reasoning_effort": config.reasoning_effort.value,
             "web_search": config.web_search.value,
         }
+        writable_roots = [
+            str(folder)
+            for folder, permission in config.folder_permissions.items()
+            if permission is SandboxPermission.WORKSPACE_WRITE
+        ]
+        if writable_roots:
+            result["sandbox_workspace_write"] = {
+                "writable_roots": cast(list[CodexJsonValue], writable_roots)
+            }
         if config.mcp_servers:
             servers: CodexJsonObject = {}
             for server in config.mcp_servers:

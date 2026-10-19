@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
-from pairo import AgentConfiguration, SandboxMode
+from pairo import AgentConfiguration, SandboxPermission
 from pairo.core.clients.client import MCP_AGENT_ID_HEADER
 from pairo.core.mcp.spec_manager.spec_manager import (
     SpecManager,
@@ -17,7 +17,7 @@ class AgentStub:
     def __init__(self, folder: Path, name: str) -> None:
         self._configuration = AgentConfiguration(
             name=name,
-            sandbox=SandboxMode.READ_ONLY,
+            sandbox=SandboxPermission.READ_ONLY,
             workspace=folder,
             model="test",
         )
