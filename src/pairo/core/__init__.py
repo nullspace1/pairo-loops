@@ -24,7 +24,13 @@ from .mcp.mcp_http_wrapper import MCPHttpLogLevel, MCPHttpWrapper
 from .mcp.mcp_permissions import MCPPermissions, MCPToolApprovalMode
 from .mcp.servers import HttpMCPServer, StdioMCPServer
 from .mcp.spec_manager.spec_manager import SpecManager, WorkerVerifierPair, install_spec_manager
-from .events import AgentEventListeners, EventListenerRegistration, EventListeners
+from .events import (
+    AgentEventListeners,
+    EventCallback,
+    EventPipeline,
+    Subscription,
+    SynchronousEventPipeline,
+)
 from .permissions import (
     ApprovalRequest,
     PermissionDecision,
@@ -44,8 +50,8 @@ __all__ = [
     "CodexSessionIdentifier",
     "FakeAgent",
     "FakeSessionIdentifier",
-    "EventListenerRegistration",
-    "EventListeners",
+    "EventCallback",
+    "EventPipeline",
     "Hook",
     "HookType",
     "HttpMCPServer",
@@ -61,6 +67,8 @@ __all__ = [
     "SandboxMode",
     "SessionIdentifier",
     "StdioMCPServer",
+    "Subscription",
+    "SynchronousEventPipeline",
     "SpecManager",
     "WorkerVerifierPair",
     "WebSearchMode",

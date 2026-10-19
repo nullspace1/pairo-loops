@@ -81,7 +81,14 @@ def test_codex_configuration_maps_reasoning_search_permissions_and_hooks(
         hooks={HookType.SESSION_START: [Hook(command="prepare", is_async=True)]},
     )
 
-    result = CodexAgent._codex_config(configured)
+    async def convert() -> dict:
+        pipeline = EventPipeline()
+        agent = CodexAgent(configured, pipeline, FakeAsyncCodexClient())
+        result = agent._codex_config(configured)
+        await agent.close()
+        return result
+
+    result = asyncio.run(convert())
 
     assert result["model_reasoning_effort"] == "high"
     assert result["web_search"] == "live"
@@ -131,30 +138,46 @@ def test_collect_text_recurses_in_document_order() -> None:
             {"items": [{"nested": {"text": "final"}}]},
         ],
     }
-    assert CodexAgent._collect_text(value) == ["outer", "first", "final"]
+    async def collect() -> list[str]:
+        pipeline = EventPipeline()
+        agent = CodexAgent(
+            AgentConfiguration(
+                name="test",
+                sandbox=SandboxMode.READ_ONLY,
+                workspace=".",
+                model="test",
+            ),
+            pipeline,
+            FakeAsyncCodexClient(),
+        )
+        result = agent._collect_text(value)
+        await agent.close()
+        return result
+
+    assert asyncio.run(collect()) == ["outer", "first", "final"]
 
 
 def test_client_initialization_and_compaction_are_awaited_once(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         client = FakeAsyncCodexClient()
         agent = CodexAgent(configuration(tmp_path), pipeline, client)
 
         await asyncio.gather(*(agent._ensure_client() for _ in range(4)))
         active = await agent.new_session("Conversation 1")
+        compacted = asyncio.create_task(pipeline.listen(SessionCompacted))
+        await asyncio.sleep(0)
         await agent.compact()
 
         assert client.started == 1
         assert client.initialized == 1
         assert client.compacted == [active.identifier.thread_id]
         assert agent.status() is AgentStatus.IDLE
-        assert any(isinstance(event, SessionCompacted) for event in pipeline.events)
+        assert isinstance(await compacted, SessionCompacted)
 
         await agent.close()
         await agent.close()
         assert client.closed == 1
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -177,7 +200,6 @@ def test_token_usage_notification_is_provider_neutral(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         agent = CodexAgent(configuration(tmp_path), pipeline, FakeAsyncCodexClient())
         event = await agent._translate_notification(
             CodexSessionIdentifier(thread_id="thread-1"),
@@ -197,6 +219,5 @@ def test_token_usage_notification_is_provider_neutral(tmp_path: Path) -> None:
         assert event.last.total_tokens == 100
         assert event.total.total_tokens == 500
         await agent.close()
-        await pipeline.close()
 
     asyncio.run(scenario())

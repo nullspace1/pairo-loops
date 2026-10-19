@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from types import MappingProxyType
+from typing import cast
 from uuid import UUID
 
 from pairo.core.agent import SessionIdentifier
-from pairo.core.clients import Agent
+from pairo.core.clients import ActiveSession, Agent
 from pairo.core.events import EventPipeline
 from pairo.ui.app import run_ui
 from pairo.ui.session_repository import SessionRepository
@@ -43,7 +44,6 @@ class RuntimeLauncher:
         self._user_interface_launcher = user_interface_launcher
 
     async def launch(self, initial_session_name: str = "Conversation 1") -> None:
-        self._event_pipeline.bind()
         try:
             startup_results = await asyncio.gather(
                 *(
@@ -62,6 +62,13 @@ class RuntimeLauncher:
             )
             if startup_failure is not None:
                 raise startup_failure
+            for agent_id, result in zip(self._agents, startup_results):
+                active = cast(ActiveSession[SessionIdentifier], result)
+                await self._session_repository.save_session(
+                    agent_id,
+                    active.name,
+                    active.identifier.model_dump(mode="json"),
+                )
             await self._user_interface_launcher(
                 self._agents,
                 self._event_pipeline,
@@ -83,10 +90,7 @@ class RuntimeLauncher:
             if failure is not None:
                 raise failure
         finally:
-            try:
-                await self._session_repository.close()
-            finally:
-                await self._event_pipeline.close()
+            await self._session_repository.close()
 
 
 class RunAgents:

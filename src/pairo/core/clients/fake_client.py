@@ -75,7 +75,7 @@ class FakeAgent:
             )
             self._active_session = active
             self._status = AgentStatus.IDLE
-        await self._pipeline.enqueue(
+        self._pipeline.push(
             SessionCreated(
                 agent_id=self._configuration.id,
                 session_name=active.name,
@@ -100,7 +100,7 @@ class FakeAgent:
             )
             self._active_session = active
             self._status = AgentStatus.IDLE
-        await self._pipeline.enqueue(
+        self._pipeline.push(
             SessionUpdated(
                 agent_id=self._configuration.id,
                 session_name=active.name,
@@ -124,7 +124,7 @@ class FakeAgent:
             self._status = AgentStatus.GENERATING
             if starting:
                 self._interrupt_requested = False
-        await self._pipeline.enqueue(
+        self._pipeline.push(
             MessageSent(
                 agent_id=self._configuration.id,
                 session_name=active.name,
@@ -133,7 +133,7 @@ class FakeAgent:
             )
         )
         if starting:
-            self._completion_task = self._pipeline.create_task(
+            self._completion_task = asyncio.create_task(
                 self._complete_turn(active),
                 name=f"fake-agent-{self._configuration.id}",
             )
@@ -151,7 +151,7 @@ class FakeAgent:
             self._require_open()
             self._require_not_generating()
             active = self._require_session()
-        await self._pipeline.enqueue(
+        self._pipeline.push(
             SessionCompacted(
                 agent_id=self._configuration.id,
                 session_name=active.name,
@@ -187,7 +187,7 @@ class FakeAgent:
             self._interrupt_requested = False
         try:
             if interrupted:
-                await self._pipeline.enqueue(
+                self._pipeline.push(
                     AgentResponseInterrupted(
                         agent_id=self._configuration.id,
                         session_name=active.name,
@@ -198,14 +198,14 @@ class FakeAgent:
                 error = RuntimeError("The fake turn has no pending response.")
                 await self._publish_error(active, error)
                 return
-            await self._pipeline.enqueue(
+            self._pipeline.push(
                 AgentResponseCompleted(
                     agent_id=self._configuration.id,
                     session_name=active.name,
                     message=response,
                 )
             )
-            await self._pipeline.enqueue(
+            self._pipeline.push(
                 MessageSent(
                     agent_id=self._configuration.id,
                     session_name=active.name,
@@ -224,7 +224,7 @@ class FakeAgent:
         active: ActiveSession[FakeSessionIdentifier],
         error: Exception,
     ) -> None:
-        await self._pipeline.enqueue(
+        self._pipeline.push(
             AgentError(
                 agent_id=self._configuration.id,
                 session_name=active.name,

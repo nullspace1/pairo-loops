@@ -61,6 +61,7 @@ from pairo.core.events import (
     SessionCompacted,
     SessionCreated,
     SessionUpdated,
+    SynchronousEventPipeline,
     TokenUsage,
 )
 from pairo.core.permissions import PermissionRequester
@@ -106,6 +107,7 @@ class CodexAgent:
     ) -> None:
         self._configuration = configuration
         self._pipeline = event_pipeline
+        self._permission_pipeline = SynchronousEventPipeline(event_pipeline)
         self._client = client or _ApprovalAwareAsyncCodexClient(self._route_permission)
         self._client_started = False
         self._client_lock = asyncio.Lock()
@@ -147,7 +149,7 @@ class CodexAgent:
         except Exception as error:
             await self._publish_session_error(normalized, error)
             raise
-        await self._pipeline.enqueue(self._session_created(active))
+        self._pipeline.push(self._session_created(active))
         return active
 
     async def activate_session(
@@ -176,7 +178,7 @@ class CodexAgent:
         except Exception as error:
             await self._publish_session_error(normalized, error)
             raise
-        await self._pipeline.enqueue(self._session_updated(active))
+        self._pipeline.push(self._session_updated(active))
         return active
 
     async def send_message(self, message: str, source: str = "user") -> None:
@@ -185,7 +187,7 @@ class CodexAgent:
         async with self._state_lock:
             self._require_open()
             active = self._require_session()
-            await self._pipeline.enqueue(
+            self._pipeline.push(
                 MessageSent(
                     agent_id=self._configuration.id,
                     session_name=active.name,
@@ -215,10 +217,9 @@ class CodexAgent:
                 )
                 self._turn_id = start_response.turn.id
                 self._status = AgentStatus.GENERATING
-                self._notification_task = self._pipeline.create_task(
+                self._notification_task = asyncio.create_task(
                     self._consume_notifications(active),
                     name=f"codex-agent-{self._configuration.id}",
-                    joinable=False,
                 )
             except Exception as error:
                 self._status = AgentStatus.IDLE
@@ -262,7 +263,7 @@ class CodexAgent:
             )
             await self._publish_session_error(session_name, error)
             raise
-        await self._pipeline.enqueue(
+        self._pipeline.push(
             SessionCompacted(
                 agent_id=self._configuration.id,
                 session_name=active.name,
@@ -323,12 +324,12 @@ class CodexAgent:
                     event,
                     (ClientResponseCompleted, ClientResponseInterrupted),
                 )
-                await self._pipeline.enqueue(
+                self._pipeline.push(
                     event.to_routed_event(self._configuration.id, active.name)
                 )
                 transcript_message = event.transcript_message()
                 if transcript_message is not None:
-                    await self._pipeline.enqueue(
+                    self._pipeline.push(
                         MessageSent(
                             agent_id=self._configuration.id,
                             session_name=active.name,
@@ -441,7 +442,9 @@ class CodexAgent:
         if request is None:
             return {"decision": "decline"}
         try:
-            decision = context.requester.request(request)
+            decision = self._permission_pipeline.run(
+                context.requester.request(request)
+            )
             return translate_permission_decision(request, decision)
         except Exception:
             return {"decision": "decline"}
@@ -458,7 +461,7 @@ class CodexAgent:
         session_name: str,
         error: Exception,
     ) -> None:
-        await self._pipeline.enqueue(
+        self._pipeline.push(
             AgentError(
                 agent_id=self._configuration.id,
                 session_name=session_name,

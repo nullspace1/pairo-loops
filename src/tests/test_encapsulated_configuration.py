@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from pairo.core.agent import AgentConfiguration, SandboxMode
-from pairo.core.clients import AgentStatus
+from pairo.core.clients import ActiveSession, AgentStatus, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
 from pairo.core.mcp.servers import StdioMCPServer
 from pairo.mcp._agent_configuration import MCPServerAttacher
@@ -34,8 +34,12 @@ class _Agent:
     def status(self) -> AgentStatus:
         return AgentStatus.INACTIVE
 
-    async def new_session(self, name: str) -> None:
+    async def new_session(self, name: str):
         self.calls.append(f"start:{name}")
+        return ActiveSession(
+            name=name,
+            identifier=FakeSessionIdentifier(session_id="session-1"),
+        )
 
     async def close(self) -> None:
         self.calls.append("close:agent")
@@ -44,6 +48,9 @@ class _Agent:
 class _Repository:
     def __init__(self, calls: list[str]) -> None:
         self.calls = calls
+
+    async def save_session(self, _agent_id, name, _identifier) -> None:
+        self.calls.append(f"save:{name}")
 
     async def close(self) -> None:
         self.calls.append("close:repository")
@@ -71,8 +78,14 @@ def test_runtime_launcher_uses_its_injected_ui_launcher() -> None:
 
         await RuntimeLauncher(agents, pipeline, repository, launch_ui).launch("Initial")
 
-        assert calls == ["start:Initial", "ui", "close:agent", "close:repository"]
-        assert pipeline._closed
+        assert calls == [
+            "start:Initial",
+            "save:Initial",
+            "ui",
+            "close:agent",
+            "close:repository",
+        ]
+        assert not hasattr(pipeline, "_closed")
 
     asyncio.run(scenario())
 

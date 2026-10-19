@@ -92,6 +92,9 @@ class AgentSidebar(Vertical):
     async def on_mount(self) -> None:
         await self.refresh_data()
 
+    def on_unmount(self) -> None:
+        self._statistics.teardown()
+
     @on(Select.Changed, ".sidebar-information-picker")
     async def change_information_mode(self, event: Select.Changed) -> None:
         if event.value is not Select.BLANK:

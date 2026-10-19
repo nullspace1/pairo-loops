@@ -27,29 +27,51 @@ from .agent_events import (
     SessionUpdated,
     TokenUsage,
 )
-from .event_listener_registration import EventListenerRegistration
-from .event_listeners import AgentEventListeners, EventListeners
-from .event_lock import EventReceipt, EventSubscription
-from .event_pipeline import EventPipeline, PipelineTask
+from .agent_event_listeners import AgentEventListeners
+from .event_pipeline import EventCallback, EventPipeline, Subscription
 from .image_sent import ImageSent
 from .message_sent import MessageSent
 from .network_message_sent import NetworkMessageSent
 from .permission_request import PermissionRequest
 from .permission_response import PermissionResponse
+from .synchronous_event_pipeline import SynchronousEventPipeline
 from .user_input import UserInput
 
 __all__ = [
-    "AgentActivityCompleted", "AgentActivityProgress", "AgentActivityStarted",
-    "AgentError", "AgentPlanDelta", "AgentReasoningDelta", "AgentResponseCompleted",
-    "AgentResponseInterrupted", "AgentTextDelta", "AgentTokenUsageUpdated",
-    "ClientActivityCompleted", "ClientActivityProgress",
-    "ClientActivityStarted", "ClientEvent", "ClientPlanDelta",
-    "ClientReasoningDelta", "ClientResponseCompleted",
-    "ClientResponseInterrupted", "ClientTextDelta", "ClientTokenUsageUpdated",
-    "AgentEventListeners", "EventListeners", "EventListenerRegistration", "EventPipeline", "EventReceipt",
-    "PipelineTask",
-    "EventSubscription", "ImageSent", "MessageSent", "NetworkMessageSent",
-    "PermissionRequest", "PermissionResponse",
-    "SessionCompacted", "SessionCreated",
-    "SessionDeleted", "SessionUpdated", "TokenUsage", "UserInput",
+    "AgentActivityCompleted",
+    "AgentActivityProgress",
+    "AgentActivityStarted",
+    "AgentError",
+    "AgentEventListeners",
+    "AgentPlanDelta",
+    "AgentReasoningDelta",
+    "AgentResponseCompleted",
+    "AgentResponseInterrupted",
+    "AgentTextDelta",
+    "AgentTokenUsageUpdated",
+    "ClientActivityCompleted",
+    "ClientActivityProgress",
+    "ClientActivityStarted",
+    "ClientEvent",
+    "ClientPlanDelta",
+    "ClientReasoningDelta",
+    "ClientResponseCompleted",
+    "ClientResponseInterrupted",
+    "ClientTextDelta",
+    "ClientTokenUsageUpdated",
+    "EventCallback",
+    "EventPipeline",
+    "ImageSent",
+    "MessageSent",
+    "NetworkMessageSent",
+    "PermissionRequest",
+    "PermissionResponse",
+    "SessionCompacted",
+    "SessionCreated",
+    "SessionDeleted",
+    "SessionUpdated",
+    "Subscription",
+    "SynchronousEventPipeline",
+    "TokenUsage",
+    "UserInput",
 ]

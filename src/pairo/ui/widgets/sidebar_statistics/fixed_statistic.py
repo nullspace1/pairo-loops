@@ -28,6 +28,9 @@ class FixedStatistic:
     ) -> None:
         """Satisfy the provider lifecycle; fixed values need no resources."""
 
+    def teardown(self) -> None:
+        """Satisfy the provider lifecycle; fixed values own no resources."""
+
     async def statistic(self, context: SidebarStatisticContext) -> object:
         return await self.value(context)
 

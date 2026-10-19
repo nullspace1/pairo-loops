@@ -24,14 +24,18 @@ def make_agent(tmp_path: Path, pipeline: EventPipeline) -> FakeAgent:
     )
 
 
-def test_app_replays_active_session_and_persists_it(tmp_path: Path) -> None:
+def test_app_initializes_from_active_agent_and_repository(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         repository = SqliteSessionRepository()
         agent = make_agent(tmp_path, pipeline)
         active = await agent.new_session("Conversation 1")
         agent_id = agent.configuration().id
+        await repository.save_session(
+            agent_id,
+            active.name,
+            active.identifier.model_dump(mode="json"),
+        )
         app = AgentChatApp({agent_id: agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
@@ -42,7 +46,6 @@ def test_app_replays_active_session_and_persists_it(tmp_path: Path) -> None:
 
         await agent.close()
         await repository.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -50,27 +53,30 @@ def test_app_replays_active_session_and_persists_it(tmp_path: Path) -> None:
 def test_app_awaits_direct_agent_message_submission(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         repository = SqliteSessionRepository()
         agent = make_agent(tmp_path, pipeline)
-        await agent.new_session("Conversation 1")
+        active = await agent.new_session("Conversation 1")
         agent_id = agent.configuration().id
+        await repository.save_session(
+            agent_id,
+            active.name,
+            active.identifier.model_dump(mode="json"),
+        )
         app = AgentChatApp({agent_id: agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
             chat = app.chats[agent_id]
             chat.input.value = "Review this"
+            message_waiter = asyncio.create_task(pipeline.listen(MessageSent))
+            await asyncio.sleep(0)
             await pilot.press("enter")
-            await pipeline.join()
-            await pilot.pause()
+            message = await message_waiter
+            while not chat.transcript.entries:
+                await pilot.pause()
 
-            assert any(
-                isinstance(event, MessageSent)
-                and event.agent_id == agent_id
-                and event.message == "Review this"
-                and event.source == "user"
-                for event in pipeline.events
-            )
+            assert message.agent_id == agent_id
+            assert message.message == "Review this"
+            assert message.source == "user"
             assert TranscriptEntry(
                 "user",
                 "Review this",
@@ -80,6 +86,5 @@ def test_app_awaits_direct_agent_message_submission(tmp_path: Path) -> None:
 
         await agent.close()
         await repository.close()
-        await pipeline.close()
 
     asyncio.run(scenario())

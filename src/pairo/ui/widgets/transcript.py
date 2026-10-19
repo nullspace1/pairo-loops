@@ -9,6 +9,7 @@ from textual.events import MouseScrollDown, MouseScrollUp
 from pairo.core.events import EventPipeline
 
 from ..models import EventDetailLevel, TranscriptEntry, TranscriptMetadata
+from ..transcript_service import TranscriptService
 from ..transcribers import (
     TranscriptRenderContext,
     TranscriberRegistry,
@@ -22,6 +23,7 @@ class Transcript(VerticalScroll):
         agent_id: UUID,
         session_name: str | None,
         event_pipeline: EventPipeline,
+        transcript_service: TranscriptService,
         transcribers: TranscriberRegistry,
         detail_level: EventDetailLevel = EventDetailLevel.NORMAL,
         *,
@@ -47,6 +49,7 @@ class Transcript(VerticalScroll):
         self._agent_id = agent_id
         self._session_name = session_name
         self._event_pipeline = event_pipeline
+        self._transcript_service = transcript_service
         self._transcribers = transcribers
         self._live_entry_ids: set[UUID] = set()
         self._render_generation = 0
@@ -113,6 +116,7 @@ class Transcript(VerticalScroll):
             agent_id=self._agent_id,
             session_name=self._session_name or "",
             event_pipeline=self._event_pipeline,
+            transcript_service=self._transcript_service,
             is_live=entry.entry_id in self._live_entry_ids,
         )
         widget = (

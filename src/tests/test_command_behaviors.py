@@ -30,7 +30,6 @@ def configured_agent(name: str, tmp_path: Path, pipeline: EventPipeline) -> Fake
 def test_messages_and_basic_commands_call_agents_directly(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         repository = SqliteSessionRepository()
         developer = configured_agent("developer", tmp_path, pipeline)
         reviewer = configured_agent("reviewer", tmp_path, pipeline)
@@ -67,7 +66,6 @@ def test_messages_and_basic_commands_call_agents_directly(tmp_path: Path) -> Non
 
         await asyncio.gather(developer.close(), reviewer.close())
         await repository.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -75,13 +73,16 @@ def test_messages_and_basic_commands_call_agents_directly(tmp_path: Path) -> Non
 def test_switch_and_delete_use_repository_as_the_session_catalog(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         repository = SqliteSessionRepository()
         agent = configured_agent("developer", tmp_path, pipeline)
         agent_id = agent.configuration().id
-        await agent.new_session("Conversation 1")
+        active = await agent.new_session("Conversation 1")
+        await repository.save_session(
+            agent_id,
+            active.name,
+            active.identifier.model_dump(mode="json"),
+        )
         controller = AgentCommandController({agent_id: agent}, pipeline, repository)
-        await controller.wait_until_ready()
 
         created = await controller.execute(agent_id, "/session new Review")
         assert created.session_name == "Review"
@@ -94,21 +95,24 @@ def test_switch_and_delete_use_repository_as_the_session_catalog(tmp_path: Path)
         assert switched.session_name == "Conversation 1"
         assert agent.current_session().name == "Conversation 1"
 
+        deletion_waiter = asyncio.create_task(pipeline.listen(SessionDeleted))
+        await asyncio.sleep(0)
         deleted = await controller.execute(agent_id, "/delete Conversation 1")
         assert deleted.session_name == "Review"
         assert agent.current_session().name == "Review"
         assert [item.session_name for item in await repository.sessions_for(agent_id)] == [
             "Review"
         ]
-        deletion = next(event for event in pipeline.events if isinstance(event, SessionDeleted))
+        deletion = await deletion_waiter
         assert deletion.selected_session_name == "Review"
 
+        image_waiter = asyncio.create_task(pipeline.listen(ImageSent))
+        await asyncio.sleep(0)
         image = await controller.execute(agent_id, "/image ./diagram.png")
         assert image.entry is not None
-        assert ImageSent(image_path="./diagram.png") in pipeline.events
+        assert await image_waiter == ImageSent(image_path="./diagram.png")
 
         await agent.close()
         await repository.close()
-        await pipeline.close()
 
     asyncio.run(scenario())

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Mapping
+from typing import TypeVar, cast
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -15,12 +15,11 @@ from textual.widgets import Footer, Header, Input, TabbedContent, TabPane
 from pairo.core.agent import SessionIdentifier
 from pairo.core.clients import Agent
 from pairo.core.events import (
-    AgentTokenUsageUpdated,
+    EventCallback,
     EventPipeline,
-    PermissionRequest,
-    PermissionResponse,
     SessionCreated,
     SessionDeleted,
+    Subscription,
 )
 
 from .commands import AgentCommandController
@@ -32,6 +31,7 @@ from .models import (
 )
 from .session_repository import SessionRepository
 from .sqlite_session_repository import SqliteSessionRepository
+from .transcript_service import TranscriptService
 from .transcript_events import (
     TranscriptEntryAdded,
     TranscriptEntryDeleted,
@@ -46,6 +46,9 @@ from .widgets import (
     AgentSidebar,
 )
 from .widgets.sidebar_statistics import SidebarStatistics, default_sidebar_statistics
+
+
+AppEventT = TypeVar("AppEventT", bound=BaseModel)
 
 
 class AgentChatApp(App[None]):
@@ -113,7 +116,10 @@ class AgentChatApp(App[None]):
         self._event_pipeline = event_pipeline
         self._owns_repository = session_repository is None
         self.session_repository = session_repository or SqliteSessionRepository()
-        self.history = self.session_repository
+        self._transcript_service = TranscriptService(
+            self.session_repository,
+            self._event_pipeline,
+        )
         configured_transcribers = (
             default_transcribers() if transcribers is None else transcribers
         )
@@ -121,6 +127,7 @@ class AgentChatApp(App[None]):
         self._transcribed_event_types = self._transcribers.event_types
         self._detail_level = EventDetailLevel.NORMAL
         self._sidebar_statistics = sidebar_statistics
+        self._subscriptions: list[Subscription[BaseModel]] = []
         if self._sidebar_statistics is not None:
             self._sidebar_statistics.setup(self._event_pipeline, agents_by_id)
         self._controller = AgentCommandController(
@@ -138,6 +145,7 @@ class AgentChatApp(App[None]):
                 agents_by_id,
                 self.session_repository,
                 self._event_pipeline,
+                self._transcript_service,
                 self._transcribers,
                 self._detail_level,
                 sidebar_statistics=(
@@ -158,124 +166,70 @@ class AgentChatApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        replay_tasks: list[asyncio.Task[None]] = []
-        self._event_pipeline.add_listener(TranscriptEntryAdded, self._persist_transcript_entry_added)
-        self._event_pipeline.add_listener(TranscriptEntryUpdated, self._persist_transcript_entry_updated)
-        self._event_pipeline.add_listener(TranscriptEntryDeleted, self._persist_transcript_entry_deleted)
+        self._subscribe(TranscriptEntryAdded, self._receive_transcript_entry_added)
+        self._subscribe(TranscriptEntryUpdated, self._receive_transcript_entry_updated)
+        self._subscribe(TranscriptEntryDeleted, self._receive_transcript_entry_deleted)
         for event_type in self._transcribed_event_types:
-            replay = self._event_pipeline.add_listener(
-                event_type,
-                self._transcribe_event,
-                process_existing_events=True,
-            )
-            if replay is not None:
-                replay_tasks.append(replay)
-        created_replay = self._event_pipeline.add_listener(
-            SessionCreated,
-            self._receive_session_created,
-            process_existing_events=True,
-        )
-        if created_replay is not None:
-            replay_tasks.append(created_replay)
-        deleted_replay = self._event_pipeline.add_listener(
-            SessionDeleted,
-            self._receive_session_deleted,
-            process_existing_events=True,
-        )
-        if deleted_replay is not None:
-            replay_tasks.append(deleted_replay)
-        self._answered_request_ids = {
-            event.request_id
-            for event in self._event_pipeline.events
-            if isinstance(event, PermissionResponse)
-        }
-        await self._controller.wait_until_ready()
-        if replay_tasks:
-            await asyncio.gather(*replay_tasks)
+            self._subscribe(event_type, self._transcribe_event)
+        self._subscribe(SessionCreated, self._receive_session_created)
+        self._subscribe(SessionDeleted, self._receive_session_deleted)
         self._active_chat().input.focus()
         self.set_interval(0.25, self._refresh_sidebars)
 
     async def on_unmount(self) -> None:
-        self._event_pipeline.remove_listener(
-            TranscriptEntryAdded, self._persist_transcript_entry_added
-        )
-        self._event_pipeline.remove_listener(
-            TranscriptEntryUpdated, self._persist_transcript_entry_updated
-        )
-        self._event_pipeline.remove_listener(
-            TranscriptEntryDeleted, self._persist_transcript_entry_deleted
-        )
-        for event_type in self._transcribed_event_types:
-            self._event_pipeline.remove_listener(event_type, self._transcribe_event)
-        self._event_pipeline.remove_listener(SessionCreated, self._receive_session_created)
-        self._event_pipeline.remove_listener(SessionDeleted, self._receive_session_deleted)
+        for subscription in self._subscriptions:
+            self._event_pipeline.unsubscribe(subscription)
+        self._subscriptions.clear()
         if self._owns_repository:
             await self.session_repository.close()
 
-    def _transcribe_event(self, event: BaseModel) -> BaseModel:
-        if (
-            isinstance(event, PermissionRequest)
-            and event.request_id in self._answered_request_ids
-        ):
-            return event
+    async def _transcribe_event(
+        self,
+        event: BaseModel,
+        _subscription: Subscription[BaseModel],
+    ) -> None:
         transcriber = self._transcribers.event_transcriber_for(event)
         routed = transcriber.transcribe(event)
         if routed.agent_id in self.chats:
-            self._event_pipeline.enqueue(
-                TranscriptEntryAdded(
-                    agent_id=routed.agent_id,
-                    session_name=routed.session_name,
-                    entry=routed.entry,
-                )
+            await self._transcript_service.add(
+                routed.agent_id,
+                routed.session_name,
+                routed.entry,
             )
-        return event
 
-    @property
-    def active_token_usage(self) -> AgentTokenUsageUpdated | None:
-        """Latest usage for the agent and session currently shown in the UI."""
-        pane = self._active_chat()
-        if pane.session_name is None:
-            return None
-        return next(
-            (
-                event
-                for event in reversed(self._event_pipeline.events)
-                if isinstance(event, AgentTokenUsageUpdated)
-                and event.agent_id == pane.agent_id
-                and event.session_name == pane.session_name
-            ),
-            None,
-        )
-
-    def _receive_session_created(self, event: SessionCreated) -> SessionCreated:
+    def _receive_session_created(
+        self,
+        event: SessionCreated,
+        _subscription: Subscription[SessionCreated],
+    ) -> None:
         agent = self._agents.get(event.agent_id)
         active = agent.current_session() if agent is not None else None
         if active is not None and active.name == event.session_name:
             self.call_later(self._apply_session_created, event)
-        return event
 
     async def _apply_session_created(self, event: SessionCreated) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
             await pane.select_session(event.session_name)
 
-    def _receive_session_deleted(self, event: SessionDeleted) -> SessionDeleted:
+    def _receive_session_deleted(
+        self,
+        event: SessionDeleted,
+        _subscription: Subscription[SessionDeleted],
+    ) -> None:
         self.call_later(self._apply_session_deleted, event)
-        return event
 
     async def _apply_session_deleted(self, event: SessionDeleted) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
             await pane.select_session(event.selected_session_name)
 
-    async def _persist_transcript_entry_added(
-        self, event: TranscriptEntryAdded
-    ) -> TranscriptEntryAdded:
-        await self.session_repository.add_entry(
-            event.agent_id, event.session_name, event.entry
-        )
+    def _receive_transcript_entry_added(
+        self,
+        event: TranscriptEntryAdded,
+        _subscription: Subscription[TranscriptEntryAdded],
+    ) -> None:
         self.call_later(self._apply_transcript_entry_added, event)
-        return event
 
     async def _apply_transcript_entry_added(self, event: TranscriptEntryAdded) -> None:
         pane = self.chats.get(event.agent_id)
@@ -286,14 +240,12 @@ class AgentChatApp(App[None]):
                 # A deferred application can race with application teardown.
                 return
 
-    async def _persist_transcript_entry_updated(
-        self, event: TranscriptEntryUpdated
-    ) -> TranscriptEntryUpdated:
-        await self.session_repository.update_entry(
-            event.agent_id, event.session_name, event.entry
-        )
+    def _receive_transcript_entry_updated(
+        self,
+        event: TranscriptEntryUpdated,
+        _subscription: Subscription[TranscriptEntryUpdated],
+    ) -> None:
         self.call_later(self._apply_transcript_entry_updated, event)
-        return event
 
     async def _apply_transcript_entry_updated(self, event: TranscriptEntryUpdated) -> None:
         pane = self.chats.get(event.agent_id)
@@ -303,14 +255,12 @@ class AgentChatApp(App[None]):
             except NoMatches:
                 return
 
-    async def _persist_transcript_entry_deleted(
-        self, event: TranscriptEntryDeleted
-    ) -> TranscriptEntryDeleted:
-        await self.session_repository.delete_entry(
-            event.agent_id, event.session_name, event.entry_id
-        )
+    def _receive_transcript_entry_deleted(
+        self,
+        event: TranscriptEntryDeleted,
+        _subscription: Subscription[TranscriptEntryDeleted],
+    ) -> None:
         self.call_later(self._apply_transcript_entry_deleted, event)
-        return event
 
     async def _apply_transcript_entry_deleted(self, event: TranscriptEntryDeleted) -> None:
         pane = self.chats.get(event.agent_id)
@@ -433,12 +383,20 @@ class AgentChatApp(App[None]):
     ) -> None:
         if pane.session_name is None:
             raise RuntimeError("The selected agent has no active session.")
-        await self._event_pipeline.enqueue(
-            TranscriptEntryAdded(
-                agent_id=pane.agent_id,
-                session_name=pane.session_name,
-                entry=entry,
-            )
+        await self._transcript_service.add(
+            pane.agent_id,
+            pane.session_name,
+            entry,
+        )
+
+    def _subscribe(
+        self,
+        event_type: type[AppEventT],
+        callback: EventCallback[AppEventT],
+    ) -> None:
+        subscription = self._event_pipeline.subscribe(event_type, callback)
+        self._subscriptions.append(
+            cast(Subscription[BaseModel], subscription)
         )
 
     async def _refresh_sidebars(self) -> None:

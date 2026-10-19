@@ -55,9 +55,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`run_agents` binds the pipeline to the application loop, creates each initial
-session concurrently, launches the UI, and closes agents, persistence, and the
-pipeline on success or failure.
+`run_agents` creates and persists each initial session concurrently, launches
+the UI, and closes agents and persistence on success or failure. The pipeline
+has no lifecycle of its own.
 
 ## Sessions and commands
 
@@ -78,16 +78,26 @@ Codex persists only `thread_id`; fake sessions persist only `session_id`.
 
 ## Events and approvals
 
-`EventPipeline.bind()` establishes the principal asyncio loop. Events may then
-be enqueued from any thread, but queue operations, listeners, history, waiters,
-and created tasks execute only on that loop. Notification consumers await each
-event receipt, providing backpressure and preserving provider order.
+Construct `EventPipeline` on the running principal asyncio loop. `subscribe()`
+creates an independent buffered subscription task, `push()` queues an event for
+every matching subscription without waiting, and `listen()` is a one-event
+convenience built from a temporary subscription. Delivery is FIFO within one
+subscription; separate subscriptions may run concurrently. Events are
+transient and are neither retained nor replayed.
+
+`Subscription.wait_until_cancelled()` allows a coroutine to wait for another
+callback or owner to unsubscribe it.
+
+`SynchronousEventPipeline` is the separate SDK-thread bridge. Its `push()`
+schedules publication with `call_soon_threadsafe()`, while `run()` submits a
+coroutine to the principal loop and blocks only the external calling thread.
 
 The Codex SDK invokes approval callbacks synchronously on its own callback
-thread. `CodexAgent` translates the provider request, invokes the configured
-synchronous `PermissionRequester`, and translates its decision back to Codex.
-The Textual requester owns the UI-specific handoff to the principal pipeline
-loop while the SDK callback thread waits for the user's decision.
+thread. `CodexAgent` translates the provider request, runs the configured
+asynchronous `PermissionRequester`, and translates its decision back to Codex.
+`CodexAgent` owns the `SynchronousEventPipeline` used for the UI-specific
+handoff while the SDK callback thread waits for the asynchronous requester's
+decision.
 
 ## Tests
 

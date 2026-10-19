@@ -12,6 +12,7 @@ from pairo.core.events import (
     AgentTokenUsageUpdated,
     EventPipeline,
     SessionDeleted,
+    Subscription,
 )
 
 from .statistic import SidebarStatisticContext
@@ -28,29 +29,56 @@ class TokenUsageStatistic:
         init=False,
         repr=False,
     )
+    _event_pipeline: EventPipeline | None = field(default=None, init=False, repr=False)
+    _usage_subscription: Subscription[AgentTokenUsageUpdated] | None = field(
+        default=None, init=False, repr=False
+    )
+    _deletion_subscription: Subscription[SessionDeleted] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def setup(
         self,
         event_pipeline: EventPipeline,
         agents: Mapping[UUID, Agent[SessionIdentifier]],
     ) -> None:
-        """Register once and replay pipeline history for immediately useful values."""
+        """Register future-only token and session observations."""
         self._event_pipeline = event_pipeline
-        event_pipeline.add_listener(
+        self._usage_subscription = event_pipeline.subscribe(
             AgentTokenUsageUpdated,
             self._record_usage,
-            process_existing_events=True,
         )
-        event_pipeline.add_listener(SessionDeleted, self._forget_usage)
+        self._deletion_subscription = event_pipeline.subscribe(
+            SessionDeleted,
+            self._forget_usage,
+        )
 
-    def _record_usage(self, event: AgentTokenUsageUpdated) -> AgentTokenUsageUpdated:
+    def teardown(self) -> None:
+        pipeline = self._event_pipeline
+        if pipeline is None:
+            return
+        if self._usage_subscription is not None:
+            pipeline.unsubscribe(self._usage_subscription)
+        if self._deletion_subscription is not None:
+            pipeline.unsubscribe(self._deletion_subscription)
+        self._usage_subscription = None
+        self._deletion_subscription = None
+        self._event_pipeline = None
+
+    def _record_usage(
+        self,
+        event: AgentTokenUsageUpdated,
+        _subscription: Subscription[AgentTokenUsageUpdated],
+    ) -> None:
         self._usage_by_session[(event.agent_id, event.session_name)] = event
-        return event
 
-    def _forget_usage(self, event: SessionDeleted) -> SessionDeleted:
+    def _forget_usage(
+        self,
+        event: SessionDeleted,
+        _subscription: Subscription[SessionDeleted],
+    ) -> None:
         """Avoid showing a deleted session's usage if its name is reused."""
         self._usage_by_session.pop((event.agent_id, event.session_name), None)
-        return event
 
     async def statistic(self, context: SidebarStatisticContext) -> str:
         if context.session_name is None:

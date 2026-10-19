@@ -51,3 +51,11 @@ class SidebarStatistics:
             statistic.setup(event_pipeline, agents)
         object.__setattr__(self, "_event_pipeline", event_pipeline)
 
+    def teardown(self) -> None:
+        """Release every provider subscription at most once."""
+        if self._event_pipeline is None:
+            return
+        for statistic in self.agent_information + self.current_session:
+            statistic.teardown()
+        object.__setattr__(self, "_event_pipeline", None)
+

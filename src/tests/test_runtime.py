@@ -8,6 +8,7 @@ import pytest
 from pairo import run_agents
 from pairo import runtime
 from pairo.core.agent import AgentConfiguration, SandboxMode
+from pairo.core.clients import ActiveSession, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
 
 
@@ -35,6 +36,10 @@ class StubAgent:
         self.calls.append(f"start:{name}")
         if self.start_error is not None:
             raise self.start_error
+        return ActiveSession(
+            name=name,
+            identifier=FakeSessionIdentifier(session_id="session-1"),
+        )
 
     async def close(self) -> None:
         self.calls.append("close:agent")
@@ -43,6 +48,9 @@ class StubAgent:
 class StubRepository:
     def __init__(self, calls: list[str]) -> None:
         self.calls = calls
+
+    async def save_session(self, _agent_id, name, _identifier) -> None:
+        self.calls.append(f"save:{name}")
 
     async def close(self) -> None:
         self.calls.append("close:repository")
@@ -68,8 +76,14 @@ def test_run_agents_manages_complete_application_lifecycle(
         monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
         await run_agents(agents, pipeline, repository, initial_session_name="Initial")
 
-        assert calls == ["start:Initial", "ui", "close:agent", "close:repository"]
-        assert pipeline._closed
+        assert calls == [
+            "start:Initial",
+            "save:Initial",
+            "ui",
+            "close:agent",
+            "close:repository",
+        ]
+        assert not hasattr(pipeline, "_closed")
 
     asyncio.run(scenario())
 
@@ -109,6 +123,6 @@ def test_run_agents_releases_resources_after_failures(
 
         assert "close:agent" in calls
         assert calls[-1] == "close:repository"
-        assert pipeline._closed
+        assert not hasattr(pipeline, "_closed")
 
     asyncio.run(scenario())

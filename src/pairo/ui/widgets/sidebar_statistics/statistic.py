@@ -43,6 +43,9 @@ class SidebarStatisticProvider(Protocol):
     ) -> None:
         """Connect the statistic to the current application resources."""
 
+    def teardown(self) -> None:
+        """Release resources acquired during setup."""
+
     async def statistic(self, context: SidebarStatisticContext) -> object:
         """Return this field's current value."""
 

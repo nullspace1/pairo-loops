@@ -26,7 +26,7 @@ class ImageCommand(SlashCommand):
     ) -> CommandOutcome:
         if not argument:
             raise ValueError("Usage: /image PATH")
-        await controller.event_pipeline.enqueue(ImageSent(image_path=argument))
+        controller.event_pipeline.push(ImageSent(image_path=argument))
         return CommandOutcome(
             TranscriptEntry[MessageTranscriptMetadata](
                 "user", f"Image: {argument}", EventDetailLevel.NORMAL, {"type": "message"}

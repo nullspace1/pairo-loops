@@ -7,8 +7,6 @@ from collections.abc import Awaitable, Callable
 from typing import Generic, Protocol, TypeVar, cast
 from uuid import UUID
 
-from pydantic import BaseModel
-
 from pairo.core.agent import SessionIdentifier
 from pairo.core.clients.client import Agent
 
@@ -28,16 +26,15 @@ from .agent_events import (
     SessionDeleted,
     SessionUpdated,
 )
-from .event_listener_registration import EventListenerRegistration
-from .event_pipeline import EventPipeline
-from .event_types import EventListener, EventT
+from .event_pipeline import EventPipeline, Subscription
+from .event_types import EventT
 from .message_sent import MessageSent
 from .network_message_sent import NetworkMessageSent
 from .permission_request import PermissionRequest
 from .permission_response import PermissionResponse
 
 
-ObserverResult = BaseModel | None | Awaitable[BaseModel | None]
+ObserverResult = object | Awaitable[object]
 EventObserver = Callable[[EventT], ObserverResult]
 
 
@@ -90,12 +87,15 @@ class _ObserverAdapter(Generic[EventT]):
         self._matcher = matcher
         self._observer = observer
 
-    async def __call__(self, event: EventT) -> EventT:
+    async def __call__(
+        self,
+        event: EventT,
+        _subscription: Subscription[EventT],
+    ) -> None:
         if self._matcher.matches(event):
             result = self._observer(event)
             if inspect.isawaitable(result):
                 await result
-        return event
 
 
 class _EventObserverRegistration(Generic[EventT]):
@@ -109,11 +109,10 @@ class _EventObserverRegistration(Generic[EventT]):
         self,
         observer: EventObserver[EventT],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[EventT]:
+    ) -> Subscription[EventT]:
         matcher = self._matcher_for(agent)
         adapter = _ObserverAdapter(matcher, observer)
-        self._pipeline.add_listener(self._event_type, adapter)
-        return EventListenerRegistration(self._pipeline, self._event_type, adapter)
+        return self._pipeline.subscribe(self._event_type, adapter)
 
     def _matcher_for(self, agent: Agent[SessionIdentifier] | None) -> _EventMatcher[EventT]:
         if agent is None:
@@ -129,7 +128,7 @@ class _NetworkMessageObserverRegistration(_EventObserverRegistration[NetworkMess
         return _RecipientIdMatcher[NetworkMessageSent](agent.configuration().id)
 
 
-class EventListeners:
+class AgentEventListeners:
     """Convenience registrations for observing events for one agent or all agents.
 
     Registrations only observe future events. Their callback result is ignored, so
@@ -160,131 +159,129 @@ class EventListeners:
         self,
         observer: EventObserver[MessageSent],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[MessageSent]:
+    ) -> Subscription[MessageSent]:
         return self._message_sent.register(observer, agent)
 
     def on_agent_text_delta(
         self,
         observer: EventObserver[AgentTextDelta],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentTextDelta]:
+    ) -> Subscription[AgentTextDelta]:
         return self._agent_text_delta.register(observer, agent)
 
     def on_agent_plan_delta(
         self,
         observer: EventObserver[AgentPlanDelta],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentPlanDelta]:
+    ) -> Subscription[AgentPlanDelta]:
         return self._agent_plan_delta.register(observer, agent)
 
     def on_agent_reasoning_delta(
         self,
         observer: EventObserver[AgentReasoningDelta],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentReasoningDelta]:
+    ) -> Subscription[AgentReasoningDelta]:
         return self._agent_reasoning_delta.register(observer, agent)
 
     def on_agent_activity_started(
         self,
         observer: EventObserver[AgentActivityStarted],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentActivityStarted]:
+    ) -> Subscription[AgentActivityStarted]:
         return self._agent_activity_started.register(observer, agent)
 
     def on_agent_activity_progress(
         self,
         observer: EventObserver[AgentActivityProgress],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentActivityProgress]:
+    ) -> Subscription[AgentActivityProgress]:
         return self._agent_activity_progress.register(observer, agent)
 
     def on_agent_activity_completed(
         self,
         observer: EventObserver[AgentActivityCompleted],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentActivityCompleted]:
+    ) -> Subscription[AgentActivityCompleted]:
         return self._agent_activity_completed.register(observer, agent)
 
     def on_agent_response_completed(
         self,
         observer: EventObserver[AgentResponseCompleted],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentResponseCompleted]:
+    ) -> Subscription[AgentResponseCompleted]:
         return self._agent_response_completed.register(observer, agent)
 
     def on_agent_response_interrupted(
         self,
         observer: EventObserver[AgentResponseInterrupted],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentResponseInterrupted]:
+    ) -> Subscription[AgentResponseInterrupted]:
         return self._agent_response_interrupted.register(observer, agent)
 
     def on_agent_token_usage_updated(
         self,
         observer: EventObserver[AgentTokenUsageUpdated],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentTokenUsageUpdated]:
+    ) -> Subscription[AgentTokenUsageUpdated]:
         return self._agent_token_usage_updated.register(observer, agent)
 
     def on_agent_error(
         self,
         observer: EventObserver[AgentError],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[AgentError]:
+    ) -> Subscription[AgentError]:
         return self._agent_error.register(observer, agent)
 
     def on_session_created(
         self,
         observer: EventObserver[SessionCreated],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[SessionCreated]:
+    ) -> Subscription[SessionCreated]:
         return self._session_created.register(observer, agent)
 
     def on_session_updated(
         self,
         observer: EventObserver[SessionUpdated],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[SessionUpdated]:
+    ) -> Subscription[SessionUpdated]:
         return self._session_updated.register(observer, agent)
 
     def on_session_compacted(
         self,
         observer: EventObserver[SessionCompacted],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[SessionCompacted]:
+    ) -> Subscription[SessionCompacted]:
         return self._session_compacted.register(observer, agent)
 
     def on_session_deleted(
         self,
         observer: EventObserver[SessionDeleted],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[SessionDeleted]:
+    ) -> Subscription[SessionDeleted]:
         return self._session_deleted.register(observer, agent)
 
     def on_permission_request(
         self,
         observer: EventObserver[PermissionRequest],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[PermissionRequest]:
+    ) -> Subscription[PermissionRequest]:
         return self._permission_request.register(observer, agent)
 
     def on_permission_response(
         self,
         observer: EventObserver[PermissionResponse],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[PermissionResponse]:
+    ) -> Subscription[PermissionResponse]:
         return self._permission_response.register(observer, agent)
 
     def on_network_message_sent(
         self,
         observer: EventObserver[NetworkMessageSent],
         agent: Agent[SessionIdentifier] | None = None,
-    ) -> EventListenerRegistration[NetworkMessageSent]:
+    ) -> Subscription[NetworkMessageSent]:
         return self._network_message_sent.register(observer, agent)
 
 
-AgentEventListeners = EventListeners
-
-__all__ = ["AgentEventListeners", "EventListenerRegistration", "EventListeners"]
+__all__ = ["AgentEventListeners"]
 
 

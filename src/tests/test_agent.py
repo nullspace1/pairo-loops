@@ -11,7 +11,6 @@ from pairo.core.events import EventPipeline
 def test_fake_agent_satisfies_the_runtime_protocol(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         configured = AgentConfiguration(
             name="fake",
             sandbox=SandboxMode.READ_ONLY,
@@ -36,6 +35,5 @@ def test_fake_agent_satisfies_the_runtime_protocol(tmp_path: Path) -> None:
         await agent.close()
         assert agent.current_session() is None
         assert agent.status() is AgentStatus.INACTIVE
-        await pipeline.close()
 
     asyncio.run(scenario())

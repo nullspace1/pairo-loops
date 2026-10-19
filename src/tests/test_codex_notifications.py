@@ -5,6 +5,8 @@ from pathlib import Path
 from threading import get_ident
 from types import SimpleNamespace
 
+from pydantic import BaseModel
+
 from pairo.core.agent import AgentConfiguration, SandboxMode
 from pairo.core.clients import AgentStatus
 from pairo.core.clients.codex_client import CodexAgent
@@ -16,6 +18,7 @@ from pairo.core.events import (
     EventPipeline,
     MessageSent,
     SessionCreated,
+    Subscription,
 )
 
 
@@ -63,21 +66,29 @@ def make_agent(tmp_path: Path, pipeline: EventPipeline, client: NotificationClie
     return CodexAgent(configured, pipeline, client)
 
 
-def test_notifications_run_on_pipeline_loop_and_are_backpressured(tmp_path: Path) -> None:
+def test_notifications_run_on_pipeline_loop_without_waiting_for_subscribers(
+    tmp_path: Path,
+) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         client = NotificationClient()
         agent = make_agent(tmp_path, pipeline, client)
         gate = asyncio.Event()
         observed: list[str] = []
+        events: list[BaseModel] = []
 
-        async def slow_listener(event: AgentTextDelta):
+        async def slow_listener(
+            event: AgentTextDelta,
+            _subscription: Subscription[AgentTextDelta],
+        ) -> None:
             observed.append(event.text)
             await gate.wait()
-            return event
 
-        pipeline.add_listener(AgentTextDelta, slow_listener)
+        slow_subscription = pipeline.subscribe(AgentTextDelta, slow_listener)
+        event_subscription = pipeline.subscribe(
+            BaseModel,
+            lambda event, _subscription: events.append(event),
+        )
 
         async def translate(_identifier, notification):
             if notification.kind == "terminal":
@@ -93,22 +104,24 @@ def test_notifications_run_on_pipeline_loop_and_are_backpressured(tmp_path: Path
 
         while observed != ["first"]:
             await asyncio.sleep(0)
-        assert client.turn_ids == ["turn-1"]
-        gate.set()
         while agent.status() is AgentStatus.GENERATING:
             await asyncio.sleep(0)
 
         assert client.turn_ids == ["turn-1", "turn-1"]
         assert client.reader_threads == [principal_thread, principal_thread]
-        assert [type(event) for event in pipeline.events] == [
+        while len(events) < 5:
+            await asyncio.sleep(0)
+        assert [type(event) for event in events] == [
             SessionCreated,
             MessageSent,
             AgentTextDelta,
             AgentResponseCompleted,
             MessageSent,
         ]
+        gate.set()
+        pipeline.unsubscribe(slow_subscription)
+        pipeline.unsubscribe(event_subscription)
         await agent.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -116,7 +129,6 @@ def test_notifications_run_on_pipeline_loop_and_are_backpressured(tmp_path: Path
 def test_steering_updates_internal_turn_without_changing_session_id(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         client = NotificationClient()
         agent = make_agent(tmp_path, pipeline, client)
 
@@ -135,7 +147,6 @@ def test_steering_updates_internal_turn_without_changing_session_id(tmp_path: Pa
         assert agent.current_session() == active
         assert "turn" not in active.identifier.model_dump(mode="json")
         await agent.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -143,7 +154,6 @@ def test_steering_updates_internal_turn_without_changing_session_id(tmp_path: Pa
 def test_close_closes_transport_before_waiting_for_blocked_read(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         client = NotificationClient()
         agent = make_agent(tmp_path, pipeline, client)
 
@@ -158,6 +168,5 @@ def test_close_closes_transport_before_waiting_for_blocked_read(tmp_path: Path) 
 
         assert client.closed
         assert agent.status() is AgentStatus.INACTIVE
-        await pipeline.close()
 
     asyncio.run(scenario())

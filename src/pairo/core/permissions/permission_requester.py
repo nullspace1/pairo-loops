@@ -35,8 +35,8 @@ class ApprovalRequest(BaseModel):
 
 class PermissionRequester(ABC):
     @abstractmethod
-    def request(self, request: ApprovalRequest) -> PermissionDecision:
-        """Synchronously decide a translated provider approval request."""
+    async def request(self, request: ApprovalRequest) -> PermissionDecision:
+        """Decide a translated provider approval request asynchronously."""
 
 
 __all__ = [

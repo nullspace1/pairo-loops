@@ -13,7 +13,10 @@ from pairo.core.clients.codex_permissions import (
 )
 from pairo.core.clients.codex_client import CodexAgent, CodexSessionIdentifier
 from pairo.core.agent import AgentConfiguration, ApprovalMode, SandboxMode
-from pairo.core.events import EventPipeline, PermissionRequest
+from pairo.core.events import (
+    EventPipeline,
+    PermissionRequest,
+)
 from pairo.core.permissions import (
     PermissionDecision,
     PermissionRequester,
@@ -29,7 +32,7 @@ class RecordingRequester(PermissionRequester):
         self.decision = decision
         self.requests = []
 
-    def request(self, request):
+    async def request(self, request):
         self.requests.append(request)
         return self.decision
 
@@ -37,12 +40,19 @@ class RecordingRequester(PermissionRequester):
 def test_concurrent_permission_requests_are_routed_by_identifier() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         repository = SqliteSessionRepository()
         agent_id = uuid4()
         identifier = {"provider": "fake", "thread_id": "thread-1", "turn_id": "turn-1"}
         await repository.save_session(agent_id, "Conversation 1", identifier)
-        requester = TextualPermissionRequester(pipeline, repository)
+        requester = TextualPermissionRequester(
+            pipeline,
+            repository,
+        )
+        requests: list[PermissionRequest] = []
+        request_subscription = pipeline.subscribe(
+            PermissionRequest,
+            lambda event, _subscription: requests.append(event),
+        )
 
         command = translate_permission_request(
             "item/commandExecution/requestApproval",
@@ -57,22 +67,17 @@ def test_concurrent_permission_requests_are_routed_by_identifier() -> None:
         assert command is not None and file_change is not None
         first = asyncio.create_task(requester._request(command))
         second = asyncio.create_task(requester._request(file_change))
-        while len(
-            [event for event in pipeline.events if isinstance(event, PermissionRequest)]
-        ) < 2:
+        while len(requests) < 2:
             await asyncio.sleep(0)
-        requests = [
-            event for event in pipeline.events if isinstance(event, PermissionRequest)
-        ]
-        await pipeline.enqueue(build_permission_response(requests[1], "decline"))
-        await pipeline.enqueue(build_permission_response(requests[0], "accept"))
+        pipeline.push(build_permission_response(requests[1], "decline"))
+        pipeline.push(build_permission_response(requests[0], "accept"))
 
         assert await first is PermissionDecision.ACCEPT
         assert await second is PermissionDecision.DECLINE
         assert all(request.agent_id == agent_id for request in requests)
         assert all(request.session_name == "Conversation 1" for request in requests)
+        pipeline.unsubscribe(request_subscription)
         await repository.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -152,25 +157,27 @@ def test_build_permission_response_validates_decisions() -> None:
 def test_cancelled_permission_request_cleans_pending_response() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         repository = SqliteSessionRepository()
         agent_id = uuid4()
         identifier = {"provider": "fake", "thread": "thread-1"}
         await repository.save_session(agent_id, "s", identifier)
-        requester = TextualPermissionRequester(pipeline, repository)
+        requester = TextualPermissionRequester(
+            pipeline,
+            repository,
+        )
         request = translate_permission_request(
             "item/fileChange/requestApproval", {"path": "x"}, identifier
         )
         assert request is not None
+        published = asyncio.create_task(pipeline.listen(PermissionRequest))
+        await asyncio.sleep(0)
         task = asyncio.create_task(requester._request(request))
-        while not requester._responses:
-            await asyncio.sleep(0)
+        await published
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert requester._responses == {}
+        assert not pipeline._subscriptions
         await repository.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -178,23 +185,23 @@ def test_cancelled_permission_request_cleans_pending_response() -> None:
 def test_permission_response_must_match_request_agent_and_session() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         repository = SqliteSessionRepository()
         agent_id = uuid4()
         identifier = {"provider": "fake", "thread": "thread-1"}
         await repository.save_session(agent_id, "s", identifier)
-        requester = TextualPermissionRequester(pipeline, repository)
+        requester = TextualPermissionRequester(
+            pipeline,
+            repository,
+        )
         request = translate_permission_request(
             "item/fileChange/requestApproval", {"path": "x"}, identifier
         )
         assert request is not None
+        published_waiter = asyncio.create_task(pipeline.listen(PermissionRequest))
+        await asyncio.sleep(0)
         task = asyncio.create_task(requester._request(request))
-        while not any(isinstance(event, PermissionRequest) for event in pipeline.events):
-            await asyncio.sleep(0)
-        published = next(
-            event for event in pipeline.events if isinstance(event, PermissionRequest)
-        )
-        await pipeline.enqueue(
+        published = await published_waiter
+        pipeline.push(
             PermissionResponse(
                 request_id=published.request_id,
                 agent_id=uuid4(),
@@ -204,7 +211,7 @@ def test_permission_response_must_match_request_agent_and_session() -> None:
         )
         await asyncio.sleep(0)
         assert not task.done()
-        await pipeline.enqueue(
+        pipeline.push(
             PermissionResponse(
                 request_id=published.request_id,
                 agent_id=published.agent_id,
@@ -214,7 +221,6 @@ def test_permission_response_must_match_request_agent_and_session() -> None:
         )
         assert await task is PermissionDecision.ACCEPT
         await repository.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -222,7 +228,6 @@ def test_permission_response_must_match_request_agent_and_session() -> None:
 def test_codex_agent_calls_the_permission_requester_directly() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         requester = RecordingRequester(PermissionDecision.ACCEPT)
         configured = AgentConfiguration(
             name="reviewer",
@@ -252,19 +257,27 @@ def test_codex_agent_calls_the_permission_requester_directly() -> None:
             {"provider": "codex", "thread_id": "thread-1"},
         )
 
-        response = adapter._route_permission(
-            "item/commandExecution/requestApproval",
-            {"threadId": "thread-1", "command": "pytest"},
+        responses = []
+        callback = Thread(
+            target=lambda: responses.append(
+                adapter._route_permission(
+                    "item/commandExecution/requestApproval",
+                    {"threadId": "thread-1", "command": "pytest"},
+                )
+            )
         )
+        callback.start()
+        while callback.is_alive():
+            await asyncio.sleep(0)
+        callback.join()
 
-        assert response == {"decision": "accept"}
+        assert responses == [{"decision": "accept"}]
         assert len(requester.requests) == 1
         assert requester.requests[0].details == {
             "threadId": "thread-1",
             "command": "pytest",
         }
         await adapter.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -272,7 +285,6 @@ def test_codex_agent_calls_the_permission_requester_directly() -> None:
 def test_textual_requester_hands_sdk_callback_to_the_principal_loop() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         repository = SqliteSessionRepository()
         identifier = {
             "provider": "codex",
@@ -306,6 +318,8 @@ def test_textual_requester_hands_sdk_callback_to_the_principal_loop() -> None:
         adapter = CodexAgent(agent, pipeline, Client())
         await adapter.activate_session("Conversation 1", identifier)
         responses = []
+        request_waiter = asyncio.create_task(pipeline.listen(PermissionRequest))
+        await asyncio.sleep(0)
         callback = Thread(
             target=lambda: responses.append(
                 adapter._route_permission(
@@ -315,14 +329,8 @@ def test_textual_requester_hands_sdk_callback_to_the_principal_loop() -> None:
             )
         )
         callback.start()
-        while not any(
-            isinstance(event, PermissionRequest) for event in pipeline.events
-        ):
-            await asyncio.sleep(0)
-        request = next(
-            event for event in pipeline.events if isinstance(event, PermissionRequest)
-        )
-        await pipeline.enqueue(build_permission_response(request, "accept"))
+        request = await request_waiter
+        pipeline.push(build_permission_response(request, "accept"))
 
         while callback.is_alive():
             await asyncio.sleep(0)
@@ -330,7 +338,6 @@ def test_textual_requester_hands_sdk_callback_to_the_principal_loop() -> None:
         assert responses == [{"decision": "accept"}]
         await adapter.close()
         await repository.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -338,7 +345,6 @@ def test_textual_requester_hands_sdk_callback_to_the_principal_loop() -> None:
 def test_permission_failure_defaults_to_decline() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         configured = AgentConfiguration(
             name="agent",
             sandbox=SandboxMode.READ_ONLY,
@@ -351,6 +357,5 @@ def test_permission_failure_defaults_to_decline() -> None:
             {"threadId": "unknown", "command": "pytest"},
         ) == {"decision": "decline"}
         await adapter.close()
-        await pipeline.close()
 
     asyncio.run(scenario())

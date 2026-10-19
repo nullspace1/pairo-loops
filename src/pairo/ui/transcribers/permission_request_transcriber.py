@@ -22,7 +22,6 @@ from ..models import (
 )
 from ..permissions import build_permission_response
 from ..presentation import PermissionRequestPresenter, permission_request_history_content
-from ..transcript_events import TranscriptEntryAdded, TranscriptEntryUpdated
 from .routed_transcript_entry import RoutedTranscriptEntry
 from .transcriber import Transcriber
 from .transcript_render_context import TranscriptRenderContext
@@ -171,7 +170,7 @@ class PermissionRequestTranscriber(
             card.show_error("This approval request is no longer actionable.")
             return
         try:
-            await context.event_pipeline.enqueue(
+            context.event_pipeline.push(
                 build_permission_response(request, decision)
             )
         except (RuntimeError, ValueError) as error:
@@ -189,12 +188,10 @@ class PermissionRequestTranscriber(
             metadata=cast(PermissionRequestTranscriptMetadata, metadata),
         )
         try:
-            await context.event_pipeline.enqueue(
-                TranscriptEntryUpdated(
-                    agent_id=context.agent_id,
-                    session_name=context.session_name,
-                    entry=resolved,
-                )
+            await context.transcript_service.update(
+                context.agent_id,
+                context.session_name,
+                resolved,
             )
         except (LookupError, RuntimeError, ValueError) as error:
             card.show_error(f"Decision sent, but history could not be updated: {error}")
@@ -241,17 +238,15 @@ class PermissionRequestTranscriber(
         error: Exception,
     ) -> None:
         try:
-            await context.event_pipeline.enqueue(
-                TranscriptEntryAdded(
-                    agent_id=context.agent_id,
-                    session_name=context.session_name,
-                    entry=TranscriptEntry[SystemTranscriptMetadata](
-                        "system",
-                        f"Unable to persist permission {request_id}: {error}",
-                        EventDetailLevel.NORMAL,
-                        {"type": "system"},
-                    ),
-                )
+            await context.transcript_service.add(
+                context.agent_id,
+                context.session_name,
+                TranscriptEntry[SystemTranscriptMetadata](
+                    "system",
+                    f"Unable to persist permission {request_id}: {error}",
+                    EventDetailLevel.NORMAL,
+                    {"type": "system"},
+                ),
             )
         except Exception:
             # The card already presents the failure. Do not recursively emit

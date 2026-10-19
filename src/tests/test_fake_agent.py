@@ -5,6 +5,7 @@ from pathlib import Path
 from threading import active_count
 
 import pytest
+from pydantic import BaseModel
 
 from pairo.core.agent import AgentConfiguration, SandboxMode
 from pairo.core.clients import AgentStatus, FakeAgent
@@ -16,6 +17,7 @@ from pairo.core.events import (
     MessageSent,
     SessionCreated,
     SessionUpdated,
+    Subscription,
 )
 
 
@@ -39,25 +41,36 @@ def make_agent(
 def test_turn_events_are_ordered_and_use_no_agent_threads(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         agent = make_agent(tmp_path, pipeline)
         threads_before = active_count()
+        events: list[BaseModel] = []
+
+        def collect(
+            event: BaseModel,
+            _subscription: Subscription[BaseModel],
+        ) -> None:
+            events.append(event)
+
+        subscription = pipeline.subscribe(BaseModel, collect)
 
         await agent.new_session("one")
         await agent.send_message("hello")
         while agent.status() is AgentStatus.GENERATING:
             await asyncio.sleep(0)
+        while len(events) < 4:
+            await asyncio.sleep(0)
 
         assert active_count() == threads_before
-        assert [type(event) for event in pipeline.events] == [
+        assert [type(event) for event in events] == [
             SessionCreated,
             MessageSent,
             AgentResponseCompleted,
             MessageSent,
         ]
-        assert pipeline.events[-1].source == "fake"
+        assert isinstance(events[-1], MessageSent)
+        assert events[-1].source == "fake"
+        pipeline.unsubscribe(subscription)
         await agent.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -69,8 +82,12 @@ def test_activation_steering_and_interruption_share_one_async_lifecycle(
 
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         agent = make_agent(tmp_path, pipeline, lambda: next(responses))
+        events: list[BaseModel] = []
+        subscription = pipeline.subscribe(
+            BaseModel,
+            lambda event, _subscription: events.append(event),
+        )
         active = await agent.activate_session(
             "restored",
             {"provider": "fake", "session_id": "session-1"},
@@ -79,21 +96,25 @@ def test_activation_steering_and_interruption_share_one_async_lifecycle(
         await agent.send_message("steer")
         while agent.status() is AgentStatus.GENERATING:
             await asyncio.sleep(0)
+        while not any(isinstance(event, AgentResponseCompleted) for event in events):
+            await asyncio.sleep(0)
         completion = next(
-            event for event in pipeline.events if isinstance(event, AgentResponseCompleted)
+            event for event in events if isinstance(event, AgentResponseCompleted)
         )
         assert completion.message == "steered"
         assert active.identifier.session_id == "session-1"
-        assert isinstance(pipeline.events[0], SessionUpdated)
+        assert isinstance(events[0], SessionUpdated)
 
         await agent.send_message("interrupt me")
         assert await agent.interrupt()
         while agent.status() is AgentStatus.GENERATING:
             await asyncio.sleep(0)
-        assert isinstance(pipeline.events[-1], AgentResponseInterrupted)
+        while not isinstance(events[-1], AgentResponseInterrupted):
+            await asyncio.sleep(0)
+        assert isinstance(events[-1], AgentResponseInterrupted)
         assert not await agent.interrupt()
+        pipeline.unsubscribe(subscription)
         await agent.close()
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -109,24 +130,35 @@ def test_response_factory_errors_are_contextual_and_recoverable(tmp_path: Path) 
 
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         agent = make_agent(tmp_path, pipeline, response_factory)
+        events: list[BaseModel] = []
+        subscription = pipeline.subscribe(
+            BaseModel,
+            lambda event, _subscription: events.append(event),
+        )
         await agent.new_session("one")
 
         with pytest.raises(RuntimeError, match="factory failed"):
             await agent.send_message("fail")
         assert agent.status() is AgentStatus.IDLE
-        error = next(event for event in pipeline.events if isinstance(event, AgentError))
+        while not any(isinstance(event, AgentError) for event in events):
+            await asyncio.sleep(0)
+        error = next(event for event in events if isinstance(event, AgentError))
         assert error.session_name == "one"
 
         await agent.send_message("retry")
         while agent.status() is AgentStatus.GENERATING:
             await asyncio.sleep(0)
+        while not any(
+            isinstance(event, AgentResponseCompleted) and event.message == "recovered"
+            for event in events
+        ):
+            await asyncio.sleep(0)
         assert any(
             isinstance(event, AgentResponseCompleted) and event.message == "recovered"
-            for event in pipeline.events
+            for event in events
         )
+        pipeline.unsubscribe(subscription)
         await agent.close()
-        await pipeline.close()
 
     asyncio.run(scenario())

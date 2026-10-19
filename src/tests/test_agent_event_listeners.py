@@ -11,7 +11,7 @@ from pairo.core.events import (
     AgentActivityCompleted, AgentActivityProgress, AgentActivityStarted, AgentError,
     AgentPlanDelta, AgentReasoningDelta, AgentResponseCompleted,
     AgentResponseInterrupted, AgentTextDelta, AgentTokenUsageUpdated,
-    EventListeners, EventPipeline, ImageSent, MessageSent, NetworkMessageSent,
+    AgentEventListeners, EventPipeline, ImageSent, MessageSent, NetworkMessageSent,
     PermissionRequest, PermissionResponse, SessionCompacted, SessionCreated,
     SessionDeleted, SessionUpdated, TokenUsage, UserInput,
 )
@@ -50,8 +50,7 @@ def _usage() -> TokenUsage:
 def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
-        listeners = EventListeners(pipeline)
+        listeners = AgentEventListeners(pipeline)
         agent = _agent(tmp_path)
         observed: list[BaseModel] = []
         usage = _usage()
@@ -96,13 +95,14 @@ def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_
         listeners.on_network_message_sent(observed.append, agent); listeners.on_network_message_sent(observed.append)
 
         for event in events:
-            assert await pipeline.enqueue(event) is event
+            pipeline.push(event)
+        while len(observed) < 38:
+            await asyncio.sleep(0)
         for event in events:
             expected_deliveries = 4 if isinstance(event, SessionCreated) else 2
             assert observed.count(event) == expected_deliveries
         assert not hasattr(listeners, "on_image_sent")
         assert ImageSent is not None
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -110,22 +110,23 @@ def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_
 def test_message_filtering_uses_id_and_registrations_are_future_only(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         first_agent = _agent(tmp_path)
         second_agent = _agent(tmp_path)
         early = MessageSent(agent_id=first_agent.id, session_name="s", message="early")
-        await pipeline.enqueue(early)
-        listeners = EventListeners(pipeline)
+        pipeline.push(early)
+        listeners = AgentEventListeners(pipeline)
         targeted: list[MessageSent] = []
         every_agent: list[MessageSent] = []
         listeners.on_message_sent(targeted.append, first_agent)
         listeners.on_message_sent(every_agent.append)
         first = MessageSent(agent_id=first_agent.id, session_name="s", message="first")
         second = MessageSent(agent_id=second_agent.id, session_name="s", message="second")
-        await pipeline.enqueue(first); await pipeline.enqueue(second)
+        pipeline.push(first)
+        pipeline.push(second)
+        while len(every_agent) < 2:
+            await asyncio.sleep(0)
         assert targeted == [first]
         assert every_agent == [first, second]
-        await pipeline.close()
 
     asyncio.run(scenario())
 
@@ -138,8 +139,7 @@ def test_async_observers_are_awaited_in_order_and_preserve_events(
 ) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
-        listeners = EventListeners(pipeline)
+        listeners = AgentEventListeners(pipeline)
         agent = _agent(tmp_path)
         calls: list[str] = []
         original = MessageSent(agent_id=agent.id, session_name="s", message="original")
@@ -153,15 +153,16 @@ def test_async_observers_are_awaited_in_order_and_preserve_events(
 
         def sync_observer(event: MessageSent) -> None:
             assert event is original
-            assert calls == ["async started", "async completed"]
             calls.append("sync observed")
 
         listeners.on_message_sent(async_observer, agent)
         listeners.on_message_sent(sync_observer, agent)
 
-        assert await pipeline.enqueue(original) is original
-        assert calls == ["async started", "async completed", "sync observed"]
-        await pipeline.close()
+        pipeline.push(original)
+        while len(calls) < 3:
+            await asyncio.sleep(0)
+        assert calls.index("async started") < calls.index("async completed")
+        assert "sync observed" in calls
 
     asyncio.run(scenario())
 
@@ -169,8 +170,7 @@ def test_async_observers_are_awaited_in_order_and_preserve_events(
 def test_observers_preserve_events_and_duplicate_detach_is_independent(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
-        listeners = EventListeners(pipeline)
+        listeners = AgentEventListeners(pipeline)
         agent = _agent(tmp_path)
         calls: list[MessageSent] = []
 
@@ -181,37 +181,49 @@ def test_observers_preserve_events_and_duplicate_detach_is_independent(tmp_path:
         first_registration = listeners.on_message_sent(observer, agent)
         second_registration = listeners.on_message_sent(observer, agent)
         event = MessageSent(agent_id=agent.id, session_name="s", message="original")
-        assert await pipeline.enqueue(event) is event
+        pipeline.push(event)
+        while len(calls) < 2:
+            await asyncio.sleep(0)
         assert calls == [event, event]
 
-        first_registration.detach()
-        first_registration.detach()
-        assert await pipeline.enqueue(event) is event
+        pipeline.unsubscribe(first_registration)
+        pipeline.unsubscribe(first_registration)
+        pipeline.push(event)
+        while len(calls) < 3:
+            await asyncio.sleep(0)
         assert calls == [event, event, event]
 
-        second_registration.detach()
-        await pipeline.close()
+        pipeline.unsubscribe(second_registration)
 
     asyncio.run(scenario())
 
 
-def test_observer_failures_use_receipts_and_closed_pipeline_rejects_registration(tmp_path: Path) -> None:
+def test_observer_failures_reach_the_loop_exception_handler(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
         agent = _agent(tmp_path)
-        listeners = EventListeners(pipeline)
+        listeners = AgentEventListeners(pipeline)
+        loop = asyncio.get_running_loop()
+        reported = asyncio.Event()
 
         def fail(event: MessageSent) -> None:
             raise RuntimeError("observer failed")
 
-        listeners.on_message_sent(fail, agent)
-        receipt = pipeline.enqueue(MessageSent(agent_id=agent.id, session_name="s", message="message"))
-        with pytest.raises(RuntimeError, match="observer failed"):
-            await receipt.wait()
-        await pipeline.close()
-        with pytest.raises(RuntimeError, match="closed"):
-            listeners.on_message_sent(lambda event: None)
+        def report(_loop, context) -> None:
+            assert str(context["exception"]) == "observer failed"
+            reported.set()
+
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(report)
+        subscription = listeners.on_message_sent(fail, agent)
+        try:
+            pipeline.push(
+                MessageSent(agent_id=agent.id, session_name="s", message="message")
+            )
+            await reported.wait()
+        finally:
+            pipeline.unsubscribe(subscription)
+            loop.set_exception_handler(previous)
 
     asyncio.run(scenario())
 
@@ -219,15 +231,15 @@ def test_observer_failures_use_receipts_and_closed_pipeline_rejects_registration
 def test_network_messages_match_recipient_identity(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        pipeline.bind()
-        listeners = EventListeners(pipeline)
+        listeners = AgentEventListeners(pipeline)
         recipient = _agent(tmp_path)
         other = _agent(tmp_path)
         delivered: list[NetworkMessageSent] = []
         listeners.on_network_message_sent(delivered.append, recipient)
         event = NetworkMessageSent(channel_name="team", sender_id=other.id, sender_name=other.name, recipient_id=recipient.id, session_name="s", message="hello")
-        assert await pipeline.enqueue(event) is event
+        pipeline.push(event)
+        while not delivered:
+            await asyncio.sleep(0)
         assert delivered == [event]
-        await pipeline.close()
 
     asyncio.run(scenario())

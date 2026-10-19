@@ -21,7 +21,7 @@ from pairo.core.permissions import PermissionDecision, PermissionRequester
 
 
 class AllowRequester(PermissionRequester):
-    def request(self, request):
+    async def request(self, request):
         return PermissionDecision.ACCEPT
 
 
