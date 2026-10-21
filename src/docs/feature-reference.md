@@ -58,10 +58,30 @@ when the subscription is removed, including self-unsubscription from its
 callback. Callers remain responsible for ensuring that cancellation can occur;
 the pipeline intentionally adds no timeout or deadlock prevention.
 
+`wait_until_idle()` waits for a subscription's queued callbacks to finish. It
+is additive to the cancellation behavior and is useful to consumers that must
+observe buffered side effects before they detach.
+
 `listen()` creates a temporary subscription and removes it after the first
 event or cancellation. `push()` only buffers the event and returns immediately.
 The pipeline has no history, replay, central worker, delivery receipt, or
 lifecycle methods.
+
+## Shared conversation event log
+
+`ConversationEventLog(pipeline, output_path)` creates the output path's parent
+directories and appends every **future** Pydantic event delivered by `pipeline`
+to the UTF-8 JSON Lines file. It subscribes to `BaseModel`, so it captures all
+agents, sessions, and future event types without replaying pipeline history or
+enumerating event classes. Each line has `timestamp` (ISO-8601 UTC),
+`event_type` (the concrete class name), and `payload`
+(`event.model_dump(mode="json")`). The logger is independent of transcript
+persistence and never publishes logging events.
+
+Await `flush()` when readers need all already queued records visible and
+durably flushed. Await `close()` during shutdown: it drains already queued
+events, detaches its subscription, flushes and closes the file, and may safely
+be awaited more than once. Events published after close are not recorded.
 
 `CodexAgent` constructs its `SynchronousEventPipeline` on the pipeline's
 principal loop. `push()` uses `call_soon_threadsafe()` for external threads.
@@ -96,6 +116,10 @@ Chatrooms retain a mapping of registered runtime agents and directly await the
 destination's message or session operation. The spec manager similarly retains
 director and worker/verifier agent references. Its installer updates their
 configurations with the MCP server, skills, and role instructions.
+
+When a spec manager closes, it first cancels assignment completion and review
+waiters, then stops its HTTP transport. This ordering lets active tool requests
+finish before graceful transport shutdown and does not alter task-file status.
 
 `run_agents(agents, pipeline, repository)` validates the UUID mapping, creates
 and persists initial sessions concurrently, launches the UI, and closes agents

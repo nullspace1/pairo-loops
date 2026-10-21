@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 import sys
 
+from pairo.core.tools.conversation_event_log import ConversationEventLog
+
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
@@ -23,6 +25,7 @@ from pairo.ui import SqliteSessionRepository
 async def run_async() -> None:
     pipeline = EventPipeline()
     repository = SqliteSessionRepository()
+    event_log = ConversationEventLog(pipeline, Path("./tmp/events.jsonl"))
     configured_agents = [
         get_planner(pipeline, repository),
         get_developer("developer", pipeline, repository),
@@ -36,16 +39,17 @@ async def run_async() -> None:
     }
     planner, developer, verifier = configured_agents
     spec_manager = install_spec_manager(
-        folder=SOURCE_ROOT / "pairo",
+        folder=Path("./tmp"),
         agents=agents,
         director=planner,
         pairs=[WorkerVerifierPair("pair-1", developer, verifier)],
     )
-    await spec_manager.boot_up()
     try:
+        await spec_manager.boot_up()
         await run_agents(agents, pipeline, repository)
     finally:
         await spec_manager.close()
+        await event_log.close()
 
 
 def run() -> None:

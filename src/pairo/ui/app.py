@@ -177,11 +177,14 @@ class AgentChatApp(App[None]):
         self.set_interval(0.25, self._refresh_sidebars)
 
     async def on_unmount(self) -> None:
-        for subscription in self._subscriptions:
-            self._event_pipeline.unsubscribe(subscription)
-        self._subscriptions.clear()
+        self._stop_event_delivery()
         if self._owns_repository:
             await self.session_repository.close()
+
+    async def action_quit(self) -> None:
+        """Release UI delivery tasks before asking Textual to leave its message loop."""
+        self._stop_event_delivery()
+        self.exit()
 
     async def _transcribe_event(
         self,
@@ -197,57 +200,55 @@ class AgentChatApp(App[None]):
                 routed.entry,
             )
 
-    def _receive_session_created(
+    async def _receive_session_created(
         self,
         event: SessionCreated,
         _subscription: Subscription[SessionCreated],
     ) -> None:
         agent = self._agents.get(event.agent_id)
-        active = agent.current_session() if agent is not None else None
+        if agent is None:
+            return
+
+        # Provider-driven session creation bypasses the command controller, so
+        # the event consumer must establish persistence before updating the UI.
+        await self.session_repository.save_session(
+            event.agent_id,
+            event.session_name,
+            event.identifier,
+        )
+        active = agent.current_session()
         if active is not None and active.name == event.session_name:
-            self.call_later(self._apply_session_created, event)
+            pane = self.chats.get(event.agent_id)
+            if pane is not None:
+                await pane.select_session(event.session_name)
 
-    async def _apply_session_created(self, event: SessionCreated) -> None:
-        pane = self.chats.get(event.agent_id)
-        if pane is not None:
-            await pane.select_session(event.session_name)
-
-    def _receive_session_deleted(
+    async def _receive_session_deleted(
         self,
         event: SessionDeleted,
         _subscription: Subscription[SessionDeleted],
     ) -> None:
-        self.call_later(self._apply_session_deleted, event)
-
-    async def _apply_session_deleted(self, event: SessionDeleted) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
             await pane.select_session(event.selected_session_name)
 
-    def _receive_transcript_entry_added(
+    async def _receive_transcript_entry_added(
         self,
         event: TranscriptEntryAdded,
         _subscription: Subscription[TranscriptEntryAdded],
     ) -> None:
-        self.call_later(self._apply_transcript_entry_added, event)
-
-    async def _apply_transcript_entry_added(self, event: TranscriptEntryAdded) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
             try:
                 await pane.add_entry(event.session_name, event.entry)
             except NoMatches:
-                # A deferred application can race with application teardown.
+                # Event delivery can race with application teardown.
                 return
 
-    def _receive_transcript_entry_updated(
+    async def _receive_transcript_entry_updated(
         self,
         event: TranscriptEntryUpdated,
         _subscription: Subscription[TranscriptEntryUpdated],
     ) -> None:
-        self.call_later(self._apply_transcript_entry_updated, event)
-
-    async def _apply_transcript_entry_updated(self, event: TranscriptEntryUpdated) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
             try:
@@ -255,14 +256,11 @@ class AgentChatApp(App[None]):
             except NoMatches:
                 return
 
-    def _receive_transcript_entry_deleted(
+    async def _receive_transcript_entry_deleted(
         self,
         event: TranscriptEntryDeleted,
         _subscription: Subscription[TranscriptEntryDeleted],
     ) -> None:
-        self.call_later(self._apply_transcript_entry_deleted, event)
-
-    async def _apply_transcript_entry_deleted(self, event: TranscriptEntryDeleted) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
             try:
@@ -398,6 +396,12 @@ class AgentChatApp(App[None]):
         self._subscriptions.append(
             cast(Subscription[BaseModel], subscription)
         )
+
+    def _stop_event_delivery(self) -> None:
+        """Detach this UI's subscriptions without taking ownership of the pipeline."""
+        for subscription in self._subscriptions:
+            self._event_pipeline.unsubscribe(subscription)
+        self._subscriptions.clear()
 
     async def _refresh_sidebars(self) -> None:
         for pane in self.chats.values():

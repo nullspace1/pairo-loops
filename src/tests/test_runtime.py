@@ -8,8 +8,10 @@ import pytest
 from pairo import run_agents
 from pairo import runtime
 from pairo.core.agent import AgentConfiguration, SandboxPermission
-from pairo.core.clients import ActiveSession, FakeSessionIdentifier
+from pairo.core.clients import ActiveSession, AgentStatus, FakeAgent, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
+from pairo.ui.app import AgentChatApp
+from pairo.ui.sqlite_session_repository import SqliteSessionRepository
 
 
 class StubAgent:
@@ -56,6 +58,47 @@ class StubRepository:
         self.calls.append("close:repository")
 
 
+class TrackingFakeAgent(FakeAgent):
+    """Record shutdown ownership while retaining the real UI-facing agent behavior."""
+
+    def __init__(self, configuration: AgentConfiguration, pipeline: EventPipeline) -> None:
+        super().__init__(configuration, pipeline, lambda: "done")
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        await super().close()
+
+
+class TrackingRepository(SqliteSessionRepository):
+    """Record that the runtime, rather than the UI, closes an injected repository."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        await super().close()
+
+
+class QuittingTextualLauncher:
+    """Exercise Textual's quit action instead of simulating a launcher return."""
+
+    def __init__(self) -> None:
+        self.returned = False
+
+    async def __call__(self, agents, pipeline, repository) -> None:
+        app = AgentChatApp(agents, pipeline, repository)
+
+        async def quit_after_mount(pilot) -> None:
+            await pilot.pause()
+            await pilot.press("ctrl+q")
+
+        await app.run_async(headless=True, auto_pilot=quit_after_mount)
+        self.returned = True
+
+
 def test_run_agents_manages_complete_application_lifecycle(
     monkeypatch,
     tmp_path: Path,
@@ -84,6 +127,44 @@ def test_run_agents_manages_complete_application_lifecycle(
             "close:repository",
         ]
         assert not hasattr(pipeline, "_closed")
+
+    asyncio.run(scenario())
+
+
+def test_textual_quit_returns_run_agents_and_releases_idle_resources(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A real Textual quit must not leave its host event loop alive."""
+
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        configuration = AgentConfiguration(
+            name="agent",
+            sandbox=SandboxPermission.READ_ONLY,
+            workspace=tmp_path,
+            model="test",
+        )
+        agent = TrackingFakeAgent(configuration, pipeline)
+        repository = TrackingRepository()
+        launcher = QuittingTextualLauncher()
+        monkeypatch.setattr(runtime, "run_ui", launcher)
+
+        await asyncio.wait_for(
+            run_agents({configuration.id: agent}, pipeline, repository),
+            timeout=1,
+        )
+
+        assert launcher.returned
+        assert agent.close_calls == 1
+        assert agent.status() is AgentStatus.INACTIVE
+        assert repository.close_calls == 1
+        assert not [
+            task
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("event-subscription-")
+        ]
 
     asyncio.run(scenario())
 

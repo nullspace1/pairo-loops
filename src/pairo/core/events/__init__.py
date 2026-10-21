@@ -28,6 +28,7 @@ from .agent_events import (
     TokenUsage,
 )
 from .agent_event_listeners import AgentEventListeners
+from ..tools.conversation_event_log import ConversationEventLog
 from .event_pipeline import EventCallback, EventPipeline, Subscription
 from .image_sent import ImageSent
 from .message_sent import MessageSent
@@ -59,6 +60,7 @@ __all__ = [
     "ClientResponseInterrupted",
     "ClientTextDelta",
     "ClientTokenUsageUpdated",
+    "ConversationEventLog",
     "EventCallback",
     "EventPipeline",
     "ImageSent",

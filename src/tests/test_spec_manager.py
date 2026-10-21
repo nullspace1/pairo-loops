@@ -3,9 +3,11 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pairo import AgentConfiguration, SandboxPermission
 from pairo.core.clients.client import MCP_AGENT_ID_HEADER
+from pairo.core.mcp.mcp_http_wrapper import MCPHttpWrapper
 from pairo.mcp.spec_manager import (
     SpecManager,
     WorkerVerifierPair,
@@ -193,6 +195,78 @@ def test_director_cannot_modify_or_delete_an_assigned_task(tmp_path: Path) -> No
         )
         assert "working, not pending" in await tool(manager, "delete_task")(
             "Task", context(director)
+        )
+
+    asyncio.run(scenario())
+
+
+def test_close_cancels_sleep_waiter_before_stopping_http_transport(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manager, _, director, _, _ = setup_manager(tmp_path)
+        await tool(manager, "create_task")("Task", "Do it", "It works", context(director))
+        await tool(manager, "assign_task")("pair-1", "Task", context(director))
+        sleeping = asyncio.create_task(tool(manager, "sleep_on_task")("Task", context(director)))
+        await asyncio.sleep(0)
+
+        transport_observations: list[tuple[bool, bool]] = []
+
+        async def close_transport(_wrapper: MCPHttpWrapper) -> None:
+            assignment = manager._assignments["pair-1"]
+            transport_observations.append(
+                (assignment.completion.cancelled(), assignment.review_result is None)
+            )
+            # A graceful transport waits for active tool handlers.  The
+            # cancelled waiter must therefore have released this handler.
+            try:
+                await sleeping
+            except asyncio.CancelledError:
+                pass
+
+        with patch.object(MCPHttpWrapper, "close", close_transport):
+            await asyncio.wait_for(manager.close(), timeout=1)
+            await asyncio.wait_for(manager.close(), timeout=1)
+
+        assert transport_observations == [(True, True), (True, True)]
+        assert sleeping.cancelled()
+        assert (tmp_path / "FEATURES.md").read_text(encoding="utf-8") == (
+            "Task: Do it [acceptance: It works] [status: working]\n"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_close_cancels_verification_waiter_before_stopping_http_transport(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manager, _, director, worker, _ = setup_manager(tmp_path)
+        await tool(manager, "create_task")("Task", "Do it", "It works", context(director))
+        await tool(manager, "assign_task")("pair-1", "Task", context(director))
+        verifying = asyncio.create_task(tool(manager, "verify_task")(context(worker)))
+        await asyncio.sleep(0)
+
+        transport_observations: list[tuple[bool, bool]] = []
+
+        async def close_transport(_wrapper: MCPHttpWrapper) -> None:
+            assignment = manager._assignments["pair-1"]
+            transport_observations.append(
+                (
+                    assignment.completion.cancelled(),
+                    assignment.review_result is not None and assignment.review_result.cancelled(),
+                )
+            )
+            # Model Uvicorn's graceful wait for the in-flight tool request.
+            try:
+                await verifying
+            except asyncio.CancelledError:
+                pass
+
+        with patch.object(MCPHttpWrapper, "close", close_transport):
+            await asyncio.wait_for(manager.close(), timeout=1)
+            await asyncio.wait_for(manager.close(), timeout=1)
+
+        assert transport_observations == [(True, True), (True, True)]
+        assert verifying.cancelled()
+        assert (tmp_path / "FEATURES.md").read_text(encoding="utf-8") == (
+            "Task: Do it [acceptance: It works] [status: verifying]\n"
         )
 
     asyncio.run(scenario())

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import re
-from typing import Literal, Mapping, Sequence
+from typing import Literal, Mapping, Sequence, TypeVar
 from uuid import UUID, uuid4
 
 from mcp.server import MCPServer
@@ -21,6 +21,7 @@ from pairo.core.mcp.mcp_http_wrapper import MCPHttpWrapper
 
 TaskStatus = Literal["pending", "working", "verifying", "accepted"]
 PairStatus = Literal["idle", "working", "verifying"]
+_WaitResult = TypeVar("_WaitResult")
 _TASK_PATTERN = re.compile(
     r"^(?P<name>[^:\r\n]+): (?P<description>.*?) "
     r"\[acceptance: (?P<acceptance>.*?)\] \[status: (?P<status>pending|working|verifying|accepted)\]$"
@@ -438,10 +439,28 @@ class SpecManager(MCPHttpWrapper):
         return outcome
 
     async def close(self) -> None:
+        """Release task waiters before asking HTTP to drain active requests.
+
+        Streamable HTTP shutdown waits for active tool requests.  Some of those
+        requests await an assignment-owned future, so stopping the transport
+        first would make each side wait for the other indefinitely.  Cancelling
+        the futures leaves the assignment and its task file unchanged while the
+        request handlers unwind.
+        """
+        await self._cancel_assignment_waiters()
         await super().close()
-        for assignment in self._assignments.values():
-            if not assignment.completion.done():
-                assignment.completion.cancel()
+
+    async def _cancel_assignment_waiters(self) -> None:
+        """Cancel every outstanding director or worker wait for an assignment."""
+        async with self._lock:
+            for assignment in self._assignments.values():
+                self._cancel_waiter(assignment.completion)
+                if assignment.review_result is not None:
+                    self._cancel_waiter(assignment.review_result)
+
+    def _cancel_waiter(self, waiter: asyncio.Future[_WaitResult]) -> None:
+        if not waiter.done():
+            waiter.cancel()
 
     def _pair_summary(self, pair: WorkerVerifierPair) -> JsonObject:
         assignment = self._assignments.get(pair.pair_id)
@@ -460,16 +479,14 @@ class SpecManager(MCPHttpWrapper):
         allowed = role == "director" and agent_id == self._director.configuration().id
         return None if allowed else f"Only the registered {role} may use this tool."
 
-    @staticmethod
-    def _agent_id(ctx: Context) -> UUID | None:
+    def _agent_id(self, ctx: Context) -> UUID | None:
         value = ctx.headers.get(MCP_AGENT_ID_HEADER) if ctx.headers else None
         try:
             return UUID(value) if value else None
         except ValueError:
             return None
 
-    @staticmethod
-    def _field(label: str, value: str, *, forbid_colon: bool = False) -> str:
+    def _field(self, label: str, value: str, *, forbid_colon: bool = False) -> str:
         normalized = value.strip()
         if not normalized:
             raise ValueError(f"Task {label} cannot be empty.")
@@ -479,20 +496,17 @@ class SpecManager(MCPHttpWrapper):
             raise ValueError(f"Task {label} contains a reserved delimiter.")
         return normalized
 
-    @staticmethod
-    def _session_name(kind: str, pair_id: str, task_name: str) -> str:
+    def _session_name(self, kind: str, pair_id: str, task_name: str) -> str:
         return f"spec-manager-{kind}-{pair_id}-{task_name}-{uuid4().hex[:8]}"
 
-    @staticmethod
-    def _worker_message(task: _Task) -> str:
+    def _worker_message(self, task: _Task) -> str:
         return (
             f"Implement task '{task.name}'.\nDescription: {task.description}\n"
             f"Acceptance criteria: {task.acceptance_criteria}\n"
             "When implementation is ready, call spec_manager.verify_task."
         )
 
-    @staticmethod
-    def _verifier_message(task: _Task) -> str:
+    def _verifier_message(self, task: _Task) -> str:
         return (
             f"Verify task '{task.name}'.\nDescription: {task.description}\n"
             f"Acceptance criteria: {task.acceptance_criteria}\n"

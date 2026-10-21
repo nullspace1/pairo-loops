@@ -58,6 +58,10 @@ class Subscription(Generic[EventT]):
         """Wait until this subscription has been removed from its pipeline."""
         await self._cancelled.wait()
 
+    async def wait_until_idle(self) -> None:
+        """Wait until all events currently queued for this subscription finish."""
+        await self._queue.join()
+
     def _push(self, event: EventT) -> None:
         if self._active:
             self._queue.put_nowait(event)

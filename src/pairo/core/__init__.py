@@ -26,6 +26,7 @@ from .mcp.mcp_permissions import MCPPermissions, MCPToolApprovalMode
 from .mcp.servers import HttpMCPServer, StdioMCPServer
 from .events import (
     AgentEventListeners,
+    ConversationEventLog,
     EventCallback,
     EventPipeline,
     Subscription,
@@ -48,6 +49,7 @@ __all__ = [
     "ApprovalRequest",
     "CodexAgent",
     "CodexSessionIdentifier",
+    "ConversationEventLog",
     "FakeAgent",
     "FakeSessionIdentifier",
     "EventCallback",
