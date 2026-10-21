@@ -93,17 +93,13 @@ class RuntimeLauncher:
             await self._session_repository.close()
 
 
-class RunAgents:
-    """Callable public entry point for the complete application lifecycle."""
 
-    async def __call__(
-        self,
-        agents: AgentMapping,
-        event_pipeline: EventPipeline,
-        session_repository: SessionRepository,
-        *,
-        initial_session_name: str = "Conversation 1",
-    ) -> None:
+async def run_agents(
+    agents: AgentMapping,
+            event_pipeline: EventPipeline,
+            session_repository: SessionRepository,
+            *,
+            initial_session_name: str = "Conversation 1",) -> None:
         launcher = RuntimeLauncher(
             agents,
             event_pipeline,
@@ -112,8 +108,4 @@ class RunAgents:
         )
         await launcher.launch(initial_session_name)
 
-
-run_agents = RunAgents()
-
-
-__all__ = ["AgentMapping", "RunAgents", "RuntimeLauncher", "run_agents"]
+__all__ = ["AgentMapping", "RuntimeLauncher", "run_agents"]

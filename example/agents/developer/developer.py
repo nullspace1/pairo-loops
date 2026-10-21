@@ -10,13 +10,18 @@ from pairo import (
     SandboxPermission,
     WebSearchMode,
 )
+from pairo.core.tools.workspace_factory import WorkspaceFactory
 from pairo.ui.permissions import TextualPermissionRequester
 
 
 def get_developer(name, pipeline, repository):
+    temp = Path("./tmp/developer")
     agent_directory = Path(__file__).resolve().parent
+    workspace_factory = WorkspaceFactory(temp, SandboxPermission.WORKSPACE_WRITE)
+    workspace_factory.add_workspace(
+         Path("./src"), SandboxPermission.WORKSPACE_WRITE
+    )
     instructions = (agent_directory / "developer.md").read_text(encoding="utf-8")
-
     configuration = AgentConfiguration(
         name=name,
         sandbox=SandboxPermission.WORKSPACE_WRITE,
@@ -29,4 +34,5 @@ def get_developer(name, pipeline, repository):
         reasoning_effort=ReasoningEffort.MEDIUM,
         web_search=WebSearchMode.DISABLED,
     )
+    workspace_factory.configure(configuration)
     return CodexAgent(configuration, pipeline)

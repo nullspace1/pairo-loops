@@ -27,7 +27,7 @@ warn_unused_ignores = true
 include = ["pairo*"]
 
 [tool.setuptools.package-data]
-pairo = ["core/mcp/spec_manager_skills/*/spec-manager-*/SKILL.md"]
+pairo = ["mcp/spec_manager/spec_manager_skills/*/spec-manager-*/SKILL.md"]
 
 [build-system]
 requires = ["setuptools>=68"]

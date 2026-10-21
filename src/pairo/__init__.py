@@ -31,11 +31,10 @@ from .core import (
     StdioMCPServer,
     Subscription,
     SynchronousEventPipeline,
-    SpecManager,
-    WorkerVerifierPair,
     WebSearchMode,
-    install_spec_manager,
+    WorkspaceFactory,
 )
+from .mcp.spec_manager import SpecManager, WorkerVerifierPair, install_spec_manager
 from .runtime import run_agents
 
 __all__ = [
@@ -72,6 +71,7 @@ __all__ = [
     "SpecManager",
     "WorkerVerifierPair",
     "WebSearchMode",
+    "WorkspaceFactory",
     "install_spec_manager",
     "run_agents",
 ]

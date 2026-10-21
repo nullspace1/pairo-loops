@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from pairo import AgentConfiguration, SandboxPermission
 from pairo.core.clients.client import MCP_AGENT_ID_HEADER
-from pairo.core.mcp.spec_manager.spec_manager import (
+from pairo.mcp.spec_manager import (
     SpecManager,
     WorkerVerifierPair,
     install_spec_manager,
