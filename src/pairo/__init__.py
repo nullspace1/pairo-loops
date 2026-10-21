@@ -35,11 +35,19 @@ from .core import (
     WebSearchMode,
     WorkspaceFactory,
 )
-from .mcp.spec_manager import SpecManager, WorkerVerifierPair, install_spec_manager
+from .mcp.spec_manager import (
+    AcceptanceEvidence,
+    SpecManager,
+    TestRunSummary,
+    VerificationEvidence,
+    WorkerVerifierPair,
+    install_spec_manager,
+)
 from .runtime import run_agents
 
 __all__ = [
     "ActiveSession",
+    "AcceptanceEvidence",
     "AgentConfiguration",
     "Agent",
     "AgentStatus",
@@ -71,6 +79,8 @@ __all__ = [
     "Subscription",
     "SynchronousEventPipeline",
     "SpecManager",
+    "TestRunSummary",
+    "VerificationEvidence",
     "WorkerVerifierPair",
     "WebSearchMode",
     "WorkspaceFactory",

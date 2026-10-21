@@ -9,7 +9,10 @@ from pairo import AgentConfiguration, SandboxPermission
 from pairo.core.clients.client import MCP_AGENT_ID_HEADER
 from pairo.core.mcp.mcp_http_wrapper import MCPHttpWrapper
 from pairo.mcp.spec_manager import (
+    AcceptanceEvidence,
     SpecManager,
+    TestRunSummary as RunSummary,
+    VerificationEvidence,
     WorkerVerifierPair,
     install_spec_manager,
 )
@@ -45,6 +48,39 @@ def context(agent: AgentStub):
 
 def tool(manager: SpecManager, name: str):
     return manager._mcp_server._tool_manager.get_tool(name).fn
+
+
+def verification_evidence() -> VerificationEvidence:
+    return VerificationEvidence(
+        implementation_summary=(
+            "Moved assignment waiter cancellation before graceful transport shutdown."
+        ),
+        changed_files=[
+            "pairo/mcp/spec_manager/spec_manager.py",
+            "tests/test_spec_manager.py",
+        ],
+        acceptance_evidence=[
+            AcceptanceEvidence(
+                criterion="Shutdown completes with an active assignment waiter.",
+                evidence="Covered by test_close_cancels_sleep_waiter_before_stopping_http_transport.",
+            )
+        ],
+        test_runs=[
+            RunSummary(
+                command=(
+                    ".venv\\Scripts\\python.exe -m pytest "
+                    "tests/test_spec_manager.py -q -p no:cacheprovider"
+                ),
+                outcome="passed",
+                passed=10,
+                failed=0,
+                skipped=0,
+                duration_seconds=1.2,
+                summary="Covered assignment, verification, and shutdown lifecycles.",
+            )
+        ],
+        remaining_risks=["No live network transport was used."],
+    )
 
 
 def setup_manager(tmp_path: Path, timeout: float = 1):
@@ -97,15 +133,23 @@ def test_assignment_creates_and_reuses_the_verifier_session(tmp_path: Path) -> N
         assert worker_session.startswith("spec-manager-work-pair-1-Login-")
         assert verifier_session.startswith("spec-manager-verify-pair-1-Login-")
 
-        waiting = asyncio.create_task(tool(manager, "verify_task")(context(worker)))
+        waiting = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
         await asyncio.sleep(0)
+        verifier_message = verifier.messages[-1][0]
+        assert "Worker evidence:" in verifier_message
+        assert "test_close_cancels_sleep_waiter" in verifier_message
+        assert "No live network transport was used." in verifier_message
         assert "Rejected" in await tool(manager, "reject_task")(
             "Missing failure test", context(verifier)
         )
         assert await waiting == "Missing failure test"
         assert "[status: working]" in (tmp_path / "FEATURES.md").read_text()
 
-        waiting = asyncio.create_task(tool(manager, "verify_task")(context(worker)))
+        waiting = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
         await asyncio.sleep(0)
         assert verifier.created[-1] == verifier_session
         assert "Accepted" in await tool(manager, "accept_task")(context(verifier))
@@ -127,7 +171,9 @@ def test_director_can_sleep_until_an_assigned_task_is_accepted(tmp_path: Path) -
         await asyncio.sleep(0)
         assert not sleeping.done()
 
-        verification = asyncio.create_task(tool(manager, "verify_task")(context(worker)))
+        verification = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
         await asyncio.sleep(0)
         assert "Accepted" in await tool(manager, "accept_task")(context(verifier))
 
@@ -143,7 +189,9 @@ def test_timeout_keeps_verification_active_until_late_acceptance(tmp_path: Path)
         await tool(manager, "create_task")("Task", "Do it", "It works", context(director))
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
 
-        result = await tool(manager, "verify_task")(context(worker))
+        result = await tool(manager, "verify_task")(
+            verification_evidence(), context(worker)
+        )
         assert "timed out" in result
         assert "Accepted" in await tool(manager, "accept_task")(context(verifier))
 
@@ -240,7 +288,9 @@ def test_close_cancels_verification_waiter_before_stopping_http_transport(tmp_pa
         manager, _, director, worker, _ = setup_manager(tmp_path)
         await tool(manager, "create_task")("Task", "Do it", "It works", context(director))
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
-        verifying = asyncio.create_task(tool(manager, "verify_task")(context(worker)))
+        verifying = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
         await asyncio.sleep(0)
 
         transport_observations: list[tuple[bool, bool]] = []

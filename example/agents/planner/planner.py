@@ -15,7 +15,7 @@ from pairo.ui.permissions import TextualPermissionRequester
 
 
 def get_planner(pipeline, repository):
-    temp = Path("./tmp/planner")
+    temp = Path("./tmp/agents/planner")
     
     agent_directory = Path(__file__).resolve().parent
     
@@ -35,7 +35,7 @@ def get_planner(pipeline, repository):
         workspace=temp,
         model="gpt-5.6-sol",
         skill_folders=(agent_directory / "skills",),
-        base_instructions=instructions + "\n Ignore invariant checking on the verification for now.",
+        base_instructions=instructions,
         reasoning_effort=ReasoningEffort.MEDIUM,
         web_search=WebSearchMode.CACHED,
     )

@@ -7,11 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import re
-from typing import Literal, Mapping, Sequence, TypeVar
+from typing import Annotated, Literal, Mapping, Sequence, TypeVar
 from uuid import UUID, uuid4
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from pairo.core.agent import JsonObject, SessionIdentifier
 from pairo.core.clients import Agent
@@ -26,6 +27,77 @@ _TASK_PATTERN = re.compile(
     r"^(?P<name>[^:\r\n]+): (?P<description>.*?) "
     r"\[acceptance: (?P<acceptance>.*?)\] \[status: (?P<status>pending|working|verifying|accepted)\]$"
 )
+
+
+class AcceptanceEvidence(BaseModel):
+    """Concise evidence that one acceptance criterion is satisfied."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    criterion: Annotated[str, Field(min_length=1, max_length=1_000)]
+    evidence: Annotated[str, Field(min_length=1, max_length=2_000)]
+
+    @field_validator("criterion", "evidence")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Evidence text cannot be blank.")
+        return normalized
+
+
+class TestRunSummary(BaseModel):
+    """Bounded test evidence without verbose command output."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    command: Annotated[str, Field(min_length=1, max_length=1_000)]
+    outcome: Literal["passed", "failed", "partial"]
+    passed: Annotated[int, Field(ge=0)] = 0
+    failed: Annotated[int, Field(ge=0)] = 0
+    skipped: Annotated[int, Field(ge=0)] = 0
+    duration_seconds: Annotated[float, Field(ge=0)]
+    summary: Annotated[str, Field(min_length=1, max_length=2_000)]
+
+    @field_validator("command", "summary")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Test evidence text cannot be blank.")
+        return normalized
+
+
+class VerificationEvidence(BaseModel):
+    """Implementation evidence transferred from worker to verifier."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    implementation_summary: Annotated[str, Field(min_length=1, max_length=4_000)]
+    changed_files: Annotated[list[str], Field(min_length=1, max_length=100)]
+    acceptance_evidence: Annotated[
+        list[AcceptanceEvidence], Field(min_length=1, max_length=100)
+    ]
+    test_runs: Annotated[list[TestRunSummary], Field(min_length=1, max_length=50)]
+    remaining_risks: Annotated[list[str], Field(max_length=50)] = Field(
+        default_factory=list
+    )
+
+    @field_validator("implementation_summary")
+    @classmethod
+    def normalize_summary(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Implementation summary cannot be blank.")
+        return normalized
+
+    @field_validator("changed_files", "remaining_risks")
+    @classmethod
+    def normalize_list(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip() for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("Evidence lists cannot contain blank values.")
+        return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +135,7 @@ class _Assignment:
     completion: asyncio.Future[str]
     status: PairStatus = "working"
     review_result: asyncio.Future[str | None] | None = None
+    evidence: VerificationEvidence | None = None
 
 
 class _FeatureStore:
@@ -298,13 +371,16 @@ class SpecManager(MCPHttpWrapper):
                 return error
             return await self._sleep_on_task(task_name)
 
-        @mcp.tool("verify_task", "Submit the calling worker's task for verification.")
-        async def verify_task(ctx: Context) -> str:
+        @mcp.tool(
+            "verify_task",
+            "Submit concise implementation, acceptance, and test evidence for verification.",
+        )
+        async def verify_task(evidence: VerificationEvidence, ctx: Context) -> str:
             worker_id = self._agent_id(ctx)
             pair = self._worker_pairs.get(worker_id) if worker_id else None
             if pair is None:
                 return "Only a registered worker may verify a task."
-            return await self._start_verification(pair)
+            return await self._start_verification(pair, evidence)
 
         @mcp.tool("reject_task", "Reject the active task with feedback.")
         async def reject_task(message: str, ctx: Context) -> str:
@@ -378,7 +454,11 @@ class SpecManager(MCPHttpWrapper):
             completion = assignment.completion
         return await asyncio.shield(completion)
 
-    async def _start_verification(self, pair: WorkerVerifierPair) -> str:
+    async def _start_verification(
+        self,
+        pair: WorkerVerifierPair,
+        evidence: VerificationEvidence,
+    ) -> str:
         async with self._lock:
             assignment = self._assignments.get(pair.pair_id)
             if assignment is None or assignment.status != "working":
@@ -387,7 +467,7 @@ class SpecManager(MCPHttpWrapper):
             future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
             try:
                 await pair.verifier.send_message(
-                    self._verifier_message(task),
+                    self._verifier_message(task, evidence),
                     source=pair.worker.configuration().name,
                 )
                 self._store.set_status(task.name, "verifying")
@@ -395,6 +475,7 @@ class SpecManager(MCPHttpWrapper):
                 return f"Could not start verification: {error}"
             assignment.status = "verifying"
             assignment.review_result = future
+            assignment.evidence = evidence
         try:
             result = await asyncio.wait_for(
                 asyncio.shield(future), timeout=self._verification_timeout
@@ -432,6 +513,7 @@ class SpecManager(MCPHttpWrapper):
             else:
                 assignment.status = "working"
                 assignment.review_result = None
+                assignment.evidence = None
             if future is not None and not future.done():
                 future.set_result(None if accepted else feedback)
 
@@ -503,21 +585,31 @@ class SpecManager(MCPHttpWrapper):
         return (
             f"Implement task '{task.name}'.\nDescription: {task.description}\n"
             f"Acceptance criteria: {task.acceptance_criteria}\n"
-            "When implementation is ready, call spec_manager.verify_task."
+            "When implementation is ready, call spec_manager.verify_task with "
+            "a concise implementation summary, changed files, evidence for every "
+            "acceptance criterion, summarized test runs, and remaining risks."
         )
 
-    def _verifier_message(self, task: _Task) -> str:
+    def _verifier_message(
+        self,
+        task: _Task,
+        evidence: VerificationEvidence,
+    ) -> str:
         return (
             f"Verify task '{task.name}'.\nDescription: {task.description}\n"
             f"Acceptance criteria: {task.acceptance_criteria}\n"
+            "Worker evidence:\n"
+            f"{evidence.model_dump_json(indent=2)}\n"
+            "Use this handoff to target your review. Independently inspect the "
+            "changed behavior and rerun the checks material to your decision.\n"
             "Call spec_manager.accept_task or spec_manager.reject_task with actionable feedback."
         )
 
 
 _ROLE_INSTRUCTIONS = {
     "director": "Use the spec_manager tools to create, modify, delete, and assign feature tasks; only change or delete pending tasks, and wait on assigned tasks when needed.",
-    "worker": "Implement your assigned task, then call spec_manager.verify_task and respond to rejections.",
-    "verifier": "Review the active task and call spec_manager.accept_task or reject_task exactly once.",
+    "worker": "Implement your assigned task, then call spec_manager.verify_task with structured acceptance evidence and summarized test runs; do not submit raw test output. Respond to rejections.",
+    "verifier": "Review every acceptance criterion using the worker's structured evidence, independently check material claims, and call spec_manager.accept_task or reject_task exactly once.",
 }
 
 
@@ -575,8 +667,11 @@ install_spec_manager = SpecManagerInstaller()
 
 
 __all__ = [
+    "AcceptanceEvidence",
     "SpecManager",
     "SpecManagerInstaller",
+    "TestRunSummary",
+    "VerificationEvidence",
     "WorkerVerifierPair",
     "install_spec_manager",
 ]

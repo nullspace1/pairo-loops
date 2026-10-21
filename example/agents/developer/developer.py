@@ -15,7 +15,7 @@ from pairo.ui.permissions import TextualPermissionRequester
 
 
 def get_developer(name, pipeline, repository):
-    temp = Path("./tmp/developer")
+    temp = Path("./tmp/agents/developer")
     agent_directory = Path(__file__).resolve().parent
     workspace_factory = WorkspaceFactory(temp, SandboxPermission.WORKSPACE_WRITE)
     workspace_factory.add_workspace(

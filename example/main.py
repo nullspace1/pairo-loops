@@ -12,6 +12,7 @@ if str(SOURCE_ROOT) not in sys.path:
 
 from agents.developer.developer import get_developer
 from agents.planner.planner import get_planner
+from agents.verifier.verifier import get_verifier
 from pairo import (
     WorkerVerifierPair,
     install_spec_manager,
@@ -25,11 +26,11 @@ from pairo.ui import SqliteSessionRepository
 async def run_async() -> None:
     pipeline = EventPipeline()
     repository = SqliteSessionRepository()
-    event_log = ConversationEventLog(pipeline, Path("./tmp/events.jsonl"))
+    event_log = ConversationEventLog(pipeline, Path("./log/events.jsonl"))
     configured_agents = [
         get_planner(pipeline, repository),
         get_developer("developer", pipeline, repository),
-        get_developer("verifier", pipeline, repository),
+        get_verifier(pipeline, repository),
     ]
     add_github_mcp_server(
         [agent.configuration() for agent in configured_agents]
