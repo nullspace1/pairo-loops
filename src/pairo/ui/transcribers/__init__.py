@@ -6,6 +6,10 @@ from .default_transcribers import default_transcribers
 from .message_sent_transcriber import MessageSentTranscriber
 from .network_message_sent_transcriber import NetworkMessageSentTranscriber
 from .permission_request_transcriber import (
+    AdditionalPermissionsPermissionDetails,
+    CommandExecutionPermissionDetails,
+    FileChangePermissionDetails,
+    PermissionDetailWidget,
     PermissionRequestCard,
     PermissionRequestTranscriber,
 )
@@ -27,6 +31,10 @@ __all__ = [
     "EventTranscriber",
     "MessageSentTranscriber",
     "NetworkMessageSentTranscriber",
+    "AdditionalPermissionsPermissionDetails",
+    "CommandExecutionPermissionDetails",
+    "FileChangePermissionDetails",
+    "PermissionDetailWidget",
     "PermissionRequestCard",
     "PermissionRequestTranscriber",
     "RoutedTranscriptEntry",

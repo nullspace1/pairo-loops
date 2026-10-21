@@ -3,8 +3,7 @@
 from pydantic import BaseModel, ConfigDict
 from uuid import UUID
 
-from ..agent.json_object import JsonObject
-from ..permissions import PermissionRequestType
+from ..permissions import ApprovalRequest
 
 
 class PermissionRequest(BaseModel):
@@ -13,6 +12,5 @@ class PermissionRequest(BaseModel):
     request_id: str
     agent_id: UUID
     session_name: str
-    request_type: PermissionRequestType
-    request: JsonObject
+    request: ApprovalRequest
 

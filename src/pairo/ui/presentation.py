@@ -255,72 +255,8 @@ class CompletedActivityPresenter:
 class PermissionRequestPresenter:
     """Explain approval requests in the terms a person needs to decide."""
 
-    _TITLES = {
-        "command execution": "Command execution approval",
-        "file change": "File change approval",
-        "additional permissions": "Additional permissions approval",
-    }
-    _PREFERRED_FIELDS = {
-        "command execution": ("command", "cwd", "reason"),
-        "file change": ("path", "paths", "changes", "reason"),
-        "additional permissions": ("permissions", "reason"),
-    }
-
-    def __init__(self, formatter: PresentationFormatter | None = None) -> None:
-        self._formatter = formatter or PresentationFormatter()
-
     def present(self, request: PermissionRequest) -> str:
-        if request.request_type == "command execution":
-            return self._present_command(request)
-        if request.request_type == "file change":
-            return self._present_file_change(request)
-        title = self._TITLES.get(request.request_type, f"{self._formatter.field_names.present(request.request_type)} approval")
-        lines = self._formatter.describe_fields(request.request, preferred_fields=self._PREFERRED_FIELDS.get(request.request_type, ()))
-        if not lines:
-            lines = ("The agent did not provide additional details.",)
-        return "\n".join((title, *lines))
-
-    def _present_command(self, request: PermissionRequest) -> str:
-        details = request.request
-        lines = ["Allow this command to run?"]
-        command = details.get("command")
-        if command not in (None, ""):
-            lines.extend(("Command:", str(command)))
-        else:
-            lines.append("The agent did not provide a command.")
-        for key, label in (("cwd", "Working directory"), ("reason", "Why this is needed"), ("justification", "Why this is needed"), ("sandboxPermissions", "Sandbox permissions")):
-            value = details.get(key)
-            if value not in (None, "", [], {}):
-                lines.append(f"{label}: {self._formatter.scalar.present(value, self._formatter).lines[0]}")
-        displayed = {"command", "cwd", "reason", "justification", "sandboxPermissions"}
-        remaining = {key: value for key, value in details.items() if key not in displayed}
-        lines.extend(self._formatter.describe_fields(remaining))
-        return "\n".join(lines)
-
-    def _present_file_change(self, request: PermissionRequest) -> str:
-        details = request.request
-        lines = ["Allow these file changes?"]
-        path = details.get("path")
-        paths = details.get("paths")
-        if path not in (None, ""):
-            lines.append(f"Affected file: {self._formatter.scalar.present(path, self._formatter).lines[0]}")
-        if paths not in (None, "", [], {}):
-            lines.append("Affected files:")
-            presented = self._formatter.present_value(paths)
-            lines.extend(presented.lines if presented.kind == "sequence" else (f"- {presented.lines[0]}",))
-        changes = details.get("changes")
-        if changes not in (None, "", [], {}):
-            lines.extend(self._formatter.describe_fields({"changes": changes}))
-        for key in ("reason", "justification", "rationale"):
-            value = details.get(key)
-            if value not in (None, "", [], {}):
-                lines.append(f"Why this is needed: {self._formatter.scalar.present(value, self._formatter).lines[0]}")
-        displayed = {"path", "paths", "changes", "reason", "justification", "rationale"}
-        remaining = {key: value for key, value in details.items() if key not in displayed}
-        lines.extend(self._formatter.describe_fields(remaining))
-        if len(lines) == 1:
-            lines.append("The agent did not provide file-change details.")
-        return "\n".join(lines)
+        return "\n".join(request.request.history_lines())
 
 
 class PermissionHistoryPresenter:

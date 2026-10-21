@@ -80,6 +80,34 @@ event or cancellation. `push()` only buffers the event and returns immediately.
 The pipeline has no history, replay, central worker, delivery receipt, or
 lifecycle methods.
 
+## Approval requests
+
+`ApprovalRequest` is a frozen Pydantic discriminated union. A
+`PermissionRequester` receives exactly one of these provider-neutral variants:
+
+| Variant | Decision-essential fields |
+| --- | --- |
+| `CommandExecutionApprovalRequest` | Command, optional working directory, and optional rationale |
+| `FileChangeApprovalRequest` | Affected paths, change summary, and optional rationale |
+| `AdditionalPermissionsApprovalRequest` | Requested permissions and optional rationale |
+
+The `request_type` discriminator is serialized with transcript metadata so a
+pending live card can reconstruct the concrete request. Missing or malformed
+optional provider fields are normalized to safe empty values. Unsupported
+provider methods do not produce an approval request.
+
+Textual permission cards select a detail widget for the concrete variant and
+show only its decision-essential fields. Provider thread, turn, item, and
+environment identifiers, timestamps, available decisions, command actions,
+execution-policy amendments, and unknown payload fields are not displayed.
+Historical or invalid requests remain readable but are expired and cannot be
+answered.
+
+Command-execution and file-change decisions use the ordinary accept,
+accept-for-session, or decline response. Additional-permissions decisions
+instead return the normalized requested permission set, an empty set on
+decline, and session scope when accepted for the session.
+
 ## Shared conversation event log
 
 `ConversationEventLog(pipeline, output_path)` creates the output path's parent

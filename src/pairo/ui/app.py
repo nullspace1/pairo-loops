@@ -93,6 +93,11 @@ class AgentChatApp(App[None]):
         height: auto; margin: 1 0; border: heavy $error; padding: 0 1;
     }
     .permission-details { height: auto; }
+    .permission-heading { height: auto; text-style: bold; }
+    .permission-field { height: auto; margin: 1 0 0 0; }
+    .permission-field-label { height: auto; text-style: bold; }
+    .permission-field-value { height: auto; width: 1fr; }
+    .permission-row { height: auto; padding-left: 2; }
     .permission-actions { height: 3; }
     .permission-actions Button { width: 1fr; min-width: 16; }
     .permission-decision { height: auto; color: $text-muted; text-style: bold; }

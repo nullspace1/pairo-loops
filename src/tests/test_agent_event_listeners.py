@@ -15,7 +15,7 @@ from pairo.core.events import (
     PermissionRequest, PermissionResponse, SessionCompacted, SessionCreated,
     SessionDeleted, SessionUpdated, TokenUsage, UserInput,
 )
-from pairo.core.permissions import PermissionDecision, PermissionRequestType
+from pairo.core.permissions import FileChangeApprovalRequest, PermissionDecision
 
 
 class ObservedAgent:
@@ -70,7 +70,7 @@ def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_
             SessionUpdated(agent_id=agent.id, session_name="s", identifier={}),
             SessionCompacted(agent_id=agent.id, session_name="s"),
             SessionDeleted(agent_id=agent.id, session_name="s", selected_session_name="next"),
-            PermissionRequest(request_id="r", agent_id=agent.id, session_name="s", request_type=PermissionRequestType.FILE_CHANGE, request={}),
+            PermissionRequest(request_id="r", agent_id=agent.id, session_name="s", request=FileChangeApprovalRequest(session_identifier={})),
             PermissionResponse(request_id="r", agent_id=agent.id, session_name="s", decision=PermissionDecision.ACCEPT),
             NetworkMessageSent(channel_name="team", sender_id=agent.id, sender_name=agent.name, recipient_id=agent.id, session_name="s", message="network"),
         )

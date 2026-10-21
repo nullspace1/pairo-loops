@@ -21,7 +21,7 @@ from pairo.core.events import (
     SessionUpdated,
     UserInput,
 )
-from pairo.core.permissions import PermissionDecision, PermissionRequestType
+from pairo.core.permissions import CommandExecutionApprovalRequest, PermissionDecision
 
 
 AGENT_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -100,8 +100,9 @@ def test_log_records_all_event_families_with_json_payloads(tmp_path: Path) -> No
                 request_id="request-1",
                 agent_id=AGENT_ID,
                 session_name="main",
-                request_type=PermissionRequestType.COMMAND_EXECUTION,
-                request={"command": "git status"},
+                request=CommandExecutionApprovalRequest(
+                    session_identifier={}, command="git status"
+                ),
             ),
             PermissionResponse(
                 request_id="request-1",

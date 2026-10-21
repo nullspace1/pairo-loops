@@ -1,14 +1,19 @@
 """Permission-request boundaries."""
 
 from .permission_requester import (
+    AdditionalPermissionsApprovalRequest,
     ApprovalRequest,
+    CommandExecutionApprovalRequest,
+    FileChangeApprovalRequest,
     PermissionDecision,
     PermissionRequester,
     PermissionRequestType,
 )
 
 __all__ = [
-    "ApprovalRequest", "PermissionDecision", "PermissionRequester",
+    "AdditionalPermissionsApprovalRequest", "ApprovalRequest",
+    "CommandExecutionApprovalRequest", "FileChangeApprovalRequest",
+    "PermissionDecision", "PermissionRequester",
     "PermissionRequestType",
 ]
 

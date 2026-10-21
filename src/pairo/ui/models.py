@@ -46,7 +46,6 @@ class PermissionRequestTranscriptMetadata(TypedDict, total=False):
 
     type: Literal["permission_request"]
     request_id: str
-    request_type: str
     request: JsonObject
     status: Literal["pending", "resolved"]
     decision: str

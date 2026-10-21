@@ -64,8 +64,7 @@ class TextualPermissionRequester(PermissionRequester):
                     request_id=request_id,
                     agent_id=session.agent_id,
                     session_name=session.session_name,
-                    request_type=request.request_type,
-                    request=request.details,
+                    request=request,
                 )
             )
             await subscription.wait_until_cancelled()

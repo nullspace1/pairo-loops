@@ -99,8 +99,11 @@ schedules publication with `call_soon_threadsafe()`, while `run()` submits a
 coroutine to the principal loop and blocks only the external calling thread.
 
 The Codex SDK invokes approval callbacks synchronously on its own callback
-thread. `CodexAgent` translates the provider request, runs the configured
-asynchronous `PermissionRequester`, and translates its decision back to Codex.
+thread. `CodexAgent` translates the provider request into a typed command,
+file-change, or additional-permissions request, runs the configured asynchronous
+`PermissionRequester`, and translates its decision back to Codex. Permission
+cards show only the fields needed to decide; provider bookkeeping and unknown
+payload fields are not displayed.
 `CodexAgent` owns the `SynchronousEventPipeline` used for the UI-specific
 handoff while the SDK callback thread waits for the asynchronous requester's
 decision.

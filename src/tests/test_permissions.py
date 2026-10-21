@@ -18,6 +18,7 @@ from pairo.core.events import (
     PermissionRequest,
 )
 from pairo.core.permissions import (
+    CommandExecutionApprovalRequest,
     PermissionDecision,
     PermissionRequester,
     PermissionRequestType,
@@ -114,7 +115,7 @@ def test_all_known_permission_methods_translate(method, request_type) -> None:
     request = translate_permission_request(method, None, {"id": "session"})
     assert request is not None
     assert request.request_type is request_type
-    assert request.details == {}
+    assert request.model_dump(exclude={"session_identifier", "request_type"}) in ({"command": "", "working_directory": None, "rationale": None}, {"affected_paths": (), "change_summary": "", "rationale": None}, {"requested_permissions": {}, "rationale": None})
     assert translate_permission_request("unknown/method", {}, {"id": "session"}) is None
 
 
@@ -145,8 +146,7 @@ def test_build_permission_response_validates_decisions() -> None:
         request_id="request-1",
         agent_id=uuid4(),
         session_name="s",
-        request_type=PermissionRequestType.COMMAND_EXECUTION,
-        request={},
+        request=CommandExecutionApprovalRequest(session_identifier={}),
     )
     response = build_permission_response(request, "acceptForSession")
     assert response.decision is PermissionDecision.ACCEPT_FOR_SESSION
@@ -273,10 +273,7 @@ def test_codex_agent_calls_the_permission_requester_directly() -> None:
 
         assert responses == [{"decision": "accept"}]
         assert len(requester.requests) == 1
-        assert requester.requests[0].details == {
-            "threadId": "thread-1",
-            "command": "pytest",
-        }
+        assert requester.requests[0].command == "pytest"
         await adapter.close()
 
     asyncio.run(scenario())

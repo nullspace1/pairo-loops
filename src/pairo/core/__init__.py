@@ -33,7 +33,10 @@ from .events import (
     SynchronousEventPipeline,
 )
 from .permissions import (
+    AdditionalPermissionsApprovalRequest,
     ApprovalRequest,
+    CommandExecutionApprovalRequest,
+    FileChangeApprovalRequest,
     PermissionDecision,
     PermissionRequester,
     PermissionRequestType,
@@ -41,17 +44,20 @@ from .permissions import (
 
 __all__ = [
     "ActiveSession",
+    "AdditionalPermissionsApprovalRequest",
     "AgentConfiguration",
     "Agent",
     "AgentStatus",
     "AgentEventListeners",
     "ApprovalMode",
     "ApprovalRequest",
+    "CommandExecutionApprovalRequest",
     "CodexAgent",
     "CodexSessionIdentifier",
     "ConversationEventLog",
     "FakeAgent",
     "FakeSessionIdentifier",
+    "FileChangeApprovalRequest",
     "EventCallback",
     "EventPipeline",
     "Hook",

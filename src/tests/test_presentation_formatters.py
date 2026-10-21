@@ -3,7 +3,7 @@
 from uuid import uuid4
 
 from pairo.core.events import PermissionRequest
-from pairo.core.permissions import PermissionRequestType
+from pairo.core.permissions import CommandExecutionApprovalRequest
 from pairo.ui.presentation import (
     PermissionHistoryPresenter,
     PresentationFormatter,
@@ -60,8 +60,9 @@ def test_permission_history_presenter_wraps_the_human_approval_request() -> None
         request_id="approval-1",
         agent_id=uuid4(),
         session_name="Session 1",
-        request_type=PermissionRequestType.COMMAND_EXECUTION,
-        request={"command": "pytest"},
+        request=CommandExecutionApprovalRequest(
+            session_identifier={}, command="pytest"
+        ),
     )
 
     assert PermissionHistoryPresenter().present(request) == "\n".join(
