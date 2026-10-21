@@ -9,7 +9,7 @@ from .reasoning_effort import ReasoningEffort
 from .sandbox_permission import SandboxPermission
 from .session_identifier import SessionIdentifier
 from .web_search_mode import WebSearchMode
-from ..tools.workspace_factory import WorkspaceFactory
+from ...tools.workspace_factory import WorkspaceFactory
 
 __all__ = [
     "AgentConfiguration",

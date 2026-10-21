@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 import sys
 
-from pairo.core.tools.conversation_event_log import ConversationEventLog
+from pairo.tools.conversation_event_log import ConversationEventLog
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_ROOT) not in sys.path:

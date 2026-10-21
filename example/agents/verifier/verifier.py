@@ -10,7 +10,7 @@ from pairo import (
     SandboxPermission,
     WebSearchMode,
 )
-from pairo.core.tools.workspace_factory import WorkspaceFactory
+from pairo.tools.workspace_factory import WorkspaceFactory
 from pairo.ui.permissions import TextualPermissionRequester
 
 

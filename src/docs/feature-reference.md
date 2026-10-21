@@ -1,6 +1,6 @@
 # Pairo feature reference
 
-## Components
+## Core components
 
 | Component | Responsibility |
 | --- | --- |
@@ -14,6 +14,19 @@
 | `SessionRepository` | Authoritative durable session catalog and transcripts |
 | `TranscriptService` | Explicit transcript persistence followed by transient mutation notifications |
 | `run_agents` | Startup, UI launch, and failure-safe resource cleanup |
+
+## Optional tools and integrations
+
+These utilities extend the core runtime without changing its ownership model.
+
+| Tool | Purpose |
+| --- | --- |
+| `ConversationEventLog` | JSON Lines record of future pipeline events with explicit flush and close |
+| `WorkspaceFactory` | Linked multi-directory workspace construction and per-folder sandbox configuration |
+| `Chatroom` | Direct message and session routing among registered runtime agents |
+| `context7` | Adds the Context7 MCP server to agent configurations |
+| `add_github_mcp_server` | Adds a GitHub MCP server to agent configurations |
+| `SpecManager` | Director/worker/verifier task coordination, accepted-evidence history, and optional documenter notification |
 
 ## Agent contract
 
@@ -113,13 +126,20 @@ transient notifications. Widgets read configuration, status, and active
 session directly from each runtime agent.
 
 Chatrooms retain a mapping of registered runtime agents and directly await the
-destination's message or session operation. The spec manager similarly retains
-director and worker/verifier agent references. Its installer updates their
-configurations with the MCP server, skills, and role instructions.
+destination's message or session operation.
 
-When a spec manager closes, it first cancels assignment completion and review
-waiters, then stops its HTTP transport. This ordering lets active tool requests
-finish before graceful transport shutdown and does not alter task-file status.
+`WorkspaceFactory` creates a managed root and links existing source
+directories into it by directory name. `configure(agent)` applies the root,
+the root sandbox permission, and each source directory's permission to the
+configuration. Individual linked directories cannot use
+`DANGER_FULL_ACCESS`; on Windows, link creation falls back to a directory
+junction when symbolic-link privilege is unavailable.
+
+`SpecManager` configures its director and worker/verifier participants with an
+MCP server and role guidance. Accepted evidence is retained in
+`output/FEATURE_HISTORY.md`; an optional documenter receives that file's path
+without receiving a spec-manager role. Closing the manager cancels its waiters
+before stopping the HTTP transport and does not alter task-file status.
 
 `run_agents(agents, pipeline, repository)` validates the UUID mapping, creates
 and persists initial sessions concurrently, launches the UI, and closes agents

@@ -11,7 +11,7 @@ from typing import TextIO
 
 from pydantic import BaseModel
 
-from ..events.event_pipeline import EventPipeline, Subscription
+from ..core.events.event_pipeline import EventPipeline, Subscription
 
 
 class ConversationEventLog:

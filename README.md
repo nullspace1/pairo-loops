@@ -5,20 +5,26 @@ provider-neutral development agents. An `AgentConfiguration` describes a
 provider persona; an `Agent` owns one active provider session and turn; the
 session repository remains the authoritative catalog of durable sessions.
 
-See the [feature reference](src/docs/feature-reference.md) for the complete
-component and lifecycle contracts.
+Use the [documentation map](src/docs/README.md) to choose an overview,
+provider-specific architecture, feature reference, or contributor guide.
 
 ## Setup
 
-Python 3.10 or later is required.
+Python 3.10 or later and the local Codex CLI are required. From the repository
+root, create the project environment under `src` and install the package:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e .
+cd src
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .
 ```
 
 Authenticate the local Codex CLI before starting Codex-backed agents.
+
+> **Packaging status:** `src/pyproject.toml` currently declares a colocated
+> `README.md`, but `src/README.md` is absent. The editable-install command above
+> is the intended workflow, not yet a verified clean installation, until that
+> packaging metadata is corrected.
 
 ## Example
 
@@ -101,10 +107,10 @@ decision.
 
 ## Tests
 
-From `src`:
+From `src`, always run checks with the project interpreter:
 
 ```powershell
-python -m pytest -q --basetemp .verify-tmp\pytest
-mypy --strict pairo
-python scripts\quality_gate.py
+.\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider --basetemp=.verify-tmp\pytest
+.\.venv\Scripts\python.exe -m mypy
+.\.venv\Scripts\python.exe scripts\quality_gate.py
 ```

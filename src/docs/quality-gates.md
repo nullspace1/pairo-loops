@@ -1,9 +1,9 @@
 # Quality gate
 
-Run the complete project gate from the repository root:
+Run the complete project gate from `src` with the project interpreter:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/quality_gate.py
+.\.venv\Scripts\python.exe scripts\quality_gate.py
 ```
 
 The command runs, in order, the complete pytest suite, `mypy --strict pairo`, and the invariant architecture check.

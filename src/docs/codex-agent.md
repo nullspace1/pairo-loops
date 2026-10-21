@@ -19,7 +19,7 @@ callbacks.
 The SDK's synchronous approval callback snapshots the active requester,
 translates the request, invokes `PermissionRequester.request()` directly, and
 translates its result back to the SDK wire format. The provider adapter does
-does not publish the provider request itself. `CodexAgent` owns a
+not publish the provider request itself. `CodexAgent` owns a
 `SynchronousEventPipeline` and uses it to execute the requester's asynchronous
 decision flow on the principal loop while the SDK-owned callback thread waits.
 The Textual requester publishes the UI request, and concurrent responses are
