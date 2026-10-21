@@ -10,6 +10,7 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
+from agents.agent_documenter.agent_documenter import get_agent_documenter
 from agents.developer.developer import get_developer
 from agents.planner.planner import get_planner
 from agents.verifier.verifier import get_verifier
@@ -31,19 +32,24 @@ async def run_async() -> None:
         get_planner(pipeline, repository),
         get_developer("developer", pipeline, repository),
         get_verifier(pipeline, repository),
+        get_agent_documenter(pipeline, repository),
     ]
+    planner, developer, verifier, _agent_documenter = configured_agents
     add_github_mcp_server(
-        [agent.configuration() for agent in configured_agents]
+        [
+            agent.configuration()
+            for agent in (planner, developer, verifier)
+        ]
     )
     agents = {
         agent.configuration().id: agent for agent in configured_agents
     }
-    planner, developer, verifier = configured_agents
     spec_manager = install_spec_manager(
         folder=Path("./tmp"),
         agents=agents,
         director=planner,
         pairs=[WorkerVerifierPair("pair-1", developer, verifier)],
+        documenter=_agent_documenter,
     )
     try:
         await spec_manager.boot_up()

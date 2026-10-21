@@ -161,6 +161,62 @@ def test_assignment_creates_and_reuses_the_verifier_session(tmp_path: Path) -> N
     asyncio.run(scenario())
 
 
+def test_accepted_feature_history_is_referenced_only_to_documenter(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        director = AgentStub(tmp_path, "director")
+        worker = AgentStub(tmp_path, "worker")
+        verifier = AgentStub(tmp_path, "verifier")
+        documenter = AgentStub(tmp_path, "documenter")
+        agents = {
+            agent.configuration().id: agent
+            for agent in (director, worker, verifier, documenter)
+        }
+        manager = install_spec_manager(
+            tmp_path,
+            agents,
+            director,
+            [WorkerVerifierPair("pair-1", worker, verifier)],
+            documenter=documenter,
+        )
+
+        history = tmp_path / "output" / "FEATURE_HISTORY.md"
+        assert history.read_text(encoding="utf-8") == "# Feature history\n\n"
+        assert documenter.configuration().mcp_servers == ()
+        assert documenter.configuration().skill_folders == ()
+
+        await tool(manager, "create_task")(
+            "History", "Record accepted work", "Evidence is retained", context(director)
+        )
+        await tool(manager, "assign_task")(
+            "pair-1", "History", context(director)
+        )
+        verification = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
+        await asyncio.sleep(0)
+        assert "Accepted" in await tool(manager, "accept_task")(context(verifier))
+        assert await verification == "Task accepted."
+
+        content = history.read_text(encoding="utf-8")
+        assert "## History" in content
+        assert "Record accepted work" in content
+        assert "### Implementation" in content
+        assert "### Acceptance evidence" in content
+        assert "### Verification" in content
+        assert "No live network transport was used." in content
+
+        assert len(documenter.messages) == 1
+        reference, source = documenter.messages[0]
+        assert source == "spec_manager"
+        assert reference == f"Feature history updated: {history.resolve()}"
+        assert "Moved assignment waiter cancellation" not in reference
+        assert director.messages == []
+
+    asyncio.run(scenario())
+
+
 def test_director_can_sleep_until_an_assigned_task_is_accepted(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, worker, verifier = setup_manager(tmp_path)

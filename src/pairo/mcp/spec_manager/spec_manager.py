@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import os
 import re
@@ -224,6 +225,70 @@ class _FeatureStore:
                 temporary.unlink()
 
 
+class _FeatureHistoryStore:
+    """Persist accepted feature evidence for downstream documentation work."""
+
+    _HEADER = "# Feature history\n\n"
+
+    def __init__(self, folder: Path) -> None:
+        output_folder = folder / "output"
+        output_folder.mkdir(parents=False, exist_ok=True)
+        self.path = output_folder / "FEATURE_HISTORY.md"
+        if not self.path.exists():
+            self._write(self._HEADER)
+
+    def append(self, task: _Task, evidence: VerificationEvidence) -> None:
+        existing = self.path.read_text(encoding="utf-8")
+        timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        entry = self._entry(task, evidence, timestamp)
+        separator = "" if existing.endswith("\n") else "\n"
+        self._write(f"{existing}{separator}{entry}")
+
+    def _entry(
+        self,
+        task: _Task,
+        evidence: VerificationEvidence,
+        timestamp: str,
+    ) -> str:
+        changed_files = "\n".join(f"- `{path}`" for path in evidence.changed_files)
+        acceptance_evidence = "\n".join(
+            f"- **{item.criterion}** {item.evidence}"
+            for item in evidence.acceptance_evidence
+        )
+        test_runs = "\n".join(self._test_run_line(run) for run in evidence.test_runs)
+        risks = (
+            "\n".join(f"- {risk}" for risk in evidence.remaining_risks)
+            or "- None reported."
+        )
+        return (
+            f"## {task.name}\n\n"
+            f"Accepted: {timestamp}\n\n"
+            f"{task.description}\n\n"
+            f"**Acceptance criteria:** {task.acceptance_criteria}\n\n"
+            f"### Implementation\n\n{evidence.implementation_summary}\n\n"
+            f"### Changed files\n\n{changed_files}\n\n"
+            f"### Acceptance evidence\n\n{acceptance_evidence}\n\n"
+            f"### Verification\n\n{test_runs}\n\n"
+            f"### Remaining risks\n\n{risks}\n\n"
+        )
+
+    def _test_run_line(self, run: TestRunSummary) -> str:
+        counts = f"{run.passed} passed, {run.failed} failed, {run.skipped} skipped"
+        return (
+            f"- `{run.command}` — {run.outcome}; {counts}; "
+            f"{run.duration_seconds:g}s. {run.summary}"
+        )
+
+    def _write(self, content: str) -> None:
+        temporary = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
+        try:
+            temporary.write_text(content, encoding="utf-8")
+            os.replace(temporary, self.path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+
 class SpecManager(MCPHttpWrapper):
     """Coordinate task assignments and reviews for registered agents."""
 
@@ -235,6 +300,7 @@ class SpecManager(MCPHttpWrapper):
         pairs: Sequence[WorkerVerifierPair],
         port: int = 8082,
         verification_timeout: float = 300,
+        documenter: Agent[SessionIdentifier] | None = None,
     ) -> None:
         root = Path(folder).resolve()
         if not root.is_dir():
@@ -242,15 +308,37 @@ class SpecManager(MCPHttpWrapper):
         if verification_timeout <= 0:
             raise ValueError("Verification timeout must be greater than zero.")
         self._validate_registration(agents, director, pairs)
+        self._validate_documenter_registration(agents, documenter, director, pairs)
         self._director = director
+        self._documenter = documenter
         self._pairs = {pair.pair_id: pair for pair in pairs}
         self._worker_pairs = {pair.worker.configuration().id: pair for pair in pairs}
         self._verifier_pairs = {pair.verifier.configuration().id: pair for pair in pairs}
         self._assignments: dict[str, _Assignment] = {}
         self._store = _FeatureStore(root)
+        self._history = _FeatureHistoryStore(root)
         self._verification_timeout = verification_timeout
         self._lock = asyncio.Lock()
         super().__init__(port=port)
+
+    @classmethod
+    def _validate_documenter_registration(
+        cls,
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        documenter: Agent[SessionIdentifier] | None,
+        director: Agent[SessionIdentifier],
+        pairs: Sequence[WorkerVerifierPair],
+    ) -> None:
+        if documenter is None:
+            return
+        configuration = documenter.configuration()
+        if agents.get(configuration.id) is not documenter:
+            raise ValueError("Documenter is not registered with the agent mapping.")
+        role_agents = {director.configuration().id}
+        role_agents.update(pair.worker.configuration().id for pair in pairs)
+        role_agents.update(pair.verifier.configuration().id for pair in pairs)
+        if configuration.id in role_agents:
+            raise ValueError("Documenter must not have another spec-manager role.")
 
     @classmethod
     def _validate_registration(
@@ -496,8 +584,15 @@ class SpecManager(MCPHttpWrapper):
                 return f"Pair '{pair.pair_id}' has no active verification."
             future = assignment.review_result
             task_name = assignment.task_name
+            if accepted and assignment.evidence is None:
+                return "Could not record verification decision: evidence is missing."
             try:
-                self._store.set_status(task_name, "accepted" if accepted else "working")
+                task = self._store.set_status(
+                    task_name, "accepted" if accepted else "working"
+                )
+                if accepted:
+                    assert assignment.evidence is not None
+                    self._history.append(task, assignment.evidence)
                 if not accepted:
                     await pair.worker.send_message(
                         f"Task '{task_name}' was rejected by "
@@ -518,6 +613,14 @@ class SpecManager(MCPHttpWrapper):
                 future.set_result(None if accepted else feedback)
 
         outcome = f"Accepted task '{task_name}'." if accepted else f"Rejected task '{task_name}'."
+        if accepted and self._documenter is not None:
+            try:
+                await self._documenter.send_message(
+                    f"Feature history updated: {self._history.path}",
+                    source="spec_manager",
+                )
+            except Exception as error:
+                outcome += f" Documenter notification failed: {error}"
         return outcome
 
     async def close(self) -> None:
@@ -624,6 +727,7 @@ class SpecManagerInstaller:
         pairs: Sequence[WorkerVerifierPair],
         port: int = 8082,
         verification_timeout: float = 300,
+        documenter: Agent[SessionIdentifier] | None = None,
     ) -> SpecManager:
         manager = SpecManager(
             folder,
@@ -632,6 +736,7 @@ class SpecManagerInstaller:
             pairs,
             port,
             verification_timeout,
+            documenter,
         )
         participants = [(director, "director")]
         participants.extend((pair.worker, "worker") for pair in pairs)
