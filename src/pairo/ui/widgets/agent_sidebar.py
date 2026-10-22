@@ -1,16 +1,14 @@
-"""Agent information and session-selection sidebar."""
+"""Agent and current-session information sidebar."""
 from collections.abc import Mapping
 from uuid import UUID
 
 from textual import on
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.message import Message
-from textual.widget import Widget
-from textual.widgets import Button, Select, Static
+from textual.containers import Vertical, VerticalScroll
+from textual.widgets import Select, Static
 
 from pairo.core.agent import SessionIdentifier
-from pairo.core.clients import Agent, AgentStatus
+from pairo.core.clients import Agent
 from pairo.core.events import EventPipeline
 
 from ..models import EventDetailLevel
@@ -26,18 +24,6 @@ from .sidebar_statistics import (
 class AgentSidebar(Vertical):
     _AGENT_INFORMATION = "agent"
     _SESSION_INFORMATION = "session"
-
-    class SessionSelected(Message):
-        def __init__(self, agent_id: UUID, session_name: str) -> None:
-            super().__init__()
-            self.agent_id = agent_id
-            self.session_name = session_name
-
-    class SessionDeletionRequested(Message):
-        def __init__(self, agent_id: UUID, session_name: str) -> None:
-            super().__init__()
-            self.agent_id = agent_id
-            self.session_name = session_name
 
     def __init__(
         self,
@@ -68,7 +54,6 @@ class AgentSidebar(Vertical):
         self._event_pipeline = event_pipeline
         self._statistics = statistics or default_sidebar_statistics(agent)
         self._statistics.setup(event_pipeline, agents)
-        self._session_snapshot: object | None = None
         self._information_mode = self._AGENT_INFORMATION
 
     def compose(self) -> ComposeResult:
@@ -84,10 +69,6 @@ class AgentSidebar(Vertical):
         )
         with VerticalScroll(classes="sidebar-information-scroll"):
             yield SidebarFieldGroup(classes="sidebar-information")
-        yield Static("Sessions", classes="sidebar-heading")
-        yield Static("", classes="session-switch-note")
-        with VerticalScroll(classes="session-list-scroll"):
-            yield Vertical(classes="session-list")
 
     async def on_mount(self) -> None:
         await self.refresh_data()
@@ -101,80 +82,8 @@ class AgentSidebar(Vertical):
             self._information_mode = str(event.value)
             await self._refresh_information_fields()
 
-    @on(Button.Pressed, ".session-button")
-    def select_session(self, event: Button.Pressed) -> None:
-        if event.button.name is not None:
-            event.stop()
-            self.post_message(
-                self.SessionSelected(self.agent.configuration().id, event.button.name)
-            )
-
-    @on(Button.Pressed, ".session-delete-button")
-    def delete_session(self, event: Button.Pressed) -> None:
-        if event.button.name is not None:
-            event.stop()
-            self.post_message(
-                self.SessionDeletionRequested(
-                    self.agent.configuration().id,
-                    event.button.name,
-                )
-            )
-
     async def refresh_data(self) -> None:
         await self._refresh_information_fields()
-        generating = self.agent.status() is AgentStatus.GENERATING
-        configuration = self.agent.configuration()
-        active = self.agent.current_session()
-        current_name = active.name if active is not None else None
-        self.query_one(".session-switch-note", Static).update(
-            "Finish or interrupt the current response to switch sessions."
-            if generating
-            else "Select a session to resume it."
-        )
-        sessions = sorted(
-            await self._repository.sessions_for(configuration.id),
-            key=lambda session: session.last_updated_at,
-            reverse=True,
-        )
-        snapshot = (
-            generating,
-            current_name,
-            tuple((session.session_name, session.last_updated_at) for session in sessions),
-        )
-        if snapshot == self._session_snapshot:
-            return
-        self._session_snapshot = snapshot
-        container = self.query_one(".session-list", Vertical)
-        await container.remove_children()
-        rows: list[Widget] = [
-            Horizontal(
-                Button(
-                    session.session_name,
-                    name=session.session_name,
-                    disabled=(
-                        generating
-                        or session.session_name == current_name
-                    ),
-                    classes=(
-                        "session-button current-session"
-                        if session.session_name == current_name
-                        else "session-button"
-                    ),
-                ),
-                Button(
-                    "X",
-                    name=session.session_name,
-                    disabled=generating,
-                    classes="session-delete-button",
-                    variant="error",
-                ),
-                classes="session-row",
-            )
-            for session in sessions
-        ]
-        await container.mount(
-            *(rows or [Static("No sessions yet.", classes="empty-session-list")])
-        )
 
     async def _refresh_information_fields(self) -> None:
         statistics = (

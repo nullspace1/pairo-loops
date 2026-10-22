@@ -14,6 +14,7 @@ from .permission_request_transcriber import (
     PermissionRequestTranscriber,
 )
 from .routed_transcript_entry import RoutedTranscriptEntry
+from .session_table_transcriber import SessionTableTranscriber, SessionTableWidget
 from .text_transcript import TranscriptMessage, render_text_transcript
 from .token_usage_updated_transcriber import TokenUsageUpdatedTranscriber
 from .transcriber import (
@@ -38,6 +39,8 @@ __all__ = [
     "PermissionRequestCard",
     "PermissionRequestTranscriber",
     "RoutedTranscriptEntry",
+    "SessionTableTranscriber",
+    "SessionTableWidget",
     "TokenUsageUpdatedTranscriber",
     "TranscriptMetadata",
     "TranscriptRenderContext",

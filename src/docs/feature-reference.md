@@ -47,7 +47,9 @@ Provider operations are asynchronous:
 
 `send_message` returns once a start or steer request is accepted. Completion,
 deltas, usage, activities, interruption, and errors are delivered as events.
-`AgentStatus` is `inactive`, `idle`, or `generating`.
+`AgentStatus` is `inactive`, `idle`, `generating`, or `compacting`. Compaction
+remains active until the provider confirms `thread/compacted`; messages are
+rejected before publication while that state is active.
 
 Session identifiers contain durable provider identity only. A Codex turn ID is
 kept internally and may change after steering without changing the persisted
@@ -110,14 +112,18 @@ decline, and session scope when accepted for the session.
 
 ## Shared conversation event log
 
-`ConversationEventLog(pipeline, output_path)` creates the output path's parent
-directories and appends every **future** Pydantic event delivered by `pipeline`
+`ConversationEventLog(pipeline, output_path, policy=None)` creates the output
+path's parent directories and appends selected **future** Pydantic events
+delivered by `pipeline`
 to the UTF-8 JSON Lines file. It subscribes to `BaseModel`, so it captures all
 agents, sessions, and future event types without replaying pipeline history or
 enumerating event classes. Each line has `timestamp` (ISO-8601 UTC),
 `event_type` (the concrete class name), and `payload`
 (`event.model_dump(mode="json")`). The logger is independent of transcript
-persistence and never publishes logging events.
+persistence and never publishes logging events. The default
+`FullFidelityEventLogPolicy` writes every event. `CoalescingEventLogPolicy`
+keeps only the latest activity-progress snapshot and flushes it before activity
+completion or log flush/close; the example harness uses this lower-noise mode.
 
 Await `flush()` when readers need all already queued records visible and
 durably flushed. Await `close()` during shutdown: it drains already queued
@@ -153,6 +159,14 @@ persist successful session creation and activation; pipeline events are
 transient notifications. Widgets read configuration, status, and active
 session directly from each runtime agent.
 
+The chat editor is multiline: **Enter** inserts a newline and **Ctrl+Enter**
+submits. Empty or whitespace-only submissions remain in the editor after their
+error; successful submissions clear it. The sidebar shows agent and current
+session information only. Use `/session new`, `/session switch`, `/delete`, and
+`/sessions` for session workflows; `/sessions` records a durable table with
+session names, current status, and timestamps. Completed command and MCP
+actions are collapsed transcript items and can be expanded for their details.
+
 Chatrooms retain a mapping of registered runtime agents and directly await the
 destination's message or session operation.
 
@@ -164,7 +178,10 @@ configuration. Individual linked directories cannot use
 junction when symbolic-link privilege is unavailable.
 
 `SpecManager` configures its director and worker/verifier participants with an
-MCP server and role guidance. Accepted evidence is retained in
+MCP server and role guidance. Tasks use structured acceptance-criterion IDs;
+verification evidence must map every criterion and every outstanding
+correction exactly once. `FEATURES.md` accepts only structured `pairo-task`
+blocks and rejects the former single-line format. Accepted evidence is retained in
 `output/FEATURE_HISTORY.md`; an optional documenter receives that file's path
 without receiving a spec-manager role. Closing the manager cancels its waiters
 before stopping the HTTP transport and does not alter task-file status.

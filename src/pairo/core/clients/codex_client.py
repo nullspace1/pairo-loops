@@ -20,6 +20,7 @@ from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApproval,
     CommandExecutionOutputDeltaNotification,
+    ContextCompactedNotification,
     FileChangeOutputDeltaNotification,
     ItemCompletedNotification,
     ItemStartedNotification,
@@ -116,6 +117,7 @@ class CodexAgent:
         self._active_session: ActiveSession[CodexSessionIdentifier] | None = None
         self._turn_id: str | None = None
         self._notification_task: asyncio.Task[None] | None = None
+        self._compaction_task: asyncio.Task[None] | None = None
         self._status = AgentStatus.INACTIVE
         self._closed = False
         self._permission_lock = Lock()
@@ -188,6 +190,8 @@ class CodexAgent:
         async with self._state_lock:
             self._require_open()
             active = self._require_session()
+            if self._status is AgentStatus.COMPACTING:
+                raise RuntimeError("Compaction is in progress; retry after it completes.")
             self._pipeline.push(
                 MessageSent(
                     agent_id=self._configuration.id,
@@ -226,7 +230,7 @@ class CodexAgent:
                 self._status = AgentStatus.IDLE
                 self._turn_id = None
                 await self._publish_error(active, error)
-                raise
+
 
     async def interrupt(self) -> bool:
         try:
@@ -249,13 +253,17 @@ class CodexAgent:
             raise
 
     async def compact(self) -> None:
+        active: ActiveSession[CodexSessionIdentifier] | None = None
         try:
             async with self._state_lock:
                 self._require_open()
                 self._require_not_generating()
                 active = self._require_session()
                 await self._ensure_client()
-                await self._client.thread_compact(active.identifier.thread_id)
+                self._status = AgentStatus.COMPACTING
+                self._compaction_task = asyncio.current_task()
+            await self._client.thread_compact(active.identifier.thread_id)
+            await self._wait_for_compaction(active.identifier.thread_id)
         except Exception as error:
             session_name = (
                 self._active_session.name
@@ -264,6 +272,13 @@ class CodexAgent:
             )
             await self._publish_session_error(session_name, error)
             raise
+        finally:
+            async with self._state_lock:
+                if active is not None and self._active_session == active and not self._closed:
+                    self._status = AgentStatus.IDLE
+                self._compaction_task = None
+        if active is None:
+            raise RuntimeError("Compaction did not acquire an active session.")
         self._pipeline.push(
             SessionCompacted(
                 agent_id=self._configuration.id,
@@ -277,18 +292,33 @@ class CodexAgent:
                 return
             self._closed = True
             task = self._notification_task
+            compaction_task = self._compaction_task
             self._notification_task = None
+            self._compaction_task = None
             self._status = AgentStatus.INACTIVE
             self._turn_id = None
             self._active_session = None
             with self._permission_lock:
                 self._permission_context = None
+        if compaction_task is not None and compaction_task is not asyncio.current_task():
+            compaction_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await compaction_task
         if self._client_started:
             await self._client.close()
             self._client_started = False
         if task is not None:
             with suppress(asyncio.CancelledError, Exception):
                 await task
+
+    async def _wait_for_compaction(self, thread_id: str) -> None:
+        while True:
+            notification = await self._client.next_notification()
+            if notification.method != "thread/compacted":
+                continue
+            payload = cast(ContextCompactedNotification, notification.payload)
+            if payload.thread_id == thread_id:
+                return
 
     async def _ensure_client(self) -> None:
         if self._client_started:
@@ -501,8 +531,8 @@ class CodexAgent:
         return self._turn_id
 
     def _require_not_generating(self) -> None:
-        if self._status is AgentStatus.GENERATING:
-            raise RuntimeError("Cannot change sessions while the agent is generating.")
+        if self._status in {AgentStatus.GENERATING, AgentStatus.COMPACTING}:
+            raise RuntimeError("Cannot change sessions while the agent is busy.")
 
     def _require_open(self) -> None:
         if self._closed:

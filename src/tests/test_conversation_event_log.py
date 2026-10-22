@@ -21,6 +21,7 @@ from pairo.core.events import (
     SessionUpdated,
     UserInput,
 )
+from pairo.tools.conversation_event_log import CoalescingEventLogPolicy
 from pairo.core.permissions import CommandExecutionApprovalRequest, PermissionDecision
 
 
@@ -166,6 +167,66 @@ def test_close_drains_events_that_were_queued_before_shutdown(tmp_path: Path) ->
             "first",
             "second",
         ]
+
+    asyncio.run(scenario())
+
+
+def test_coalescing_policy_writes_latest_progress_before_completion(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        output_path = tmp_path / "conversation.jsonl"
+        log = ConversationEventLog(
+            pipeline, output_path, CoalescingEventLogPolicy()
+        )
+        pipeline.push(AgentActivityProgress(
+            agent_id=AGENT_ID,
+            session_name="main",
+            activity={"id": "activity-1", "progress": 10},
+        ))
+        pipeline.push(AgentActivityProgress(
+            agent_id=AGENT_ID,
+            session_name="main",
+            activity={"id": "activity-1", "progress": 90},
+        ))
+        pipeline.push(AgentActivityCompleted(
+            agent_id=AGENT_ID,
+            session_name="main",
+            activity={"id": "activity-1", "status": "completed"},
+        ))
+
+        await log.close()
+
+        records = [
+            json.loads(line)
+            for line in output_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert [record["event_type"] for record in records] == [
+            "AgentActivityProgress",
+            "AgentActivityCompleted",
+        ]
+        assert records[0]["payload"]["activity"]["progress"] == 90
+
+    asyncio.run(scenario())
+
+
+def test_coalescing_policy_flushes_uncompleted_progress(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        output_path = tmp_path / "conversation.jsonl"
+        log = ConversationEventLog(
+            pipeline, output_path, CoalescingEventLogPolicy()
+        )
+        pipeline.push(AgentActivityProgress(
+            agent_id=AGENT_ID,
+            session_name="main",
+            activity={"id": "activity-1", "progress": 50},
+        ))
+
+        await log.flush()
+
+        record = json.loads(output_path.read_text(encoding="utf-8").strip())
+        assert record["payload"]["activity"]["progress"] == 50
+        await log.close()
 
     asyncio.run(scenario())
 

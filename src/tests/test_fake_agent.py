@@ -16,9 +16,40 @@ from pairo.core.events import (
     EventPipeline,
     MessageSent,
     SessionCreated,
+    SessionCompacted,
     SessionUpdated,
     Subscription,
 )
+
+
+def test_fake_agent_exposes_compacting_and_rejects_messages(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        agent = make_agent(tmp_path, pipeline)
+        await agent.new_session("one")
+        events: list[BaseModel] = []
+        subscription = pipeline.subscribe(
+            BaseModel, lambda event, _subscription: events.append(event)
+        )
+
+        compacting = asyncio.create_task(agent.compact())
+        await asyncio.sleep(0)
+        assert agent.status() is AgentStatus.COMPACTING
+        with pytest.raises(RuntimeError, match="Compaction is in progress"):
+            await agent.send_message("continue")
+        await compacting
+        await subscription.wait_until_idle()
+
+        assert agent.status() is AgentStatus.IDLE
+        assert sum(isinstance(event, SessionCompacted) for event in events) == 1
+        assert not any(
+            isinstance(event, MessageSent) and event.message == "continue"
+            for event in events
+        )
+        pipeline.unsubscribe(subscription)
+        await agent.close()
+
+    asyncio.run(scenario())
 
 
 def make_agent(

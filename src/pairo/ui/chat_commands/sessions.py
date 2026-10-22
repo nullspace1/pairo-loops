@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ..commands import CommandOutcome
-from ..models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
+from ..models import (
+    EventDetailLevel,
+    SessionTableRow,
+    SessionTableTranscriptMetadata,
+    TranscriptEntry,
+)
 from .base import SlashCommand
 
 if TYPE_CHECKING:
@@ -23,14 +28,27 @@ class SessionsCommand(SlashCommand):
         argument: str,
     ) -> CommandOutcome:
         sessions = await controller.session_repository.sessions_for(agent_id)
-        known = ", ".join(session.session_name for session in sessions)
-        current = controller.current_session_name(agent_id) or "none"
+        current = controller.current_session_name(agent_id)
+        rows: list[SessionTableRow] = [
+            {
+                "session_name": session.session_name,
+                "current": session.session_name == current,
+                "created_at": session.created_at.isoformat(),
+                "last_message_at": (
+                    session.last_message_at.isoformat()
+                    if session.last_message_at is not None
+                    else None
+                ),
+                "last_updated_at": session.last_updated_at.isoformat(),
+            }
+            for session in sessions
+        ]
         return CommandOutcome(
-            TranscriptEntry[SystemTranscriptMetadata](
+            TranscriptEntry[SessionTableTranscriptMetadata](
                 "system",
-                f"Current session: {current}. History: {known or 'none recorded'}.",
+                "Sessions",
                 EventDetailLevel.NORMAL,
-                {"type": "system"},
+                {"type": "session_table", "sessions": rows},
             )
         )
 

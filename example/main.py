@@ -1,10 +1,14 @@
 """Run one planner with a developer/verifier pair."""
 
 import asyncio
+import datetime
 from pathlib import Path
 import sys
 
-from pairo.tools.conversation_event_log import ConversationEventLog
+from pairo.tools.conversation_event_log import (
+    CoalescingEventLogPolicy,
+    ConversationEventLog,
+)
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
 if str(SOURCE_ROOT) not in sys.path:
@@ -27,7 +31,11 @@ from pairo.ui import SqliteSessionRepository
 async def run_async() -> None:
     pipeline = EventPipeline()
     repository = SqliteSessionRepository()
-    event_log = ConversationEventLog(pipeline, Path("./log/events.jsonl"))
+    event_log = ConversationEventLog(
+        pipeline,
+        Path("./.log/events" + str(datetime.datetime.now().timestamp()) + ".jsonl"),
+        CoalescingEventLogPolicy(),
+    )
     configured_agents = [
         get_planner(pipeline, repository),
         get_developer("developer", pipeline, repository),

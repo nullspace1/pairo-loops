@@ -12,6 +12,8 @@ Responsibility and authority
   fits the existing architecture.
 - Reject once with concrete locations, consequences, and requested corrections
   when evidence or implementation is deficient.
+- Complete one criterion-by-criterion audit before rejecting. Check observable behavior, direct test coverage, persistence or reload behavior where required, and every named positive and negative state. Include every currently identifiable deficiency in structured corrections.
+- On a resubmission, verify every correction resolution before looking for additional findings. Treat private-state assertions and broad regression results as insufficient evidence for a specifically required user-visible scenario.
 
 Boundaries
 - Treat the source workspace as read-only. Do not implement fixes.
@@ -19,6 +21,7 @@ Boundaries
 - Preserve unrelated user work.
 - Do not paste raw successful test output. Report the command, result counts,
   duration, coverage, and remaining uncertainty.
+- Run mypy separately with `--cache-dir=tmp/agents/verifier/mypy-cache`. After an internal error, rerun with `--show-traceback --no-incremental` and report both outcomes.
 
 Output
 - Lead with the accept/reject decision.

@@ -9,13 +9,19 @@ from pairo import AgentConfiguration, SandboxPermission
 from pairo.core.clients.client import MCP_AGENT_ID_HEADER
 from pairo.core.mcp.mcp_http_wrapper import MCPHttpWrapper
 from pairo.mcp.spec_manager import (
+    AcceptanceCriterion,
     AcceptanceEvidence,
+    CorrectionResolution,
     SpecManager,
     TestRunSummary as RunSummary,
     VerificationEvidence,
+    VerificationCorrection,
     WorkerVerifierPair,
     install_spec_manager,
 )
+
+
+CRITERIA = [AcceptanceCriterion(id="AC1", description="It works")]
 
 
 class AgentStub:
@@ -50,7 +56,9 @@ def tool(manager: SpecManager, name: str):
     return manager._mcp_server._tool_manager.get_tool(name).fn
 
 
-def verification_evidence() -> VerificationEvidence:
+def verification_evidence(
+    resolutions: list[CorrectionResolution] | None = None,
+) -> VerificationEvidence:
     return VerificationEvidence(
         implementation_summary=(
             "Moved assignment waiter cancellation before graceful transport shutdown."
@@ -61,12 +69,14 @@ def verification_evidence() -> VerificationEvidence:
         ],
         acceptance_evidence=[
             AcceptanceEvidence(
-                criterion="Shutdown completes with an active assignment waiter.",
+                criterion_id="AC1",
                 evidence="Covered by test_close_cancels_sleep_waiter_before_stopping_http_transport.",
+                test_run_ids=["TR1"],
             )
         ],
         test_runs=[
             RunSummary(
+                id="TR1",
                 command=(
                     ".venv\\Scripts\\python.exe -m pytest "
                     "tests/test_spec_manager.py -q -p no:cacheprovider"
@@ -79,6 +89,7 @@ def verification_evidence() -> VerificationEvidence:
                 summary="Covered assignment, verification, and shutdown lifecycles.",
             )
         ],
+        correction_resolutions=resolutions or [],
         remaining_risks=["No live network transport was used."],
     )
 
@@ -114,17 +125,20 @@ def test_installer_configures_role_specific_skills_and_instructions(tmp_path: Pa
     assert worker.configuration().skill_folders[0].name == "worker"
     assert verifier.configuration().skill_folders[0].name == "verifier"
     assert "create, modify, delete, and assign" in director.configuration().developer_instructions
+    assert "criterion ID" in worker.configuration().developer_instructions
+    assert "structured corrections" in verifier.configuration().developer_instructions
 
 
 def test_assignment_creates_and_reuses_the_verifier_session(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, worker, verifier = setup_manager(tmp_path)
         assert await tool(manager, "create_task")(
-            "Login", "Add login", "A user can sign in", context(director)
+            "Login", "Add login", CRITERIA, context(director)
         ) == "Created task 'Login'."
-        assert (tmp_path / "FEATURES.md").read_text() == (
-            "Login: Add login [acceptance: A user can sign in] [status: pending]\n"
-        )
+        content = (tmp_path / "FEATURES.md").read_text()
+        assert "```pairo-task" in content
+        assert '"id": "AC1"' in content
+        assert '"status": "pending"' in content
         assert "Assigned" in await tool(manager, "assign_task")(
             "pair-1", "Login", context(director)
         )
@@ -142,19 +156,29 @@ def test_assignment_creates_and_reuses_the_verifier_session(tmp_path: Path) -> N
         assert "test_close_cancels_sleep_waiter" in verifier_message
         assert "No live network transport was used." in verifier_message
         assert "Rejected" in await tool(manager, "reject_task")(
-            "Missing failure test", context(verifier)
+            [VerificationCorrection(
+                id="C1", criterion_ids=["AC1"], message="Missing failure test"
+            )],
+            context(verifier),
         )
-        assert await waiting == "Missing failure test"
-        assert "[status: working]" in (tmp_path / "FEATURES.md").read_text()
+        assert await waiting == "1 correction(s) required."
+        assert '"status": "working"' in (tmp_path / "FEATURES.md").read_text()
 
         waiting = asyncio.create_task(
-            tool(manager, "verify_task")(verification_evidence(), context(worker))
+            tool(manager, "verify_task")(
+                verification_evidence([
+                    CorrectionResolution(
+                        correction_id="C1", resolution="Added the missing failure test."
+                    )
+                ]),
+                context(worker),
+            )
         )
         await asyncio.sleep(0)
         assert verifier.created[-1] == verifier_session
         assert "Accepted" in await tool(manager, "accept_task")(context(verifier))
         assert await waiting == "Task accepted."
-        assert "[status: accepted]" in (tmp_path / "FEATURES.md").read_text()
+        assert '"status": "accepted"' in (tmp_path / "FEATURES.md").read_text()
         workers = await tool(manager, "list_workers")(context(director))
         assert workers[0]["status"] == "idle"
 
@@ -187,7 +211,7 @@ def test_accepted_feature_history_is_referenced_only_to_documenter(
         assert documenter.configuration().skill_folders == ()
 
         await tool(manager, "create_task")(
-            "History", "Record accepted work", "Evidence is retained", context(director)
+            "History", "Record accepted work", CRITERIA, context(director)
         )
         await tool(manager, "assign_task")(
             "pair-1", "History", context(director)
@@ -204,6 +228,8 @@ def test_accepted_feature_history_is_referenced_only_to_documenter(
         assert "Record accepted work" in content
         assert "### Implementation" in content
         assert "### Acceptance evidence" in content
+        assert "### Verification corrections" in content
+        assert "### Correction resolutions" in content
         assert "### Verification" in content
         assert "No live network transport was used." in content
 
@@ -220,7 +246,7 @@ def test_accepted_feature_history_is_referenced_only_to_documenter(
 def test_director_can_sleep_until_an_assigned_task_is_accepted(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, worker, verifier = setup_manager(tmp_path)
-        await tool(manager, "create_task")("Task", "Do it", "It works", context(director))
+        await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
 
         sleeping = asyncio.create_task(tool(manager, "sleep_on_task")("Task", context(director)))
@@ -242,7 +268,7 @@ def test_director_can_sleep_until_an_assigned_task_is_accepted(tmp_path: Path) -
 def test_timeout_keeps_verification_active_until_late_acceptance(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, worker, verifier = setup_manager(tmp_path, timeout=0.01)
-        await tool(manager, "create_task")("Task", "Do it", "It works", context(director))
+        await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
 
         result = await tool(manager, "verify_task")(
@@ -254,16 +280,80 @@ def test_timeout_keeps_verification_active_until_late_acceptance(tmp_path: Path)
     asyncio.run(scenario())
 
 
-def test_role_checks_and_unrelated_file_content_are_preserved(tmp_path: Path) -> None:
+def test_verification_requires_exact_criterion_and_test_run_mapping(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manager, _, director, worker, _ = setup_manager(tmp_path)
+        criteria = [
+            AcceptanceCriterion(id="AC1", description="First outcome"),
+            AcceptanceCriterion(id="AC2", description="Second outcome"),
+        ]
+        await tool(manager, "create_task")(
+            "Task", "Do it", criteria, context(director)
+        )
+        await tool(manager, "assign_task")("pair-1", "Task", context(director))
+
+        result = await tool(manager, "verify_task")(
+            verification_evidence(), context(worker)
+        )
+
+        assert "map exactly once to every task criterion" in result
+        assert manager._assignments["pair-1"].status == "working"
+
+    asyncio.run(scenario())
+
+
+def test_resubmission_requires_every_outstanding_correction(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manager, _, director, worker, verifier = setup_manager(tmp_path)
+        await tool(manager, "create_task")(
+            "Task", "Do it", CRITERIA, context(director)
+        )
+        await tool(manager, "assign_task")("pair-1", "Task", context(director))
+        verifying = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
+        await asyncio.sleep(0)
+        await tool(manager, "reject_task")(
+            [
+                VerificationCorrection(
+                    id="C1", criterion_ids=["AC1"], message="Add direct coverage."
+                ),
+                VerificationCorrection(
+                    id="C2", criterion_ids=["AC1"], message="Document the risk."
+                ),
+            ],
+            context(verifier),
+        )
+        await verifying
+
+        result = await tool(manager, "verify_task")(
+            verification_evidence([
+                CorrectionResolution(
+                    correction_id="C1", resolution="Added direct coverage."
+                )
+            ]),
+            context(worker),
+        )
+
+        assert "map exactly once to every open correction" in result
+        assert len(verifier.messages) == 1
+
+    asyncio.run(scenario())
+
+
+def test_legacy_feature_content_is_rejected(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, worker, _ = setup_manager(tmp_path)
         features = tmp_path / "FEATURES.md"
         features.write_text("# Features\n\nNotes stay here.\n", encoding="utf-8")
 
-        denied = await tool(manager, "create_task")("Nope", "No", "No", context(worker))
+        denied = await tool(manager, "create_task")("Nope", "No", CRITERIA, context(worker))
         assert "Only the registered director" in denied
-        await tool(manager, "create_task")("Keep", "Build it", "Tests pass", context(director))
-        assert features.read_text(encoding="utf-8").startswith("# Features\n\nNotes stay here.\n")
+        result = await tool(manager, "create_task")(
+            "Keep", "Build it", CRITERIA, context(director)
+        )
+        assert "unsupported format" in result
+        assert features.read_text(encoding="utf-8") == "# Features\n\nNotes stay here.\n"
 
     asyncio.run(scenario())
 
@@ -271,19 +361,22 @@ def test_role_checks_and_unrelated_file_content_are_preserved(tmp_path: Path) ->
 def test_director_can_modify_and_delete_pending_tasks(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, worker, _ = setup_manager(tmp_path)
-        await tool(manager, "create_task")("Task", "Draft", "Draft works", context(director))
+        await tool(manager, "create_task")("Task", "Draft", CRITERIA, context(director))
 
         assert await tool(manager, "modify_task")(
-            "Task", "Final description", "Final criteria", context(director)
+            "Task",
+            "Final description",
+            [AcceptanceCriterion(id="AC1", description="Final criteria")],
+            context(director),
         ) == "Modified task 'Task'."
-        assert (tmp_path / "FEATURES.md").read_text(encoding="utf-8") == (
-            "Task: Final description [acceptance: Final criteria] [status: pending]\n"
-        )
+        content = (tmp_path / "FEATURES.md").read_text(encoding="utf-8")
+        assert "Final description" in content
+        assert "Final criteria" in content
         assert "Only the registered director" in await tool(manager, "delete_task")(
             "Task", context(worker)
         )
         assert await tool(manager, "delete_task")("Task", context(director)) == "Deleted task 'Task'."
-        assert not (tmp_path / "FEATURES.md").read_text(encoding="utf-8")
+        assert (tmp_path / "FEATURES.md").read_text(encoding="utf-8") == "# Features\n\n"
 
     asyncio.run(scenario())
 
@@ -291,11 +384,11 @@ def test_director_can_modify_and_delete_pending_tasks(tmp_path: Path) -> None:
 def test_director_cannot_modify_or_delete_an_assigned_task(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, _, _ = setup_manager(tmp_path)
-        await tool(manager, "create_task")("Task", "Do it", "It works", context(director))
+        await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
 
         assert "working, not pending" in await tool(manager, "modify_task")(
-            "Task", "Changed", "Changed", context(director)
+            "Task", "Changed", CRITERIA, context(director)
         )
         assert "working, not pending" in await tool(manager, "delete_task")(
             "Task", context(director)
@@ -307,7 +400,7 @@ def test_director_cannot_modify_or_delete_an_assigned_task(tmp_path: Path) -> No
 def test_close_cancels_sleep_waiter_before_stopping_http_transport(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, _, _ = setup_manager(tmp_path)
-        await tool(manager, "create_task")("Task", "Do it", "It works", context(director))
+        await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
         sleeping = asyncio.create_task(tool(manager, "sleep_on_task")("Task", context(director)))
         await asyncio.sleep(0)
@@ -332,9 +425,7 @@ def test_close_cancels_sleep_waiter_before_stopping_http_transport(tmp_path: Pat
 
         assert transport_observations == [(True, True), (True, True)]
         assert sleeping.cancelled()
-        assert (tmp_path / "FEATURES.md").read_text(encoding="utf-8") == (
-            "Task: Do it [acceptance: It works] [status: working]\n"
-        )
+        assert '"status": "working"' in (tmp_path / "FEATURES.md").read_text(encoding="utf-8")
 
     asyncio.run(scenario())
 
@@ -342,7 +433,7 @@ def test_close_cancels_sleep_waiter_before_stopping_http_transport(tmp_path: Pat
 def test_close_cancels_verification_waiter_before_stopping_http_transport(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, worker, _ = setup_manager(tmp_path)
-        await tool(manager, "create_task")("Task", "Do it", "It works", context(director))
+        await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
         verifying = asyncio.create_task(
             tool(manager, "verify_task")(verification_evidence(), context(worker))
@@ -371,8 +462,6 @@ def test_close_cancels_verification_waiter_before_stopping_http_transport(tmp_pa
 
         assert transport_observations == [(True, True), (True, True)]
         assert verifying.cancelled()
-        assert (tmp_path / "FEATURES.md").read_text(encoding="utf-8") == (
-            "Task: Do it [acceptance: It works] [status: verifying]\n"
-        )
+        assert '"status": "verifying"' in (tmp_path / "FEATURES.md").read_text(encoding="utf-8")
 
     asyncio.run(scenario())

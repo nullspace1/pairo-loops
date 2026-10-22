@@ -2,11 +2,11 @@
 
 from pairo.core.events import AgentActivityCompleted
 from textual.widget import Widget
+from textual.widgets import Collapsible, Static
 
 from ..models import ActivityTranscriptMetadata, EventDetailLevel, TranscriptEntry
 from ..presentation import CompletedActivityPresenter
 from .routed_transcript_entry import RoutedTranscriptEntry
-from .text_transcript import render_text_transcript
 from .transcriber import Transcriber
 from .transcript_render_context import TranscriptRenderContext
 
@@ -46,5 +46,12 @@ class ActivityCompletedTranscriber(
         transcript: TranscriptEntry[ActivityTranscriptMetadata],
         context: TranscriptRenderContext,
     ) -> Widget:
-        return render_text_transcript(transcript, context)
+        del context
+        title, _, details = transcript.content.partition("\n\n")
+        return Collapsible(
+            Static(details or "No additional details were provided.", markup=False),
+            title=title,
+            collapsed=True,
+            classes="completed-activity",
+        )
 

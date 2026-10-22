@@ -16,6 +16,7 @@ from ..models import (
     NetworkTranscriptMetadata,
     PermissionRequestTranscriptMetadata,
     PermissionResponseTranscriptMetadata,
+    SessionTableTranscriptMetadata,
     SystemTranscriptMetadata,
     TokenUsageTranscriptMetadata,
     TranscriptEntry,
@@ -38,6 +39,7 @@ TranscriptMetadata: TypeAlias = (
     | PermissionResponseTranscriptMetadata
     | SystemTranscriptMetadata
     | TokenUsageTranscriptMetadata
+    | SessionTableTranscriptMetadata
 )
 MetadataT = TypeVar("MetadataT", bound=TranscriptMetadata)
 
@@ -93,6 +95,19 @@ class TranscriptTranscriber(Protocol):
     ) -> Widget: ...
 
 
+class DurableTranscriptTranscriber(Protocol):
+    """Renders a transcript type which has no corresponding pipeline event."""
+
+    @property
+    def transcript_type(self) -> str: ...
+
+    def render_transcript(
+        self,
+        transcript: TranscriptEntry[TranscriptMetadata],
+        context: TranscriptRenderContext,
+    ) -> Widget: ...
+
+
 class _RegisteredTranscriber(Generic[EventT, MetadataT]):
     """Contain the type erasure needed to store mixed transcriber types."""
 
@@ -138,6 +153,15 @@ class TranscriberRegistry:
         registered = _RegisteredTranscriber(transcriber)
         self._event_transcribers[event_type] = registered
         self._transcript_transcribers[transcript_type] = registered
+
+    def register_durable(self, transcriber: DurableTranscriptTranscriber) -> None:
+        """Register a renderer for command-created durable transcript state."""
+        transcript_type = transcriber.transcript_type
+        if transcript_type in self._transcript_transcribers:
+            raise ValueError(
+                f"Multiple transcribers registered for transcript type '{transcript_type}'."
+            )
+        self._transcript_transcribers[transcript_type] = transcriber
 
     @property
     def event_types(self) -> tuple[type[BaseModel], ...]:

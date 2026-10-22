@@ -19,6 +19,7 @@ class AgentStatus(str, Enum):
     INACTIVE = "inactive"
     IDLE = "idle"
     GENERATING = "generating"
+    COMPACTING = "compacting"
 
 
 IdentifierT = TypeVar("IdentifierT", bound=SessionIdentifier, covariant=True)

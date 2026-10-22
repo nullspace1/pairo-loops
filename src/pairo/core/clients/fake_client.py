@@ -51,6 +51,7 @@ class FakeAgent:
         self._status = AgentStatus.INACTIVE
         self._lock = asyncio.Lock()
         self._completion_task: asyncio.Task[None] | None = None
+        self._compaction_task: asyncio.Task[None] | None = None
         self._pending_response: str | None = None
         self._interrupt_requested = False
         self._closed = False
@@ -115,6 +116,8 @@ class FakeAgent:
         async with self._lock:
             self._require_open()
             active = self._require_session()
+            if self._status is AgentStatus.COMPACTING:
+                raise RuntimeError("Compaction is in progress; retry after it completes.")
             starting = self._status is not AgentStatus.GENERATING
             try:
                 self._pending_response = self._response_factory()
@@ -151,12 +154,21 @@ class FakeAgent:
             self._require_open()
             self._require_not_generating()
             active = self._require_session()
-        self._pipeline.push(
-            SessionCompacted(
-                agent_id=self._configuration.id,
-                session_name=active.name,
+            self._status = AgentStatus.COMPACTING
+            self._compaction_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(0)
+            self._pipeline.push(
+                SessionCompacted(
+                    agent_id=self._configuration.id,
+                    session_name=active.name,
+                )
             )
-        )
+        finally:
+            async with self._lock:
+                if not self._closed and self._active_session == active:
+                    self._status = AgentStatus.IDLE
+                self._compaction_task = None
 
     async def close(self) -> None:
         async with self._lock:
@@ -164,7 +176,9 @@ class FakeAgent:
                 return
             self._closed = True
             task = self._completion_task
+            compaction_task = self._compaction_task
             self._completion_task = None
+            self._compaction_task = None
             self._active_session = None
             self._pending_response = None
             self._status = AgentStatus.INACTIVE
@@ -172,6 +186,10 @@ class FakeAgent:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        if compaction_task is not None and compaction_task is not asyncio.current_task():
+            compaction_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await compaction_task
 
     async def _complete_turn(
         self,
@@ -238,8 +256,8 @@ class FakeAgent:
         return self._active_session
 
     def _require_not_generating(self) -> None:
-        if self._status is AgentStatus.GENERATING:
-            raise RuntimeError("Cannot change sessions while the agent is generating.")
+        if self._status in {AgentStatus.GENERATING, AgentStatus.COMPACTING}:
+            raise RuntimeError("Cannot change sessions while the agent is busy.")
 
     def _require_open(self) -> None:
         if self._closed:

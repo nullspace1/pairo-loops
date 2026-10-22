@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from openai_codex.generated.v2_all import ContextCompactedNotification
+from pydantic import BaseModel
 
 from pairo.core.agent import (
     AgentConfiguration,
@@ -20,7 +22,13 @@ from pairo.core.clients.codex_client import (
     CodexSessionIdentifier,
     _ApprovalAwareAsyncCodexClient,
 )
-from pairo.core.events import ClientTokenUsageUpdated, EventPipeline, SessionCompacted
+from pairo.core.events import (
+    AgentError,
+    ClientTokenUsageUpdated,
+    EventPipeline,
+    MessageSent,
+    SessionCompacted,
+)
 from pairo.core.mcp.mcp_permissions import MCPPermissions, MCPToolApprovalMode
 from pairo.core.mcp.servers import HttpMCPServer, StdioMCPServer
 
@@ -31,6 +39,8 @@ class FakeAsyncCodexClient:
         self.initialized = 0
         self.closed = 0
         self.compacted: list[str] = []
+        self.notifications: asyncio.Queue[SimpleNamespace] = asyncio.Queue()
+        self.compact_error: RuntimeError | None = None
 
     async def start(self) -> None:
         self.started += 1
@@ -45,7 +55,12 @@ class FakeAsyncCodexClient:
         return SimpleNamespace(thread=SimpleNamespace(id="thread-1"))
 
     async def thread_compact(self, thread_id: str) -> None:
+        if self.compact_error is not None:
+            raise self.compact_error
         self.compacted.append(thread_id)
+
+    async def next_notification(self):
+        return await self.notifications.get()
 
 
 def configuration(tmp_path: Path) -> AgentConfiguration:
@@ -176,7 +191,21 @@ def test_client_initialization_and_compaction_are_awaited_once(tmp_path: Path) -
         active = await agent.new_session("Conversation 1")
         compacted = asyncio.create_task(pipeline.listen(SessionCompacted))
         await asyncio.sleep(0)
-        await agent.compact()
+        compacting = asyncio.create_task(agent.compact())
+        await asyncio.sleep(0)
+
+        assert agent.status() is AgentStatus.COMPACTING
+        await client.notifications.put(SimpleNamespace(
+            method="account/updated", payload=SimpleNamespace()
+        ))
+        await client.notifications.put(SimpleNamespace(
+            method="thread/compacted",
+            payload=ContextCompactedNotification(
+                threadId=active.identifier.thread_id,
+                turnId="compact-turn",
+            )
+        ))
+        await compacting
 
         assert client.started == 1
         assert client.initialized == 1
@@ -187,6 +216,80 @@ def test_client_initialization_and_compaction_are_awaited_once(tmp_path: Path) -
         await agent.close()
         await agent.close()
         assert client.closed == 1
+
+    asyncio.run(scenario())
+
+
+def test_message_is_rejected_without_publication_during_compaction(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        client = FakeAsyncCodexClient()
+        agent = CodexAgent(configuration(tmp_path), pipeline, client)
+        active = await agent.new_session("Conversation 1")
+        events: list[BaseModel] = []
+        subscription = pipeline.subscribe(
+            BaseModel, lambda event, _subscription: events.append(event)
+        )
+        compacting = asyncio.create_task(agent.compact())
+        await asyncio.sleep(0)
+
+        with pytest.raises(RuntimeError, match="Compaction is in progress"):
+            await agent.send_message("continue")
+
+        await client.notifications.put(SimpleNamespace(
+            method="thread/compacted",
+            payload=ContextCompactedNotification(
+                threadId=active.identifier.thread_id,
+                turnId="compact-turn",
+            )
+        ))
+        await compacting
+        await subscription.wait_until_idle()
+        assert not any(
+            isinstance(event, MessageSent) and event.message == "continue"
+            for event in events
+        )
+        pipeline.unsubscribe(subscription)
+        await agent.close()
+
+    asyncio.run(scenario())
+
+
+def test_close_cancels_in_progress_compaction(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        client = FakeAsyncCodexClient()
+        agent = CodexAgent(configuration(tmp_path), pipeline, client)
+        await agent.new_session("Conversation 1")
+        compacting = asyncio.create_task(agent.compact())
+        await asyncio.sleep(0)
+
+        await agent.close()
+
+        with pytest.raises(asyncio.CancelledError):
+            await compacting
+        assert agent.status() is AgentStatus.INACTIVE
+        assert client.closed == 1
+
+    asyncio.run(scenario())
+
+
+def test_compaction_failure_restores_idle_and_publishes_error(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        client = FakeAsyncCodexClient()
+        client.compact_error = RuntimeError("compact failed")
+        agent = CodexAgent(configuration(tmp_path), pipeline, client)
+        await agent.new_session("Conversation 1")
+        error_waiter = asyncio.create_task(pipeline.listen(AgentError))
+        await asyncio.sleep(0)
+
+        with pytest.raises(RuntimeError, match="compact failed"):
+            await agent.compact()
+
+        assert agent.status() is AgentStatus.IDLE
+        assert (await error_waiter).message == "compact failed"
+        await agent.close()
 
     asyncio.run(scenario())
 

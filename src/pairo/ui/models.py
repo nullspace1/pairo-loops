@@ -71,6 +71,23 @@ class TokenUsageTranscriptMetadata(TypedDict):
     type: Literal["token_usage"]
 
 
+class SessionTableRow(TypedDict):
+    """JSON-safe session values rendered by the sessions transcript entry."""
+
+    session_name: str
+    current: bool
+    created_at: str
+    last_message_at: str | None
+    last_updated_at: str
+
+
+class SessionTableTranscriptMetadata(TypedDict):
+    """Durable table model emitted by the ``/sessions`` command."""
+
+    type: Literal["session_table"]
+    sessions: list[SessionTableRow]
+
+
 class HistoricalTranscriptMetadata(TypedDict):
     """Metadata assigned when a durable entry is reloaded from SQLite."""
 
@@ -83,7 +100,8 @@ TranscriptMetadata: TypeAlias = (
     MessageTranscriptMetadata | ErrorTranscriptMetadata | NetworkTranscriptMetadata
     | ActivityTranscriptMetadata | PermissionRequestTranscriptMetadata
     | PermissionResponseTranscriptMetadata | SystemTranscriptMetadata
-    | TokenUsageTranscriptMetadata | HistoricalTranscriptMetadata
+    | TokenUsageTranscriptMetadata | SessionTableTranscriptMetadata
+    | HistoricalTranscriptMetadata
 )
 
 

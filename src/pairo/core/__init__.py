@@ -26,9 +26,12 @@ from .mcp.mcp_permissions import MCPPermissions, MCPToolApprovalMode
 from .mcp.servers import HttpMCPServer, StdioMCPServer
 from .events import (
     AgentEventListeners,
+    CoalescingEventLogPolicy,
     ConversationEventLog,
+    ConversationEventLogPolicy,
     EventCallback,
     EventPipeline,
+    FullFidelityEventLogPolicy,
     Subscription,
     SynchronousEventPipeline,
 )
@@ -54,12 +57,15 @@ __all__ = [
     "CommandExecutionApprovalRequest",
     "CodexAgent",
     "CodexSessionIdentifier",
+    "CoalescingEventLogPolicy",
     "ConversationEventLog",
+    "ConversationEventLogPolicy",
     "FakeAgent",
     "FakeSessionIdentifier",
     "FileChangeApprovalRequest",
     "EventCallback",
     "EventPipeline",
+    "FullFidelityEventLogPolicy",
     "Hook",
     "HookType",
     "HttpMCPServer",

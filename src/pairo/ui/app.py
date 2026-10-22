@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from textual import on
 from textual.app import App, ComposeResult
 from textual.css.query import NoMatches
-from textual.widgets import Footer, Header, Input, TabbedContent, TabPane
+from textual.widgets import Footer, Header, TabbedContent, TabPane
 
 from pairo.core.agent import SessionIdentifier
 from pairo.core.clients import Agent
@@ -43,8 +43,8 @@ from .transcribers import (
 )
 from .widgets import (
     AgentChatPane,
-    AgentSidebar,
 )
+from .widgets.chat_editor import ChatEditor
 from .widgets.sidebar_statistics import SidebarStatistics, default_sidebar_statistics
 
 
@@ -67,7 +67,7 @@ class AgentChatApp(App[None]):
         text-style: bold; color: $accent;
     }
     .sidebar-information { width: 1fr; height: auto; }
-    .sidebar-information-scroll, .session-list-scroll { height: 1fr; min-height: 3; }
+    .sidebar-information-scroll { height: 1fr; min-height: 3; }
     .sidebar-information-picker { width: 1fr; height: 3; margin-bottom: 1; }
     .sidebar-field {
         height: auto; border: round $primary-background; background: $surface;
@@ -75,13 +75,7 @@ class AgentChatApp(App[None]):
     .sidebar-field-label { height: 1; text-style: bold; color: $accent; }
     .sidebar-field-value { height: auto; }
     .detail-filter { width: 14; min-width: 14; height: 3; margin-left: 1; }
-    .session-switch-note { height: auto; color: $text-muted; }
-    .session-list { height: auto; }
-    .session-row { width: 1fr; height: auto; min-height: 3; margin-top: 1; }
-    .session-button { width: 1fr; height: auto; min-height: 3; }
-    .session-delete-button { width: 5; min-width: 5; height: 3; }
-    .current-session { border: heavy $accent; }
-    .chat-input-container { layout: horizontal; height: 3; margin: 1 0; }
+    .chat-input-container { layout: horizontal; height: 6; margin: 1 0; }
     .transcript {
         height: 1fr; border: round $primary-background; padding: 0 1;
     }
@@ -101,7 +95,9 @@ class AgentChatApp(App[None]):
     .permission-actions { height: 3; }
     .permission-actions Button { width: 1fr; min-width: 16; }
     .permission-decision { height: auto; color: $text-muted; text-style: bold; }
-    .chat-input { width: 1fr; height: 3; }
+    .chat-input { width: 1fr; height: 6; }
+    .completed-activity { height: auto; margin: 1 0; }
+    .session-table-message { height: auto; margin: 1 0; }
     """
     BINDINGS = [("ctrl+q", "quit", "Quit")]
 
@@ -273,10 +269,10 @@ class AgentChatApp(App[None]):
             except NoMatches:
                 return
 
-    @on(Input.Submitted)
-    async def submit_chat_input(self, message: Input.Submitted) -> None:
+    @on(ChatEditor.Submitted)
+    async def submit_chat_input(self, message: ChatEditor.Submitted) -> None:
         pane = next(
-            (candidate for candidate in self.chats.values() if candidate.input is message.input),
+            (candidate for candidate in self.chats.values() if candidate.input is message.editor),
             None,
         )
         if pane is None:
@@ -291,7 +287,7 @@ class AgentChatApp(App[None]):
                 ),
             )
             return
-        message.input.clear()
+        message.editor.clear()
         if outcome.session_name is not None and outcome.session_name != pane.session_name:
             await pane.select_session(outcome.session_name)
         if outcome.entry is not None:
@@ -299,66 +295,6 @@ class AgentChatApp(App[None]):
         if outcome.selected_agent is not None:
             self.select_agent(outcome.selected_agent)
 
-    @on(AgentSidebar.SessionSelected)
-    async def select_sidebar_session(self, message: AgentSidebar.SessionSelected) -> None:
-        pane = self.chats[message.agent_id]
-        try:
-            selected = await self._controller.select_session(
-                message.agent_id,
-                message.session_name,
-            )
-            await pane.select_session(selected)
-            await self._append_to_current(
-                pane,
-                TranscriptEntry[SystemTranscriptMetadata](
-                    "system",
-                    f"Switched to session {selected}.",
-                    EventDetailLevel.NORMAL,
-                    {"type": "system"},
-                ),
-            )
-        except (KeyError, RuntimeError, ValueError) as error:
-            await self._append_to_current(
-                pane,
-                TranscriptEntry[SystemTranscriptMetadata](
-                    "system",
-                    f"Unable to switch session: {error}",
-                    EventDetailLevel.NORMAL,
-                    {"type": "system"},
-                ),
-            )
-
-    @on(AgentSidebar.SessionDeletionRequested)
-    async def delete_sidebar_session(
-        self,
-        message: AgentSidebar.SessionDeletionRequested,
-    ) -> None:
-        pane = self.chats[message.agent_id]
-        try:
-            deleted, selected = await self._controller.delete_session(
-                message.agent_id,
-                message.session_name,
-            )
-            await pane.select_session(selected)
-            await self._append_to_current(
-                pane,
-                TranscriptEntry[SystemTranscriptMetadata](
-                    "system",
-                    f"Deleted session {deleted}. Current session: {selected}.",
-                    EventDetailLevel.NORMAL,
-                    {"type": "system"},
-                ),
-            )
-        except (KeyError, RuntimeError, ValueError) as error:
-            await self._append_to_current(
-                pane,
-                TranscriptEntry[SystemTranscriptMetadata](
-                    "system",
-                    f"Unable to delete session: {error}",
-                    EventDetailLevel.NORMAL,
-                    {"type": "system"},
-                ),
-            )
     @on(AgentChatPane.DetailLevelChanged)
     async def change_detail_level(self, message: AgentChatPane.DetailLevelChanged) -> None:
         self._detail_level = message.detail_level

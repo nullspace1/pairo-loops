@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 import pytest
+from textual.widgets import Collapsible
 
 from pairo.core.events import (
     AgentActivityCompleted,
@@ -18,7 +19,8 @@ from pairo.ui.transcribers import (
     TokenUsageUpdatedTranscriber,
     default_transcribers,
 )
-from pairo.ui.models import EventDetailLevel
+from pairo.ui.transcribers.session_table_transcriber import SessionTableTranscriber
+from pairo.ui.models import EventDetailLevel, TranscriptEntry
 from pairo.ui.presentation import CompletedActivityPresenter
 
 
@@ -100,6 +102,42 @@ def test_completed_mcp_calls_and_commands_are_visible_in_normal_mode() -> None:
     assert command.entry.detail_level is EventDetailLevel.NORMAL
     assert mcp_call is not None
     assert mcp_call.entry.detail_level is EventDetailLevel.NORMAL
+
+
+def test_completed_action_renders_collapsed_details() -> None:
+    transcriber = ActivityCompletedTranscriber()
+    routed = transcriber.write(
+        AgentActivityCompleted(
+            agent_id=AGENT_ID,
+            session_name="Conversation 1",
+            activity={"type": "commandExecution", "command": "pytest"},
+        )
+    )
+    widget = transcriber.render(routed.entry, None)  # type: ignore[arg-type]
+
+    assert isinstance(widget, Collapsible)
+    assert widget.collapsed
+    assert widget.title == "Command completed"
+
+
+def test_session_table_transcriber_has_table_and_empty_state() -> None:
+    transcriber = SessionTableTranscriber()
+    entry = TranscriptEntry(
+        "system", "Sessions", EventDetailLevel.NORMAL,
+        {"type": "session_table", "sessions": []},
+    )
+    widget = transcriber.render_transcript(entry, None)  # type: ignore[arg-type]
+    assert widget._sessions == ()
+
+
+def test_session_table_transcriber_marks_current_session_and_rows() -> None:
+    entry = TranscriptEntry(
+        "system", "Sessions", EventDetailLevel.NORMAL,
+        {"type": "session_table", "sessions": [{"session_name": "Current", "current": True, "created_at": "2026-01-01T00:00:00+00:00", "last_message_at": None, "last_updated_at": "2026-01-01T01:00:00+00:00"}]},
+    )
+    widget = SessionTableTranscriber().render_transcript(entry, None)  # type: ignore[arg-type]
+    assert widget._sessions[0]["session_name"] == "Current"
+    assert widget._sessions[0]["current"]
 
 
 def test_other_completed_activity_remains_debug_only() -> None:

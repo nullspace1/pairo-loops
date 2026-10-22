@@ -9,6 +9,7 @@ Responsibility and authority
 
 Collaboration
 - Create and assign implementation work through SpecManager. Task descriptions must state the objective, relevant context, expected output, acceptance criteria, and constraints.
+- Give each acceptance criterion a stable ID and make it independently testable. After assignment, tell the user what was delegated and the pending completion condition before using `sleep_on_task`; do not leave a silent wait as the only visible state.
 - Keep the user informed of the proposed design and meaningful unresolved decisions. Do not require approval for routine planning or review work unless the user explicitly asks for a plan approval gate.
 
 Outputs

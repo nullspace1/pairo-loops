@@ -7,7 +7,7 @@ from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import Input, Select
+from textual.widgets import Select
 
 from pairo.core.agent import SessionIdentifier
 from pairo.core.clients import Agent
@@ -18,6 +18,7 @@ from ..transcribers import TranscriberRegistry
 from ..session_repository import SessionNotFoundError, SessionRepository
 from ..transcript_service import TranscriptService
 from .agent_sidebar import AgentSidebar
+from .chat_editor import ChatEditor
 from .sidebar_statistics import SidebarStatistics
 from .transcript import Transcript
 
@@ -77,7 +78,7 @@ class AgentChatPane(Vertical):
                     classes="transcript",
                 )
                 with Horizontal(classes="chat-input-container"):
-                    yield Input(
+                    yield ChatEditor(
                         placeholder="Message this agent or enter /help",
                         classes="chat-input",
                     )
@@ -116,8 +117,8 @@ class AgentChatPane(Vertical):
                 self.post_message(self.DetailLevelChanged(level))
 
     @property
-    def input(self) -> Input:
-        return self.query_one(Input)
+    def input(self) -> ChatEditor:
+        return self.query_one(ChatEditor)
 
     @property
     def transcript(self) -> Transcript:
@@ -130,24 +131,20 @@ class AgentChatPane(Vertical):
     async def add_entry(self, session_name: str, entry: TranscriptEntry[TranscriptMetadata]) -> None:
         if session_name == self.session_name:
             await self.transcript.add_entry(entry)
-        await self.sidebar.refresh_data()
 
     async def update_entry(self, session_name: str, entry: TranscriptEntry[TranscriptMetadata]) -> None:
         if session_name == self.session_name:
             await self.transcript.update_entry(entry)
-        await self.sidebar.refresh_data()
 
     async def delete_entry(self, session_name: str, entry_id: UUID) -> None:
         if session_name == self.session_name:
             await self.transcript.delete_entry(entry_id)
-        await self.sidebar.refresh_data()
 
     async def select_session(self, session_name: str) -> None:
         self.session_name = session_name
         entries = await self._repository.entries_for(self.agent_id, session_name)
         self.transcript.set_session(session_name)
         await self.transcript.replace_entries(entries)
-        await self.sidebar.refresh_data()
 
     async def set_detail_level(self, detail_level: EventDetailLevel) -> None:
         self._detail_level = detail_level
