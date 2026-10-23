@@ -192,22 +192,6 @@ class AgentChatApp(App[None]):
     async def receive_session_created(self, event: SessionCreated) -> None:
         await self._receive_session_created(event)
 
-    @on_pairo(SessionDeleted)
-    async def receive_session_deleted(self, event: SessionDeleted) -> None:
-        await self._receive_session_deleted(event)
-
-    @on_pairo(TranscriptEntryAdded)
-    async def receive_transcript_entry_added(self, event: TranscriptEntryAdded) -> None:
-        await self._receive_transcript_entry_added(event)
-
-    @on_pairo(TranscriptEntryUpdated)
-    async def receive_transcript_entry_updated(self, event: TranscriptEntryUpdated) -> None:
-        await self._receive_transcript_entry_updated(event)
-
-    @on_pairo(TranscriptEntryDeleted)
-    async def receive_transcript_entry_deleted(self, event: TranscriptEntryDeleted) -> None:
-        await self._receive_transcript_entry_deleted(event)
-
     async def _receive_session_created(
         self,
         event: SessionCreated,
@@ -230,6 +214,10 @@ class AgentChatApp(App[None]):
                 except NoMatches:
                     return
 
+    @on_pairo(SessionDeleted)
+    async def receive_session_deleted(self, event: SessionDeleted) -> None:
+        await self._receive_session_deleted(event)
+
     async def _receive_session_deleted(
         self,
         event: SessionDeleted,
@@ -239,6 +227,7 @@ class AgentChatApp(App[None]):
         if pane is not None:
             await pane.select_session(event.selected_session_name)
 
+    @on_pairo(TranscriptEntryAdded)
     async def _receive_transcript_entry_added(
         self,
         event: TranscriptEntryAdded,
@@ -251,6 +240,7 @@ class AgentChatApp(App[None]):
                 # Event delivery can race with application teardown.
                 return
 
+    @on_pairo(TranscriptEntryUpdated)
     async def _receive_transcript_entry_updated(
         self,
         event: TranscriptEntryUpdated,
@@ -262,6 +252,7 @@ class AgentChatApp(App[None]):
             except NoMatches:
                 return
 
+    @on_pairo(TranscriptEntryDeleted)
     async def _receive_transcript_entry_deleted(
         self,
         event: TranscriptEntryDeleted,

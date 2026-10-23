@@ -14,8 +14,8 @@ from pairo.core.events import (
     ClientMcpToolCallProgress,
 )
 from pairo.ui.transcribers import (
-    CommandExecutionCompletedTranscriber,
-    McpToolCallCompletedTranscriber,
+    CommandExecutionTranscriber,
+    McpToolCallTranscriber,
     default_transcribers,
 )
 
@@ -75,7 +75,7 @@ def test_command_summary_renders_human_outcome_and_optional_details(
         agent_id=AGENT_ID, session_name="main", activity_id="command", command="pytest -q",
         status=status, exit_code=exit_code,
     )
-    entry = CommandExecutionCompletedTranscriber().write(event).entry
+    entry = CommandExecutionTranscriber().write_completion(event).entry
 
     assert entry.content.startswith(f"Command — {expected_outcome}")
     assert "Working directory: Not provided" in entry.content
@@ -88,7 +88,7 @@ def test_mcp_summary_renders_failure_and_preserves_optional_error_data() -> None
         agent_id=AGENT_ID, session_name="main", activity_id="call", server="tools",
         tool="inspect", arguments={"path": "README.md"}, status="failed", error="Not found",
     )
-    entry = McpToolCallCompletedTranscriber().write(event).entry
+    entry = McpToolCallTranscriber().write_completion(event).entry
 
     assert entry.content.startswith("MCP tools / inspect — Failed: Not found")
     assert '"Arguments": {' in entry.content
@@ -102,7 +102,7 @@ def test_mcp_summary_handles_absent_optional_values() -> None:
         agent_id=AGENT_ID, session_name="main", activity_id="call", server="tools",
         tool="inspect", arguments=None, status="completed",
     )
-    entry = McpToolCallCompletedTranscriber().write(event).entry
+    entry = McpToolCallTranscriber().write_completion(event).entry
 
     assert entry.content.startswith("MCP tools / inspect — Completed successfully")
     assert '"Arguments": null' in entry.content

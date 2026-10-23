@@ -13,7 +13,7 @@ from textual.widget import Widget
 
 from ..models import TranscriptEntry, TranscriptMetadata
 from ..pairo_event_piper import PairoEvent
-from ..session_repository import SessionRepository
+from ..session_repository import SessionNotFoundError, SessionRepository
 from ..transcript_events import TranscriptEntryAdded, TranscriptEntryDeleted, TranscriptEntryUpdated
 from .routed_transcript_entry import RoutedTranscriptEntry
 from .transcript_render_context import TranscriptRenderContext
@@ -34,9 +34,13 @@ class TranscriptMutations:
         self._repository = repository
         self._pipeline = pipeline
 
-    async def add(self, routed: RoutedTranscriptEntry[MetadataT]) -> None:
-        await self._repository.add_entry(routed.agent_id, routed.session_name, routed.entry)
+    async def add(self, routed: RoutedTranscriptEntry[MetadataT]) -> bool:
+        try:
+            await self._repository.add_entry(routed.agent_id, routed.session_name, routed.entry)
+        except SessionNotFoundError:
+            return False
         cast(object, self._pipeline).push(TranscriptEntryAdded(agent_id=routed.agent_id, session_name=routed.session_name, entry=routed.entry))  # type: ignore[attr-defined]
+        return True
 
     async def update(self, routed: RoutedTranscriptEntry[MetadataT]) -> None:
         await self._repository.update_entry(routed.agent_id, routed.session_name, routed.entry)
@@ -116,11 +120,32 @@ class _RegisteredTranscriber(Generic[EventT, MetadataT]):
     def render_transcript(self, transcript: TranscriptEntry[TranscriptMetadata], context: TranscriptRenderContext) -> Widget: return self._transcriber.render(cast(TranscriptEntry[MetadataT], transcript), context)
 
 
+class _CompletedTranscriptRenderer(Protocol):
+    def render_completed(
+        self,
+        transcript: TranscriptEntry[TranscriptMetadata],
+        context: TranscriptRenderContext,
+    ) -> Widget: ...
+
+
+class _RegisteredCompletedRenderer:
+    def __init__(self, transcriber: _CompletedTranscriptRenderer) -> None:
+        self._transcriber = transcriber
+
+    def render_transcript(
+        self,
+        transcript: TranscriptEntry[TranscriptMetadata],
+        context: TranscriptRenderContext,
+    ) -> Widget:
+        return self._transcriber.render_completed(transcript, context)
+
+
 class TranscriberRegistry:
     def __init__(self) -> None:
         self._event_transcribers: dict[type[BaseModel], EventTranscriber] = {}
         self._transcript_transcribers: dict[str, TranscriptTranscriber] = {}
         self._pumps: list[Transcriber[BaseModel, TranscriptMetadata]] = []
+        self._observed_event_types: set[type[BaseModel]] = set()
         self._started = False
         self._mutation_publisher: TranscriptMutations | None = None
 
@@ -138,6 +163,22 @@ class TranscriberRegistry:
         if transcriber.transcript_type in self._transcript_transcribers: raise ValueError(f"Multiple transcribers registered for transcript type '{transcriber.transcript_type}'.")
         self._transcript_transcribers[transcriber.transcript_type] = transcriber
 
+    def register_completed_renderer(
+        self, transcript_type: str, transcriber: _CompletedTranscriptRenderer
+    ) -> None:
+        """Use a state owner's terminal-state renderer for a second transcript type."""
+        if transcript_type in self._transcript_transcribers:
+            raise ValueError(
+                f"Multiple transcribers registered for transcript type '{transcript_type}'."
+            )
+        self._transcript_transcribers[transcript_type] = _RegisteredCompletedRenderer(
+            transcriber
+        )
+
+    def register_observed_event(self, event_type: type[BaseModel]) -> None:
+        """Declare an event consumed from the broadcast by a state owner."""
+        self._observed_event_types.add(event_type)
+
     async def start(self, repository: SessionRepository, pipeline: object, parent: MessagePump) -> None:
         if self._started: return
         mutations = TranscriptMutations(repository, pipeline)
@@ -154,7 +195,8 @@ class TranscriberRegistry:
     @property
     def mutations(self) -> TranscriptMutations | None: return self._mutation_publisher
     @property
-    def event_types(self) -> tuple[type[BaseModel], ...]: return tuple(self._event_transcribers)
+    def event_types(self) -> tuple[type[BaseModel], ...]:
+        return tuple(self._event_transcribers) + tuple(self._observed_event_types)
     def has_event_transcriber(self, event: BaseModel) -> bool: return type(event) in self._event_transcribers
     def deliver(self, event: BaseModel) -> None:
         """Broadcast raw events to always-active state owners."""

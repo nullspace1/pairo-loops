@@ -17,7 +17,7 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-class PairoEvent(Message):
+class PairoEvent(Message, bubble=False):
     """A provider-neutral model delivered through Textual's message loop."""
 
     def __init__(self, event: BaseModel) -> None:
