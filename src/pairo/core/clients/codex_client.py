@@ -14,17 +14,20 @@ from threading import Lock
 from typing import Literal, cast
 
 from openai_codex.async_client import AsyncCodexClient
+from openai_codex._goal import _GoalOperationState
 from openai_codex.client import ApprovalHandler, CodexClient
 from openai_codex.generated.v2_all import (
     AgentMessageDeltaNotification,
     ApprovalsReviewer,
     AskForApproval,
     CommandExecutionOutputDeltaNotification,
+    CommandExecutionThreadItem,
     ContextCompactedNotification,
     FileChangeOutputDeltaNotification,
     ItemCompletedNotification,
     ItemStartedNotification,
     McpToolCallProgressNotification,
+    McpToolCallThreadItem,
     PlanDeltaNotification,
     ReasoningSummaryTextDeltaNotification,
     ReasoningTextDeltaNotification,
@@ -48,18 +51,23 @@ from pairo.core.agent.sandbox_permission import SandboxPermission
 from pairo.core.agent.session_identifier import SessionIdentifier
 from pairo.core.events import (
     AgentError,
-    ClientActivityCompleted,
-    ClientActivityProgress,
     ClientActivityStarted,
+    ClientCommandExecutionCompleted,
+    ClientCommandExecutionProgress,
     ClientEvent,
     ClientPlanDelta,
+    ClientMcpToolCallCompleted,
+    ClientMcpToolCallProgress,
     ClientReasoningDelta,
     ClientResponseCompleted,
     ClientResponseInterrupted,
     ClientTextDelta,
     ClientTokenUsageUpdated,
+    ClientUnsupportedActivity,
+    CommandExecutionCompletionStatus,
     EventPipeline,
     MessageSent,
+    McpToolCallCompletionStatus,
     SessionCompacted,
     SessionCreated,
     SessionUpdated,
@@ -100,6 +108,8 @@ class _PermissionContext:
 
 class CodexAgent:
     """Own one configured Codex agent and its currently active conversation."""
+
+    _COMPACTION_TIMEOUT_SECONDS = 30.0
 
     def __init__(
         self,
@@ -262,8 +272,20 @@ class CodexAgent:
                 await self._ensure_client()
                 self._status = AgentStatus.COMPACTING
                 self._compaction_task = asyncio.current_task()
-            await self._client.thread_compact(active.identifier.thread_id)
-            await self._wait_for_compaction(active.identifier.thread_id)
+            operation = self._client.register_goal_operation(active.identifier.thread_id)
+            try:
+                await self._client.thread_compact(active.identifier.thread_id)
+                try:
+                    await asyncio.wait_for(
+                        self._wait_for_compaction(operation, active.identifier.thread_id),
+                        timeout=self._COMPACTION_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError as error:
+                    raise RuntimeError(
+                        "Compaction timed out before the provider confirmed completion."
+                    ) from error
+            finally:
+                self._client.unregister_goal_operation(operation)
         except Exception as error:
             session_name = (
                 self._active_session.name
@@ -311,9 +333,13 @@ class CodexAgent:
             with suppress(asyncio.CancelledError, Exception):
                 await task
 
-    async def _wait_for_compaction(self, thread_id: str) -> None:
+    async def _wait_for_compaction(
+        self,
+        operation: _GoalOperationState,
+        thread_id: str,
+    ) -> None:
         while True:
-            notification = await self._client.next_notification()
+            notification = await self._client.next_goal_notification(operation)
             if notification.method != "thread/compacted":
                 continue
             payload = cast(ContextCompactedNotification, notification.payload)
@@ -411,23 +437,54 @@ class CodexAgent:
         if isinstance(payload, ItemStartedNotification):
             return ClientActivityStarted(activity=self._dump(payload.item))
         if isinstance(payload, ItemCompletedNotification):
-            return ClientActivityCompleted(activity=self._dump(payload.item))
+            return self._completed_activity(payload.item)
         if isinstance(
             payload,
-            (
-                CommandExecutionOutputDeltaNotification,
-                FileChangeOutputDeltaNotification,
-                McpToolCallProgressNotification,
-            ),
+            CommandExecutionOutputDeltaNotification,
         ):
-            return ClientActivityProgress(activity=self._dump(payload))
+            return ClientCommandExecutionProgress(
+                activity_id=payload.item_id, output_delta=payload.delta
+            )
+        if isinstance(payload, McpToolCallProgressNotification):
+            return ClientMcpToolCallProgress(
+                activity_id=payload.item_id, message=payload.message
+            )
+        if isinstance(payload, FileChangeOutputDeltaNotification):
+            return ClientUnsupportedActivity(description="Unsupported file-change progress")
         if isinstance(payload, TurnCompletedNotification):
             if payload.turn.status is TurnStatus.interrupted:
                 return ClientResponseInterrupted()
             return ClientResponseCompleted(
                 message=await self._read_final_response(identifier.thread_id)
             )
-        return ClientActivityProgress(activity=self._dump(payload))
+        return ClientUnsupportedActivity(description="Unsupported Codex notification")
+
+    def _completed_activity(self, item: object) -> ClientEvent:
+        """Translate only SDK item families with an intentional typed UI contract."""
+        root = getattr(item, "root", item)
+        if isinstance(root, CommandExecutionThreadItem):
+            return ClientCommandExecutionCompleted(
+                activity_id=root.id,
+                command=root.command,
+                cwd=str(root.cwd) if root.cwd is not None else None,
+                status=cast(CommandExecutionCompletionStatus, root.status.value),
+                exit_code=root.exit_code,
+                output=root.aggregated_output,
+            )
+        if isinstance(root, McpToolCallThreadItem):
+            error = None if root.error is None else root.error.message
+            return ClientMcpToolCallCompleted(
+                activity_id=root.id,
+                server=root.server,
+                tool=root.tool,
+                arguments=self._json_value(root.arguments),
+                status=cast(McpToolCallCompletionStatus, root.status.value),
+                result=(
+                    None if root.result is None else self._json_value(root.result)
+                ),
+                error=error,
+            )
+        return ClientUnsupportedActivity(description="Unsupported completed Codex activity")
 
     async def _read_final_response(self, thread_id: str) -> str:
         response = await self._client.thread_read(thread_id, include_turns=True)
@@ -592,11 +649,15 @@ class CodexAgent:
 
     # invariant: boundary-exception[external-sdk] -- generated notification payloads expose heterogeneous runtime models
     def _dump(self, value: object) -> JsonObject:
-        serialized = json.dumps(value, default=self._json_default)
-        dumped = json.loads(serialized)
+        dumped = self._json_value(value)
         if isinstance(dumped, dict):
             return cast(JsonObject, dumped)
-        return {"value": cast(JsonValue, dumped)}
+        return {"value": dumped}
+
+    # invariant: boundary-exception[external-sdk] -- generated SDK values must cross the event boundary as JSON
+    def _json_value(self, value: object) -> JsonValue:
+        serialized = json.dumps(value, default=self._json_default)
+        return cast(JsonValue, json.loads(serialized))
 
     # invariant: boundary-exception[external-sdk] -- json serialization receives unconstrained generated SDK values
     def _json_default(self, value: object) -> object:

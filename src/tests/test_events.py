@@ -1,4 +1,4 @@
-"""Tests for principal-loop subscription event delivery."""
+﻿"""Tests for principal-loop subscription event delivery."""
 
 import asyncio
 from collections.abc import Coroutine
@@ -13,6 +13,8 @@ from pairo.core.events import (
     AgentActivityCompleted,
     AgentActivityProgress,
     AgentActivityStarted,
+    AgentCommandExecutionCompleted,
+    AgentCommandExecutionProgress,
     AgentPlanDelta,
     AgentReasoningDelta,
     AgentResponseCompleted,
@@ -22,6 +24,8 @@ from pairo.core.events import (
     ClientActivityCompleted,
     ClientActivityProgress,
     ClientActivityStarted,
+    ClientCommandExecutionCompleted,
+    ClientCommandExecutionProgress,
     ClientEvent,
     ClientPlanDelta,
     ClientReasoningDelta,
@@ -90,8 +94,8 @@ def test_every_client_event_has_a_concrete_routed_event() -> None:
         (ClientPlanDelta(text="plan"), AgentPlanDelta),
         (ClientReasoningDelta(text="reason"), AgentReasoningDelta),
         (ClientActivityStarted(activity={"type": "command"}), AgentActivityStarted),
-        (ClientActivityProgress(activity={"progress": 1}), AgentActivityProgress),
-        (ClientActivityCompleted(activity={"result": "ok"}), AgentActivityCompleted),
+        (ClientCommandExecutionProgress(activity_id="command", output_delta="progress"), AgentCommandExecutionProgress),
+        (ClientCommandExecutionCompleted(activity_id="command", command="pytest", status="completed"), AgentCommandExecutionCompleted),
         (ClientResponseCompleted(message="done"), AgentResponseCompleted),
         (ClientResponseInterrupted(), AgentResponseInterrupted),
         (

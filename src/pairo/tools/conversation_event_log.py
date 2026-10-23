@@ -47,7 +47,8 @@ class CoalescingEventLogPolicy:
         }
 
     def accept(self, event: BaseModel) -> tuple[BaseModel, ...]:
-        handler = self._handlers.get(type(event), self._pass_through)
+        handler = next((handler for event_type, handler in self._handlers.items()
+                        if isinstance(event, event_type)), self._pass_through)
         return handler(event)
 
     def drain(self) -> tuple[BaseModel, ...]:
@@ -76,16 +77,7 @@ class CoalescingEventLogPolicy:
         return (event,)
 
     def _key(self, event: AgentActivityProgress) -> tuple[UUID, str, str]:
-        identity_fields = ("id", "itemId", "turnId", "threadId", "type")
-        activity_id = next(
-            (
-                str(event.activity[field])
-                for field in identity_fields
-                if field in event.activity
-            ),
-            "activity",
-        )
-        return event.agent_id, event.session_name, activity_id
+        return event.agent_id, event.session_name, event.activity_id
 
 
 class ConversationEventLog:

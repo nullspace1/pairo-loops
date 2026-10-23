@@ -2,7 +2,8 @@
 
 from rich.text import Text
 from textual import events
-from textual.containers import VerticalScroll
+from textual.app import ComposeResult
+from textual.containers import VerticalGroup, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Static
 from typing import TypeVar
@@ -36,16 +37,35 @@ class TranscriptMessage(VerticalScroll):
         event.stop()
 
 
+class SourceHeading(Static):
+    """A human-readable durable transcript source, never a routing identifier."""
+
+    def __init__(self, transcript: TranscriptEntry[MetadataT], context: TranscriptRenderContext) -> None:
+        source = transcript.role.strip()
+        labels = {"": "System", "activity": context.agent_name, "agent": context.agent_name,
+                  "permission": context.agent_name, "usage": context.agent_name,
+                  "system": "System", "user": "User", "network": "Network"}
+        super().__init__(labels.get(source, source), classes="transcript-source")
+
+
+class SourcedTranscript(VerticalGroup):
+    """Reusable source heading plus arbitrary transcript presentation."""
+
+    def __init__(self, transcript: TranscriptEntry[MetadataT], context: TranscriptRenderContext, content: Widget) -> None:
+        super().__init__(classes="sourced-transcript")
+        self._transcript = transcript
+        self._render_context = context
+        self._content = content
+
+    def compose(self) -> ComposeResult:
+        yield SourceHeading(self._transcript, self._render_context)
+        yield self._content
+
+
 def render_text_transcript(
     transcript: TranscriptEntry[MetadataT],
     context: TranscriptRenderContext,
 ) -> Widget:
-    del context
-    label = Text(
-        f"{transcript.role.upper()}  ",
-        style=_ROLE_STYLES.get(transcript.role, "bold"),
-    )
-    return TranscriptMessage(
-        Static(Text.assemble(label, transcript.content), markup=False)
-    )
+    label = Text(transcript.content, style=_ROLE_STYLES.get(transcript.role, ""))
+    return SourcedTranscript(transcript, context, TranscriptMessage(Static(label, markup=False)))
 

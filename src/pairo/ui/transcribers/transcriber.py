@@ -10,9 +10,13 @@ from textual.widget import Widget
 
 from ..models import (
     ActivityTranscriptMetadata,
+    CommandExecutionProgressTranscriptMetadata,
+    CommandExecutionTranscriptMetadata,
     ErrorTranscriptMetadata,
     HistoricalTranscriptMetadata,
     MessageTranscriptMetadata,
+    McpToolCallTranscriptMetadata,
+    McpToolCallProgressTranscriptMetadata,
     NetworkTranscriptMetadata,
     PermissionRequestTranscriptMetadata,
     PermissionResponseTranscriptMetadata,
@@ -31,9 +35,13 @@ EventT = TypeVar("EventT", bound=BaseModel)
 # union preserves every supported shape when that heterogeneity is routed.
 TranscriptMetadata: TypeAlias = (
     ActivityTranscriptMetadata
+    | CommandExecutionTranscriptMetadata
+    | CommandExecutionProgressTranscriptMetadata
     | ErrorTranscriptMetadata
     | HistoricalTranscriptMetadata
     | MessageTranscriptMetadata
+    | McpToolCallTranscriptMetadata
+    | McpToolCallProgressTranscriptMetadata
     | NetworkTranscriptMetadata
     | PermissionRequestTranscriptMetadata
     | PermissionResponseTranscriptMetadata

@@ -75,6 +75,7 @@ class AgentChatPane(Vertical):
                     self._transcript_service,
                     self._transcribers,
                     self._detail_level,
+                    agent_name=self.agent.configuration().name,
                     classes="transcript",
                 )
                 with Horizontal(classes="chat-input-container"):

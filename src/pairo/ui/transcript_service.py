@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pairo.core.events import EventPipeline
 
+from .activity_terminalization import ActivityTerminalOutcome, PendingActivityTerminalizer
 from .models import TranscriptEntry, TranscriptMetadata
 from .session_repository import SessionRepository
 from .transcript_events import (
@@ -53,6 +54,40 @@ class TranscriptService:
                 entry=entry,
             )
         )
+
+    async def upsert(
+        self,
+        agent_id: UUID,
+        session_name: str,
+        entry: TranscriptEntry[TranscriptMetadata],
+    ) -> None:
+        """Atomically persist a correlated activity and publish its real mutation."""
+        created = await self._repository.upsert_entry(agent_id, session_name, entry)
+        event = TranscriptEntryAdded if created else TranscriptEntryUpdated
+        self._event_pipeline.push(event(
+            agent_id=agent_id,
+            session_name=session_name,
+            entry=entry,
+        ))
+
+    async def terminalize_pending_activities(
+        self,
+        agent_id: UUID,
+        session_name: str,
+        outcome: ActivityTerminalOutcome,
+    ) -> None:
+        """Commit all matching terminal cards before publishing any updates."""
+        entries = await self._repository.terminalize_pending_activities(
+            agent_id, session_name, PendingActivityTerminalizer(outcome)
+        )
+        for entry in entries:
+            self._event_pipeline.push(
+                TranscriptEntryUpdated(
+                    agent_id=agent_id,
+                    session_name=session_name,
+                    entry=entry,
+                )
+            )
 
     async def delete(
         self,

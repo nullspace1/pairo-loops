@@ -30,6 +30,7 @@ from ..models import (
 from ..permissions import build_permission_response
 from ..presentation import permission_request_history_content
 from .routed_transcript_entry import RoutedTranscriptEntry
+from .text_transcript import SourcedTranscript
 from .transcriber import Transcriber
 from .transcript_render_context import TranscriptRenderContext
 
@@ -266,13 +267,13 @@ class PermissionRequestTranscriber(
         async def answer(decision: str, card: PermissionRequestCard) -> None:
             await self._answer(transcript, context, request, decision, card)
 
-        return PermissionRequestCard(
+        return SourcedTranscript(transcript, context, PermissionRequestCard(
             transcript,
             request,
             answer,
             self.decision_label,
             classes="permission-card",
-        )
+        ))
 
     async def _answer(
         self,

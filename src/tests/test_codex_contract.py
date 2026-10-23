@@ -1,11 +1,19 @@
-"""Focused contracts for the asynchronous Codex agent adapter."""
+﻿"""Focused contracts for the asynchronous Codex agent adapter."""
 
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from openai_codex.generated.v2_all import ContextCompactedNotification
+from openai_codex.generated.v2_all import (
+    ContextCompactedNotification,
+    CommandExecutionStatus,
+    CommandExecutionThreadItem,
+    McpToolCallResult,
+    McpToolCallError,
+    McpToolCallStatus,
+    McpToolCallThreadItem,
+)
 from pydantic import BaseModel
 
 from pairo.core.agent import (
@@ -24,6 +32,8 @@ from pairo.core.clients.codex_client import (
 )
 from pairo.core.events import (
     AgentError,
+    ClientMcpToolCallCompleted,
+    ClientCommandExecutionCompleted,
     ClientTokenUsageUpdated,
     EventPipeline,
     MessageSent,
@@ -41,6 +51,8 @@ class FakeAsyncCodexClient:
         self.compacted: list[str] = []
         self.notifications: asyncio.Queue[SimpleNamespace] = asyncio.Queue()
         self.compact_error: RuntimeError | None = None
+        self.compaction_operations: list[SimpleNamespace] = []
+        self.compaction_route_active_when_started = False
 
     async def start(self) -> None:
         self.started += 1
@@ -55,11 +67,23 @@ class FakeAsyncCodexClient:
         return SimpleNamespace(thread=SimpleNamespace(id="thread-1"))
 
     async def thread_compact(self, thread_id: str) -> None:
+        self.compaction_route_active_when_started = bool(self.compaction_operations)
         if self.compact_error is not None:
             raise self.compact_error
         self.compacted.append(thread_id)
 
     async def next_notification(self):
+        return await self.notifications.get()
+
+    def register_goal_operation(self, thread_id: str) -> SimpleNamespace:
+        operation = SimpleNamespace(thread_id=thread_id)
+        self.compaction_operations.append(operation)
+        return operation
+
+    def unregister_goal_operation(self, operation: SimpleNamespace) -> None:
+        self.compaction_operations.remove(operation)
+
+    async def next_goal_notification(self, _operation: SimpleNamespace):
         return await self.notifications.get()
 
 
@@ -70,6 +94,95 @@ def configuration(tmp_path: Path) -> AgentConfiguration:
         workspace=tmp_path,
         model="test",
     )
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (CommandExecutionStatus.in_progress, "inProgress"),
+        (CommandExecutionStatus.completed, "completed"),
+        (CommandExecutionStatus.failed, "failed"),
+        (CommandExecutionStatus.declined, "declined"),
+    ],
+)
+def test_command_completion_uses_sdk_wire_status(
+    tmp_path: Path, status: CommandExecutionStatus, expected: str
+) -> None:
+    async def scenario() -> None:
+        agent = CodexAgent(configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient())
+        event = agent._completed_activity(CommandExecutionThreadItem(
+            id="command-1", type="commandExecution", command="pytest", cwd="C:/work",
+            status=status, commandActions=[], exitCode=1, aggregatedOutput="failure output",
+        ))
+
+        assert isinstance(event, ClientCommandExecutionCompleted)
+        assert event.status == expected
+        assert event.exit_code == 1
+        assert event.output == "failure output"
+        assert "CommandExecutionStatus" not in event.model_dump_json()
+        await agent.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (McpToolCallStatus.in_progress, "inProgress"),
+        (McpToolCallStatus.completed, "completed"),
+        (McpToolCallStatus.failed, "failed"),
+    ],
+)
+def test_mcp_completion_uses_sdk_wire_status(
+    tmp_path: Path, status: McpToolCallStatus, expected: str
+) -> None:
+    async def scenario() -> None:
+        agent = CodexAgent(configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient())
+        event = agent._completed_activity(McpToolCallThreadItem(
+            id="call-1", type="mcpToolCall", server="tools", tool="inspect",
+            arguments={"path": "README.md"}, status=status,
+            error=McpToolCallError(message="Provider unavailable"),
+        ))
+
+        assert isinstance(event, ClientMcpToolCallCompleted)
+        assert event.status == expected
+        assert event.arguments == {"path": "README.md"}
+        assert event.error == "Provider unavailable"
+        assert "McpToolCallStatus" not in event.model_dump_json()
+        await agent.close()
+
+    asyncio.run(scenario())
+
+
+def test_mcp_completion_serializes_sdk_result_to_json(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        agent = CodexAgent(
+            configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient()
+        )
+        item = McpToolCallThreadItem(
+            id="call-1",
+            type="mcpToolCall",
+            server="spec-manager",
+            tool="get_assignment",
+            arguments={"include_history": True},
+            status=McpToolCallStatus.completed,
+            result=McpToolCallResult(
+                content=[{"type": "text", "text": "ready"}],
+                structuredContent={"status": "idle", "task": None},
+            ),
+        )
+
+        event = agent._completed_activity(item)
+
+        assert isinstance(event, ClientMcpToolCallCompleted)
+        assert event.arguments == {"include_history": True}
+        assert event.result == {
+            "content": [{"type": "text", "text": "ready"}],
+            "structuredContent": {"status": "idle", "task": None},
+        }
+        await agent.close()
+
+    asyncio.run(scenario())
 
 
 def test_codex_configuration_maps_reasoning_search_permissions_and_hooks(
@@ -210,6 +323,8 @@ def test_client_initialization_and_compaction_are_awaited_once(tmp_path: Path) -
         assert client.started == 1
         assert client.initialized == 1
         assert client.compacted == [active.identifier.thread_id]
+        assert client.compaction_route_active_when_started
+        assert client.compaction_operations == []
         assert agent.status() is AgentStatus.IDLE
         assert isinstance(await compacted, SessionCompacted)
 
@@ -289,6 +404,24 @@ def test_compaction_failure_restores_idle_and_publishes_error(tmp_path: Path) ->
 
         assert agent.status() is AgentStatus.IDLE
         assert (await error_waiter).message == "compact failed"
+        await agent.close()
+
+    asyncio.run(scenario())
+
+
+def test_compaction_timeout_restores_idle_and_releases_route(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        client = FakeAsyncCodexClient()
+        agent = CodexAgent(configuration(tmp_path), pipeline, client)
+        agent._COMPACTION_TIMEOUT_SECONDS = 0.01
+        await agent.new_session("Conversation 1")
+
+        with pytest.raises(RuntimeError, match="Compaction timed out"):
+            await agent.compact()
+
+        assert agent.status() is AgentStatus.IDLE
+        assert client.compaction_operations == []
         await agent.close()
 
     asyncio.run(scenario())

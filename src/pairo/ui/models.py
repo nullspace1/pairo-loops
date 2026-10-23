@@ -41,6 +41,26 @@ class ActivityTranscriptMetadata(TypedDict):
     activity_type: str
 
 
+class CommandExecutionTranscriptMetadata(TypedDict):
+    type: Literal["command_execution"]
+
+
+class McpToolCallTranscriptMetadata(TypedDict):
+    type: Literal["mcp_tool_call"]
+
+
+class CommandExecutionProgressTranscriptMetadata(TypedDict):
+    """A bounded, live command-execution snapshot."""
+
+    type: Literal["command_execution_progress"]
+
+
+class McpToolCallProgressTranscriptMetadata(TypedDict):
+    """A bounded, live MCP tool-call snapshot."""
+
+    type: Literal["mcp_tool_call_progress"]
+
+
 class PermissionRequestTranscriptMetadata(TypedDict, total=False):
     """Durable state for a permission request transcript entry."""
 
@@ -98,7 +118,9 @@ class HistoricalTranscriptMetadata(TypedDict):
 
 TranscriptMetadata: TypeAlias = (
     MessageTranscriptMetadata | ErrorTranscriptMetadata | NetworkTranscriptMetadata
-    | ActivityTranscriptMetadata | PermissionRequestTranscriptMetadata
+    | ActivityTranscriptMetadata | CommandExecutionTranscriptMetadata
+    | McpToolCallTranscriptMetadata | CommandExecutionProgressTranscriptMetadata
+    | McpToolCallProgressTranscriptMetadata | PermissionRequestTranscriptMetadata
     | PermissionResponseTranscriptMetadata | SystemTranscriptMetadata
     | TokenUsageTranscriptMetadata | SessionTableTranscriptMetadata
     | HistoricalTranscriptMetadata

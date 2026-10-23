@@ -12,7 +12,7 @@
 | `SynchronousEventPipeline` | Cross-thread publication and blocking coroutine submission for synchronous SDK callbacks |
 | `AgentEventListeners` | Typed, optionally agent-filtered subscriptions for agent and session events |
 | `SessionRepository` | Authoritative durable session catalog and transcripts |
-| `TranscriptService` | Explicit transcript persistence followed by transient mutation notifications |
+| `TranscriptService` | Explicit transcript persistence followed by transient mutation notifications; correlated live activities atomically add or update one durable card |
 | `run_agents` | Startup, UI launch, and failure-safe resource cleanup |
 
 ## Optional tools and integrations
@@ -50,6 +50,22 @@ deltas, usage, activities, interruption, and errors are delivered as events.
 `AgentStatus` is `inactive`, `idle`, `generating`, or `compacting`. Compaction
 remains active until the provider confirms `thread/compacted`; messages are
 rejected before publication while that state is active.
+
+## Live activity transcript lifecycle
+
+Command-execution and MCP-tool progress events render concise sourced cards.
+The UI derives an opaque entry key from the routed agent, session, activity
+family, and provider activity ID; that provider ID is neither displayed nor
+stored in transcript metadata. Repeated progress atomically replaces the same
+durable entry (command cards retain only their latest delta). The corresponding
+completion replaces it with the existing expandable completed card, while a
+completion without earlier progress atomically creates that card.
+An interruption atomically converts pending cards for its exact agent/session
+to `Interrupted`; an agent error first records its error transcript and then
+converts those cards to `Stopped after error`. The terminal cards retain their
+opaque entry keys, ordering, family, and latest progress detail.
+See [Typed activity events](typed-activity-events.md#live-transcript-lifecycle)
+for the lifecycle and presentation details.
 
 Session identifiers contain durable provider identity only. A Codex turn ID is
 kept internally and may change after steering without changing the persisted

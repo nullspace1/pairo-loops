@@ -27,6 +27,7 @@ class Transcript(VerticalScroll):
         transcribers: TranscriberRegistry,
         detail_level: EventDetailLevel = EventDetailLevel.NORMAL,
         *,
+        agent_name: str = "Agent",
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -51,6 +52,7 @@ class Transcript(VerticalScroll):
         self._event_pipeline = event_pipeline
         self._transcript_service = transcript_service
         self._transcribers = transcribers
+        self._agent_name = agent_name
         self._live_entry_ids: set[UUID] = set()
         self._render_generation = 0
 
@@ -121,6 +123,7 @@ class Transcript(VerticalScroll):
             event_pipeline=self._event_pipeline,
             transcript_service=self._transcript_service,
             is_live=entry.entry_id in self._live_entry_ids,
+            agent_name=self._agent_name,
         )
         widget = (
             render_text_transcript(entry, context)
@@ -128,6 +131,8 @@ class Transcript(VerticalScroll):
             else transcriber.render_transcript(entry, context)
         )
         await self.mount(widget)
+        widget.refresh(layout=True)
+        self.refresh(layout=True)
         if scroll_after_mount:
             self._restore_viewport_after_layout(True, 0)
 

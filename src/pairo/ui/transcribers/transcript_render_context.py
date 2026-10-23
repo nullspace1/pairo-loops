@@ -15,4 +15,5 @@ class TranscriptRenderContext:
     event_pipeline: EventPipeline
     transcript_service: TranscriptService
     is_live: bool
+    agent_name: str = "Agent"
 

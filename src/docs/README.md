@@ -12,6 +12,7 @@ project guidance.
 | Which component owns agents, events, and durable sessions? | [System overview](#system-overview) |
 | What methods, lifecycle rules, and constraints are supported? | [Feature reference](feature-reference.md) |
 | How does the Codex provider map SDK activity and approvals? | [CodexAgent architecture](codex-agent.md) |
+| How do live command and MCP cards progress, and which completion statuses are stable? | [Typed activity events](typed-activity-events.md) |
 | Which checks must contributors run, and what does the invariant checker enforce? | [Quality gate](quality-gates.md) |
 
 ## System overview

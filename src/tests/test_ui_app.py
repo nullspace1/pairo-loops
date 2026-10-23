@@ -11,7 +11,7 @@ from pairo.ui.models import EventDetailLevel, TranscriptEntry
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
 from pairo.ui.widgets.agent_sidebar import AgentSidebar
 from pairo.ui.widgets.chat_editor import ChatEditor
-from textual.widgets import Button
+from textual.widgets import Button, DataTable
 
 
 def make_agent(tmp_path: Path, pipeline: EventPipeline) -> FakeAgent:
@@ -111,6 +111,37 @@ def test_sidebar_has_information_without_session_controls(tmp_path: Path) -> Non
             assert not sidebar.query(Button)
         await agent.close()
         await repository.close()
+    asyncio.run(scenario())
+
+
+def test_sessions_table_is_laid_out_without_resizing_empty_chat(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        active = await agent.new_session("Conversation 1")
+        agent_id = agent.configuration().id
+        await repository.save_session(
+            agent_id, active.name, active.identifier.model_dump(mode="json")
+        )
+        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+
+        async with app.run_test() as pilot:
+            chat = app.chats[agent_id]
+            chat.input.text = "/sessions"
+            await pilot.press("ctrl+enter")
+            for _ in range(5):
+                await pilot.pause()
+
+            table = chat.transcript.query_one(DataTable)
+            assert table.row_count == 1
+            assert table.size.height > 0
+            assert table.display
+            assert table.visible
+
+        await agent.close()
+        await repository.close()
+
     asyncio.run(scenario())
 
 

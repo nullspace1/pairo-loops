@@ -15,6 +15,10 @@ from textual.widgets import Footer, Header, TabbedContent, TabPane
 from pairo.core.agent import SessionIdentifier
 from pairo.core.clients import Agent
 from pairo.core.events import (
+    AgentActivityCompleted,
+    AgentActivityProgress,
+    AgentError,
+    AgentResponseInterrupted,
     EventCallback,
     EventPipeline,
     SessionCreated,
@@ -22,6 +26,8 @@ from pairo.core.events import (
     Subscription,
 )
 
+from .activity_progress_coordinator import ActivityProgressCoordinator
+from .activity_terminalization import ActivityTerminalOutcome
 from .commands import AgentCommandController
 from .models import (
     EventDetailLevel,
@@ -38,6 +44,7 @@ from .transcript_events import (
     TranscriptEntryUpdated,
 )
 from .transcribers import (
+    RoutedTranscriptEntry,
     TranscriberRegistry,
     default_transcribers,
 )
@@ -97,6 +104,7 @@ class AgentChatApp(App[None]):
     .permission-decision { height: auto; color: $text-muted; text-style: bold; }
     .chat-input { width: 1fr; height: 6; }
     .completed-activity { height: auto; margin: 1 0; }
+    .sourced-transcript { height: auto; }
     .session-table-message { height: auto; margin: 1 0; }
     """
     BINDINGS = [("ctrl+q", "quit", "Quit")]
@@ -120,6 +128,9 @@ class AgentChatApp(App[None]):
         self._transcript_service = TranscriptService(
             self.session_repository,
             self._event_pipeline,
+        )
+        self._progress_coordinator = ActivityProgressCoordinator(
+            self._transcript_service,
         )
         configured_transcribers = (
             default_transcribers() if transcribers is None else transcribers
@@ -171,7 +182,10 @@ class AgentChatApp(App[None]):
         self._subscribe(TranscriptEntryUpdated, self._receive_transcript_entry_updated)
         self._subscribe(TranscriptEntryDeleted, self._receive_transcript_entry_deleted)
         for event_type in self._transcribed_event_types:
-            self._subscribe(event_type, self._transcribe_event)
+            if event_type is not AgentError:
+                self._subscribe(event_type, self._transcribe_event)
+        self._subscribe(AgentResponseInterrupted, self._terminalize_interrupted)
+        self._subscribe(AgentError, self._transcribe_error_then_terminalize)
         self._subscribe(SessionCreated, self._receive_session_created)
         self._subscribe(SessionDeleted, self._receive_session_deleted)
         self._active_chat().input.focus()
@@ -179,6 +193,7 @@ class AgentChatApp(App[None]):
 
     async def on_unmount(self) -> None:
         self._stop_event_delivery()
+        await self._progress_coordinator.shutdown()
         if self._owns_repository:
             await self.session_repository.close()
 
@@ -192,14 +207,50 @@ class AgentChatApp(App[None]):
         event: BaseModel,
         _subscription: Subscription[BaseModel],
     ) -> None:
-        transcriber = self._transcribers.event_transcriber_for(event)
-        routed = transcriber.transcribe(event)
+        routed = self._transcribe(event)
         if routed.agent_id in self.chats:
-            await self._transcript_service.add(
-                routed.agent_id,
-                routed.session_name,
-                routed.entry,
+            if isinstance(event, AgentActivityProgress):
+                await self._progress_coordinator.submit_progress(routed)
+            elif isinstance(event, AgentActivityCompleted):
+                await self._progress_coordinator.complete(routed)
+            elif routed.correlated_entry_id is None:
+                await self._transcript_service.add(
+                    routed.agent_id, routed.session_name, routed.entry,
+                )
+            else:
+                await self._transcript_service.upsert(
+                    routed.agent_id, routed.session_name, routed.entry,
+                )
+
+    async def _terminalize_interrupted(
+        self,
+        event: AgentResponseInterrupted,
+        _subscription: Subscription[AgentResponseInterrupted],
+    ) -> None:
+        if event.agent_id in self.chats:
+            await self._progress_coordinator.terminalize_session(
+                event.agent_id, event.session_name, ActivityTerminalOutcome.INTERRUPTED,
             )
+
+    async def _transcribe_error_then_terminalize(
+        self,
+        event: AgentError,
+        _subscription: Subscription[AgentError],
+    ) -> None:
+        """Persist the error before finalizing cards in the same FIFO callback."""
+        if event.agent_id not in self.chats:
+            return
+        routed = self._transcribe(event)
+        await self._transcript_service.add(
+            routed.agent_id, routed.session_name, routed.entry,
+        )
+        await self._progress_coordinator.terminalize_session(
+            event.agent_id, event.session_name, ActivityTerminalOutcome.ERROR,
+        )
+
+    def _transcribe(self, event: BaseModel) -> RoutedTranscriptEntry[TranscriptMetadata]:
+        """Use the registry's typed conversion at the application boundary."""
+        return self._transcribers.event_transcriber_for(event).transcribe(event)
 
     async def _receive_session_created(
         self,
@@ -375,3 +426,4 @@ class UserInterfaceLauncher:
 
 
 run_ui = UserInterfaceLauncher()
+

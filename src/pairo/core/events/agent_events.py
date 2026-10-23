@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Literal
+from typing import Literal, TypeAlias
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from ..agent.json_object import JsonObject
+
+
+# Completion values are wire-level contracts, deliberately independent of an
+# SDK's generated enum classes.
+CommandExecutionCompletionStatus: TypeAlias = Literal[
+    "inProgress", "completed", "failed", "declined"
+]
+McpToolCallCompletionStatus: TypeAlias = Literal[
+    "inProgress", "completed", "failed"
+]
 
 
 class ClientEvent(BaseModel, ABC):
@@ -91,36 +101,22 @@ class ClientActivityStarted(ClientEvent):
         )
 
 
-class ClientActivityProgress(ClientEvent):
-    kind: Literal["activity_progress"] = "activity_progress"
-    activity: JsonObject
-
-    def to_routed_event(
-        self,
-        agent_id: UUID,
-        session_name: str,
-    ) -> AgentActivityProgress:
-        return AgentActivityProgress(
-            agent_id=agent_id,
-            session_name=session_name,
-            activity=self.activity,
-        )
+class ClientActivityProgress(ClientEvent, ABC):
+    """Common subscription type for typed activity progress events."""
 
 
-class ClientActivityCompleted(ClientEvent):
-    kind: Literal["activity_completed"] = "activity_completed"
-    activity: JsonObject
+class ClientActivityCompleted(ClientEvent, ABC):
+    """Common subscription type for typed completed activity events."""
 
-    def to_routed_event(
-        self,
-        agent_id: UUID,
-        session_name: str,
-    ) -> AgentActivityCompleted:
-        return AgentActivityCompleted(
-            agent_id=agent_id,
-            session_name=session_name,
-            activity=self.activity,
-        )
+
+class ClientUnsupportedActivity(ClientEvent):
+    """A provider activity deliberately kept out of supported UI families."""
+
+    kind: Literal["unsupported_activity"] = "unsupported_activity"
+    description: str = "Unsupported provider activity"
+
+    def to_routed_event(self, agent_id: UUID, session_name: str) -> AgentUnsupportedActivity:
+        return AgentUnsupportedActivity(agent_id=agent_id, session_name=session_name, description=self.description)
 
 
 class ClientResponseCompleted(ClientEvent):
@@ -209,12 +205,92 @@ class AgentActivityStarted(RoutedAgentEvent):
     activity: JsonObject
 
 
-class AgentActivityProgress(RoutedAgentEvent):
-    activity: JsonObject
+class AgentActivityProgress(RoutedAgentEvent, ABC):
+    """Common subscription type for typed routed activity progress events."""
 
 
-class AgentActivityCompleted(RoutedAgentEvent):
-    activity: JsonObject
+class AgentActivityCompleted(RoutedAgentEvent, ABC):
+    """Common subscription type for typed routed completed activity events."""
+
+
+class AgentUnsupportedActivity(RoutedAgentEvent):
+    """Routed unsupported provider activity; intentionally has no transcript renderer."""
+
+    description: str
+
+
+class ClientCommandExecutionProgress(ClientActivityProgress):
+    kind: Literal["command_execution_progress"] = "command_execution_progress"
+    activity_id: str
+    output_delta: str
+
+    def to_routed_event(self, agent_id: UUID, session_name: str) -> AgentCommandExecutionProgress:
+        return AgentCommandExecutionProgress(agent_id=agent_id, session_name=session_name, activity_id=self.activity_id, output_delta=self.output_delta)
+
+
+class ClientMcpToolCallProgress(ClientActivityProgress):
+    kind: Literal["mcp_tool_call_progress"] = "mcp_tool_call_progress"
+    activity_id: str
+    message: str
+
+    def to_routed_event(self, agent_id: UUID, session_name: str) -> AgentMcpToolCallProgress:
+        return AgentMcpToolCallProgress(agent_id=agent_id, session_name=session_name, activity_id=self.activity_id, message=self.message)
+
+
+class ClientCommandExecutionCompleted(ClientActivityCompleted):
+    kind: Literal["command_execution_completed"] = "command_execution_completed"
+    activity_id: str
+    command: str
+    cwd: str | None = None
+    status: CommandExecutionCompletionStatus
+    exit_code: int | None = None
+    output: str | None = None
+
+    def to_routed_event(self, agent_id: UUID, session_name: str) -> AgentCommandExecutionCompleted:
+        return AgentCommandExecutionCompleted(agent_id=agent_id, session_name=session_name, activity_id=self.activity_id, command=self.command, cwd=self.cwd, status=self.status, exit_code=self.exit_code, output=self.output)
+
+
+class ClientMcpToolCallCompleted(ClientActivityCompleted):
+    kind: Literal["mcp_tool_call_completed"] = "mcp_tool_call_completed"
+    activity_id: str
+    server: str
+    tool: str
+    arguments: JsonValue
+    status: McpToolCallCompletionStatus
+    result: JsonValue | None = None
+    error: str | None = None
+
+    def to_routed_event(self, agent_id: UUID, session_name: str) -> AgentMcpToolCallCompleted:
+        return AgentMcpToolCallCompleted(agent_id=agent_id, session_name=session_name, activity_id=self.activity_id, server=self.server, tool=self.tool, arguments=self.arguments, status=self.status, result=self.result, error=self.error)
+
+
+class AgentCommandExecutionProgress(AgentActivityProgress):
+    activity_id: str
+    output_delta: str
+
+
+class AgentMcpToolCallProgress(AgentActivityProgress):
+    activity_id: str
+    message: str
+
+
+class AgentCommandExecutionCompleted(AgentActivityCompleted):
+    activity_id: str
+    command: str
+    cwd: str | None = None
+    status: CommandExecutionCompletionStatus
+    exit_code: int | None = None
+    output: str | None = None
+
+
+class AgentMcpToolCallCompleted(AgentActivityCompleted):
+    activity_id: str
+    server: str
+    tool: str
+    arguments: JsonValue
+    status: McpToolCallCompletionStatus
+    result: JsonValue | None = None
+    error: str | None = None
 
 
 class AgentResponseCompleted(RoutedAgentEvent):
@@ -276,13 +352,20 @@ class AgentError(BaseModel):
 
 __all__ = [
     "AgentActivityCompleted", "AgentActivityProgress", "AgentActivityStarted",
+    "CommandExecutionCompletionStatus", "McpToolCallCompletionStatus",
+    "AgentCommandExecutionCompleted", "AgentCommandExecutionProgress",
+    "AgentMcpToolCallCompleted", "AgentMcpToolCallProgress",
     "AgentError", "AgentPlanDelta", "AgentReasoningDelta", "AgentResponseCompleted",
     "AgentResponseInterrupted", "AgentTextDelta", "AgentTokenUsageUpdated",
     "ClientActivityCompleted", "ClientActivityProgress",
+    "ClientCommandExecutionCompleted", "ClientCommandExecutionProgress",
+    "ClientMcpToolCallCompleted", "ClientMcpToolCallProgress",
+    "ClientUnsupportedActivity",
     "ClientActivityStarted", "ClientEvent", "ClientPlanDelta",
     "ClientReasoningDelta", "ClientResponseCompleted",
     "ClientResponseInterrupted", "ClientTextDelta", "ClientTokenUsageUpdated",
     "RoutedAgentEvent",
+    "AgentUnsupportedActivity",
     "SessionCompacted", "SessionCreated", "SessionDeleted", "SessionUpdated",
     "TokenUsage",
 ]

@@ -1,7 +1,7 @@
 """Render durable session-list transcript entries as Textual tables."""
 
 from textual.app import ComposeResult
-from textual.containers import Vertical
+from textual.containers import VerticalGroup
 from textual.widget import Widget
 from textual.widgets import DataTable, Static
 from typing import cast
@@ -13,9 +13,10 @@ from ..models import (
     TranscriptMetadata,
 )
 from .transcript_render_context import TranscriptRenderContext
+from .text_transcript import SourcedTranscript
 
 
-class SessionTableWidget(Vertical):
+class SessionTableWidget(VerticalGroup):
     """A compact, non-interactive view of the sessions known to one agent."""
 
     def __init__(self, sessions: tuple[SessionTableRow, ...]) -> None:
@@ -25,7 +26,9 @@ class SessionTableWidget(Vertical):
     def compose(self) -> ComposeResult:
         if not self._sessions:
             yield Static("No sessions recorded.", classes="empty-session-table")
+            return
         table = DataTable[str](show_row_labels=False, cursor_type="none")
+        table.styles.height = len(self._sessions) + 1
         table.add_columns("Session", "Current", "Created", "Last message", "Updated")
         for session in self._sessions:
             table.add_row(
@@ -48,6 +51,5 @@ class SessionTableTranscriber:
         transcript: TranscriptEntry[TranscriptMetadata],
         context: TranscriptRenderContext,
     ) -> Widget:
-        del context
         metadata = cast(SessionTableTranscriptMetadata, transcript.metadata)
-        return SessionTableWidget(tuple(metadata["sessions"]))
+        return SourcedTranscript(transcript, context, SessionTableWidget(tuple(metadata["sessions"])))
