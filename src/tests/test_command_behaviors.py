@@ -9,8 +9,20 @@ import pytest
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import FakeAgent
 from pairo.core.events import EventPipeline, ImageSent, SessionDeleted
-from pairo.ui.commands import AgentCommandController
+from pairo.ui.commands import AgentCommandController, CommandOutcome
+from pairo.ui import SlashCommand
+from pairo.ui.chat_commands import (
+    AgentSelectionCommand, CompactCommand, DeleteCommand, HelpCommand, ImageCommand,
+    InterruptCommand, SessionCommand, SessionsCommand,
+)
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
+
+
+def default_commands():
+    return (
+        HelpCommand(), AgentSelectionCommand(), SessionCommand(), SessionsCommand(),
+        CompactCommand(), DeleteCommand(), InterruptCommand(), ImageCommand(),
+    )
 
 
 def configured_agent(name: str, tmp_path: Path, pipeline: EventPipeline) -> FakeAgent:
@@ -43,6 +55,7 @@ def test_messages_and_basic_commands_call_agents_directly(tmp_path: Path) -> Non
             },
             pipeline,
             repository,
+            default_commands(),
         )
 
         outcome = await controller.execute(
@@ -83,7 +96,7 @@ def test_switch_and_delete_use_repository_as_the_session_catalog(tmp_path: Path)
             active.name,
             active.identifier.model_dump(mode="json"),
         )
-        controller = AgentCommandController({agent_id: agent}, pipeline, repository)
+        controller = AgentCommandController({agent_id: agent}, pipeline, repository, default_commands())
 
         created = await controller.execute(agent_id, "/session new Review")
         assert created.session_name == "Review"
@@ -113,6 +126,37 @@ def test_switch_and_delete_use_repository_as_the_session_catalog(tmp_path: Path)
         assert image.entry is not None
         assert await image_waiter == ImageSent(image_path="./diagram.png")
 
+        await agent.close()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+class DuplicateNameCommand(SlashCommand):
+    name = "/duplicate"
+
+    async def invoke(self, controller, agent_id, argument):
+        return CommandOutcome(None)
+
+
+def test_controller_rejects_duplicate_command_names_and_snapshots_input(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = configured_agent("developer", tmp_path, pipeline)
+        commands = [DuplicateNameCommand()]
+        controller = AgentCommandController(
+            {agent.configuration().id: agent}, pipeline, repository, commands
+        )
+        commands.clear()
+        assert (await controller.execute(agent.configuration().id, "/duplicate")).entry is None
+        with pytest.raises(ValueError, match="Duplicate slash command names: /duplicate"):
+            AgentCommandController(
+                {agent.configuration().id: agent},
+                pipeline,
+                repository,
+                (DuplicateNameCommand(), DuplicateNameCommand()),
+            )
         await agent.close()
         await repository.close()
 

@@ -68,13 +68,6 @@ class Transcript(VerticalScroll):
         index = self._entry_index(entry.entry_id)
         previous = self.entries[index]
         self.entries[index] = entry
-        # The permission card updates itself before publishing the durable entry.
-        # Removing the card from its active button handler can deadlock Textual.
-        if (
-            previous.metadata.get("type") == "permission_request"
-            and entry.metadata.get("type") == "permission_request"
-        ):
-            return
         await self._render_all()
 
     async def delete_entry(self, entry_id: UUID) -> None:

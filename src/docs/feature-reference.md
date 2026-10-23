@@ -209,6 +209,61 @@ and persists initial sessions concurrently, launches the UI, and closes agents
 and the repository even when startup or the UI fails. It does not bind or close
 the pipeline.
 
+## UI command composition
+
+Use `UserInterfaceConfiguration` to add a slash command without modifying
+Pairo. A command supplies its slash-prefixed `name` and implements the async
+`invoke(controller, agent_id, argument)` method. The text after the command
+name is passed as `argument` without leading or trailing whitespace.
+
+```python
+from pairo.ui import (
+    CommandOutcome,
+    EventDetailLevel,
+    SlashCommand,
+    TranscriptEntry,
+    UserInterfaceConfiguration,
+    run_ui,
+)
+
+
+class EchoCommand(SlashCommand):
+    name = "/echo"
+
+    async def invoke(self, controller, agent_id, argument):
+        return CommandOutcome(
+            TranscriptEntry(
+                "system",
+                argument or "Usage: /echo MESSAGE",
+                EventDetailLevel.NORMAL,
+                {"type": "system"},
+            )
+        )
+
+
+configuration = UserInterfaceConfiguration().add_command(EchoCommand())
+await run_ui(agents, pipeline, configuration)
+```
+
+By default, `run_ui` puts added commands after the standard `/agent`,
+`/session`, `/sessions`, `/compact`, `/delete`, `/interrupt`, `/image`, and
+`/help` commands. It also supplies the default repository, transcribers, and
+sidebar statistics. Call `without_default_commands()` when the added commands
+must be the complete command set. Names must be unique across the resulting
+set; duplicates raise `ValueError` when the UI is constructed.
+
+`AgentChatApp` is the lower-level composition boundary. Direct callers must
+supply `session_repository`, `transcribers`, `sidebar_statistics`, and the
+exact ordered `commands` sequence; it does not add defaults. The app snapshots
+the command sequence during construction, so later mutations to the source
+sequence do not change dispatch.
+
+Use `use_session_repository`, `use_transcribers`, and
+`use_sidebar_statistics` to replace launcher defaults. The launcher closes a
+repository only when it created that repository. The caller remains
+responsible for closing a supplied repository; `run_agents` performs that
+cleanup when it is the caller.
+
 ## Constraints
 
 - Python 3.10 or newer.

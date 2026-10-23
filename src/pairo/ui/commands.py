@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -21,17 +21,7 @@ class CommandOutcome:
     selected_agent: UUID | None = None
 
 
-from .chat_commands import (  # noqa: E402
-    AgentSelectionCommand,
-    CompactCommand,
-    DeleteCommand,
-    HelpCommand,
-    ImageCommand,
-    InterruptCommand,
-    SessionCommand,
-    SessionsCommand,
-    SlashCommand,
-)
+from .chat_commands.base import SlashCommand
 
 
 class AgentCommandController:
@@ -45,21 +35,22 @@ class AgentCommandController:
         agents: Mapping[UUID, Agent[SessionIdentifier]],
         event_pipeline: EventPipeline,
         session_repository: SessionRepository,
+        commands: Sequence[SlashCommand],
     ) -> None:
         self._agents = agents
         self._event_pipeline = event_pipeline
         self._session_repository = session_repository
-        self._commands: list[SlashCommand] = [
-            HelpCommand(),
-            AgentSelectionCommand(),
-            SessionCommand(),
-            SessionsCommand(),
-            CompactCommand(),
-            DeleteCommand(),
-            InterruptCommand(),
-            ImageCommand(),
-        ]
+        self._commands = tuple(commands)
+        self._validate_command_names()
         self._commands_by_name = {command.name: command for command in self._commands}
+
+    def _validate_command_names(self) -> None:
+        names = [command.name for command in self._commands]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                "Duplicate slash command names: " + ", ".join(duplicates) + "."
+            )
 
     @property
     def agents(self) -> Mapping[UUID, Agent[SessionIdentifier]]:

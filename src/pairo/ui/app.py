@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -24,7 +24,19 @@ from pairo.core.events import (
 )
 
 from .pairo_event_piper import PairoEvent, TextualEventPiper, on_pairo
+from .chat_commands import (
+    AgentSelectionCommand,
+    CompactCommand,
+    DeleteCommand,
+    HelpCommand,
+    ImageCommand,
+    InterruptCommand,
+    SessionCommand,
+    SessionsCommand,
+    SlashCommand,
+)
 from .commands import AgentCommandController
+from .configuration import UserInterfaceConfiguration
 from .models import (
     EventDetailLevel,
     SystemTranscriptMetadata,
@@ -104,10 +116,11 @@ class AgentChatApp(App[None]):
         self,
         agents: Mapping[UUID, Agent[SessionIdentifier]],
         event_pipeline: EventPipeline,
-        session_repository: SessionRepository | None = None,
+        session_repository: SessionRepository,
         *,
-        transcribers: TranscriberRegistry | None = None,
-        sidebar_statistics: SidebarStatistics | None = None,
+        transcribers: TranscriberRegistry,
+        sidebar_statistics: Mapping[UUID, SidebarStatistics],
+        commands: Sequence[SlashCommand],
     ) -> None:
         super().__init__()
         configured_agents = tuple(agents.values())
@@ -126,24 +139,22 @@ class AgentChatApp(App[None]):
             duplicates = ", ".join(sorted(duplicate_names))
             raise ValueError(f"Agent names must be unique; duplicated: {duplicates}.")
         agents_by_id = dict(agents)
+        self._validate_sidebar_statistics(agents_by_id, sidebar_statistics)
         self._agents = agents_by_id
         self._event_pipeline = event_pipeline
-        self._owns_repository = session_repository is None
-        self.session_repository = session_repository or SqliteSessionRepository()
-        configured_transcribers = (
-            default_transcribers() if transcribers is None else transcribers
-        )
-        self._transcribers = configured_transcribers
+        self.session_repository = session_repository
+        self._transcribers = transcribers
         self._detail_level = EventDetailLevel.NORMAL
-        self._sidebar_statistics = sidebar_statistics
+        self._sidebar_statistics = dict(sidebar_statistics)
         self._piper = TextualEventPiper(event_pipeline, self.post_message)
         self._subscriptions: list[object] = []
-        if self._sidebar_statistics is not None:
-            self._sidebar_statistics.setup(self._event_pipeline, agents_by_id)
+        for statistics in self._unique_sidebar_statistics():
+            statistics.setup(self._event_pipeline, agents_by_id)
         self._controller = AgentCommandController(
             agents_by_id,
             event_pipeline,
             self.session_repository,
+            commands,
         )
         self._pane_ids = {
             agent.configuration().id: f"agent-chat-{index}"
@@ -157,10 +168,7 @@ class AgentChatApp(App[None]):
                 self._event_pipeline,
                 self._transcribers,
                 self._detail_level,
-                sidebar_statistics=(
-                    self._sidebar_statistics
-                    or default_sidebar_statistics(agent)
-                ),
+                sidebar_statistics=self._sidebar_statistics[agent.configuration().id],
                 id=f"chat-content-{index}",
             )
             for index, agent in enumerate(agents_by_id.values())
@@ -206,8 +214,31 @@ class AgentChatApp(App[None]):
     async def on_unmount(self) -> None:
         self._stop_event_delivery()
         await self._transcribers.shutdown()
-        if self._owns_repository:
-            await self.session_repository.close()
+        for statistics in self._unique_sidebar_statistics():
+            statistics.teardown()
+
+    def _unique_sidebar_statistics(self) -> tuple[SidebarStatistics, ...]:
+        unique: dict[int, SidebarStatistics] = {}
+        for statistics in self._sidebar_statistics.values():
+            unique[id(statistics)] = statistics
+        return tuple(unique.values())
+
+    def _validate_sidebar_statistics(
+        self,
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        statistics: Mapping[UUID, SidebarStatistics],
+    ) -> None:
+        missing = sorted(set(agents).difference(statistics), key=str)
+        unexpected = sorted(set(statistics).difference(agents), key=str)
+        if missing or unexpected:
+            details: list[str] = []
+            if missing:
+                details.append("missing: " + ", ".join(str(agent_id) for agent_id in missing))
+            if unexpected:
+                details.append(
+                    "unexpected: " + ", ".join(str(agent_id) for agent_id in unexpected)
+                )
+            raise ValueError("Sidebar statistics must match configured agents (" + "; ".join(details) + ").")
 
     async def action_quit(self) -> None:
         self._stop_event_delivery()
@@ -376,18 +407,60 @@ class UserInterfaceLauncher:
         self,
         agents: Mapping[UUID, Agent[SessionIdentifier]],
         event_pipeline: EventPipeline,
-        session_repository: SessionRepository | None = None,
-        *,
-        transcribers: TranscriberRegistry | None = None,
-        sidebar_statistics: SidebarStatistics | None = None,
+        configuration: UserInterfaceConfiguration | SessionRepository | None = None,
     ) -> None:
-        await AgentChatApp(
-            agents,
-            event_pipeline,
-            session_repository,
-            transcribers=transcribers,
-            sidebar_statistics=sidebar_statistics,
-        ).run_async()
+        configured = self._configuration(configuration)
+        repository = configured.session_repository
+        owns_repository = repository is None
+        if repository is None:
+            repository = SqliteSessionRepository()
+        try:
+            await AgentChatApp(
+                agents,
+                event_pipeline,
+                repository,
+                transcribers=(configured.transcribers or default_transcribers()),
+                sidebar_statistics=self._sidebar_statistics(agents, configured),
+                commands=self._commands(configured),
+            ).run_async()
+        finally:
+            if owns_repository:
+                await repository.close()
+
+    def _configuration(
+        self,
+        configuration: UserInterfaceConfiguration | SessionRepository | None,
+    ) -> UserInterfaceConfiguration:
+        if isinstance(configuration, UserInterfaceConfiguration):
+            return configuration
+        return UserInterfaceConfiguration(configuration)
+
+    def _commands(
+        self, configuration: UserInterfaceConfiguration
+    ) -> tuple[SlashCommand, ...]:
+        defaults: tuple[SlashCommand, ...] = ()
+        if configuration.include_default_commands:
+            defaults = (
+                HelpCommand(), AgentSelectionCommand(), SessionCommand(),
+                SessionsCommand(), CompactCommand(), DeleteCommand(),
+                InterruptCommand(), ImageCommand(),
+            )
+        return defaults + tuple(configuration.commands)
+
+    def _sidebar_statistics(
+        self,
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        configuration: UserInterfaceConfiguration,
+    ) -> Mapping[UUID, SidebarStatistics]:
+        if configuration.sidebar_statistics is not None:
+            return {
+                agent_id: configuration.sidebar_statistics
+                for agent_id in agents
+            }
+        return {
+            agent_id: default_sidebar_statistics(agent)
+            for agent_id, agent in agents.items()
+        }
 
 
 run_ui = UserInterfaceLauncher()

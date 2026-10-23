@@ -11,7 +11,11 @@ from pairo import runtime
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import ActiveSession, AgentStatus, FakeAgent, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
-from pairo.ui.app import AgentChatApp
+from pairo.ui import CommandOutcome, SlashCommand, app as ui_app
+from pairo.ui.app import AgentChatApp, UserInterfaceLauncher
+from pairo.ui.configuration import UserInterfaceConfiguration
+from pairo.ui.transcribers import default_transcribers
+from pairo.ui.widgets.sidebar_statistics import default_sidebar_statistics
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
 
 
@@ -91,7 +95,12 @@ class QuittingTextualLauncher:
         self.returned = False
 
     async def __call__(self, agents, pipeline, repository) -> None:
-        app = AgentChatApp(agents, pipeline, repository)
+        app = AgentChatApp(
+            agents, pipeline, repository,
+            transcribers=default_transcribers(),
+            sidebar_statistics={agent_id: default_sidebar_statistics(agent) for agent_id, agent in agents.items()},
+            commands=(),
+        )
 
         async def quit_after_mount(pilot) -> None:
             await pilot.pause()
@@ -208,5 +217,64 @@ def test_run_agents_releases_resources_after_failures(
         assert "close:agent" in calls
         assert calls[-1] == "close:repository"
         assert not hasattr(pipeline, "_closed")
+
+    asyncio.run(scenario())
+
+
+class LauncherCommand(SlashCommand):
+    name = "/launcher"
+
+    async def invoke(self, controller, agent_id, argument):
+        return CommandOutcome(None)
+
+
+def test_ui_launcher_composes_default_commands_and_owns_only_its_repository(
+    monkeypatch, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        agent = TrackingFakeAgent(
+            AgentConfiguration(
+                id=uuid4(), name="agent", sandbox=SandboxPermission.READ_ONLY,
+                workspace=tmp_path, model="test",
+            ), pipeline,
+        )
+        repository = TrackingRepository()
+        observed: list[str] = []
+
+        async def fake_run_async(app):
+            outcome = await app._controller.execute(agent.configuration().id, "/help")
+            assert outcome.entry is not None
+            observed.append(outcome.entry.content)
+            assert (await app._controller.execute(agent.configuration().id, "/launcher")).entry is None
+
+        monkeypatch.setattr(AgentChatApp, "run_async", fake_run_async)
+        launcher = UserInterfaceLauncher()
+        await launcher({agent.configuration().id: agent}, pipeline, UserInterfaceConfiguration(repository).add_command(LauncherCommand()))
+        assert observed
+        assert repository.close_calls == 0
+        await repository.close()
+        await agent.close()
+
+        async def default_run_async(app):
+            outcome = await app._controller.execute(agent.configuration().id, "/help")
+            assert outcome.entry is not None
+
+        monkeypatch.setattr(AgentChatApp, "run_async", default_run_async)
+        owned_repository = TrackingRepository()
+        monkeypatch.setattr(ui_app, "SqliteSessionRepository", lambda: owned_repository)
+        await launcher({agent.configuration().id: agent}, pipeline)
+        assert owned_repository.close_calls == 1
+
+        failed_repository = TrackingRepository()
+        monkeypatch.setattr(ui_app, "SqliteSessionRepository", lambda: failed_repository)
+
+        async def failing_run_async(_app):
+            raise RuntimeError("launch failed")
+
+        monkeypatch.setattr(AgentChatApp, "run_async", failing_run_async)
+        with pytest.raises(RuntimeError, match="launch failed"):
+            await launcher({agent.configuration().id: agent}, pipeline)
+        assert failed_repository.close_calls == 1
 
     asyncio.run(scenario())

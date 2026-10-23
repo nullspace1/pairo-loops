@@ -16,7 +16,15 @@ from pairo.core.events import (
     SessionCreated,
 )
 from pairo.ui.app import AgentChatApp
-from pairo.ui.models import EventDetailLevel, TranscriptEntry
+from pairo.ui.chat_commands import (
+    AgentSelectionCommand, CompactCommand, DeleteCommand, HelpCommand, ImageCommand,
+    InterruptCommand, SessionCommand, SessionsCommand,
+)
+from pairo.ui.transcribers import default_transcribers
+from pairo.ui.widgets.sidebar_statistics import default_sidebar_statistics
+from pairo.ui.models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
+from pairo.ui import SlashCommand
+from pairo.ui.commands import CommandOutcome
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
 from pairo.ui.widgets.agent_sidebar import AgentSidebar
 from pairo.ui.widgets.chat_editor import ChatEditor
@@ -39,6 +47,18 @@ def make_agent(
     )
 
 
+def configured_app(agents, pipeline, repository) -> AgentChatApp:
+    return AgentChatApp(
+        agents, pipeline, repository,
+        transcribers=default_transcribers(),
+        sidebar_statistics={agent_id: default_sidebar_statistics(agent) for agent_id, agent in agents.items()},
+        commands=(
+            HelpCommand(), AgentSelectionCommand(), SessionCommand(), SessionsCommand(),
+            CompactCommand(), DeleteCommand(), InterruptCommand(), ImageCommand(),
+        ),
+    )
+
+
 def test_app_initializes_from_active_agent_and_repository(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
@@ -51,7 +71,7 @@ def test_app_initializes_from_active_agent_and_repository(tmp_path: Path) -> Non
             active.name,
             active.identifier.model_dump(mode="json"),
         )
-        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+        app = configured_app({agent_id: agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -77,7 +97,7 @@ def test_app_rejects_duplicate_agent_names(tmp_path: Path) -> None:
         second = FakeAgent(second_configuration, pipeline, lambda: "approved")
 
         with pytest.raises(ValueError, match="Agent IDs must be unique"):
-            AgentChatApp({uuid4(): first, uuid4(): second}, pipeline)
+            configured_app({uuid4(): first, uuid4(): second}, pipeline, SqliteSessionRepository())
 
         await first.close()
         await second.close()
@@ -110,7 +130,7 @@ def test_app_restores_latest_session_from_repository(tmp_path: Path) -> None:
 
         restored_agent = make_agent(tmp_path, pipeline, agent_id)
         assert restored_agent.configuration().id == agent_id
-        app = AgentChatApp({agent_id: restored_agent}, pipeline, repository)
+        app = configured_app({agent_id: restored_agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -139,7 +159,7 @@ def test_app_awaits_direct_agent_message_submission(tmp_path: Path) -> None:
             active.name,
             active.identifier.model_dump(mode="json"),
         )
-        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+        app = configured_app({agent_id: agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
             chat = app.chats[agent_id]
@@ -176,7 +196,7 @@ def test_sidebar_has_information_without_session_controls(tmp_path: Path) -> Non
         active = await agent.new_session("Conversation 1")
         agent_id = agent.configuration().id
         await repository.save_session(agent_id, active.name, active.identifier.model_dump(mode="json"))
-        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+        app = configured_app({agent_id: agent}, pipeline, repository)
         async with app.run_test():
             sidebar = app.chats[agent_id].sidebar
             assert isinstance(sidebar, AgentSidebar)
@@ -198,7 +218,7 @@ def test_sessions_table_is_laid_out_without_resizing_empty_chat(tmp_path: Path) 
         await repository.save_session(
             agent_id, active.name, active.identifier.model_dump(mode="json")
         )
-        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+        app = configured_app({agent_id: agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
             chat = app.chats[agent_id]
@@ -227,7 +247,7 @@ def test_chat_editor_keeps_newlines_and_retains_invalid_submission(tmp_path: Pat
         active = await agent.new_session("Conversation 1")
         agent_id = agent.configuration().id
         await repository.save_session(agent_id, active.name, active.identifier.model_dump(mode="json"))
-        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+        app = configured_app({agent_id: agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
             editor = app.chats[agent_id].input
@@ -261,7 +281,7 @@ def test_quit_detaches_ui_event_delivery_before_textual_shutdown(
             active.name,
             active.identifier.model_dump(mode="json"),
         )
-        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+        app = configured_app({agent_id: agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -290,7 +310,7 @@ def test_mounted_transcript_correlates_only_its_live_activity_card(
         await repository.save_session(
             agent_id, active.name, active.identifier.model_dump(mode="json")
         )
-        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+        app = configured_app({agent_id: agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
             pipeline.push(AgentCommandExecutionProgress(
@@ -342,7 +362,7 @@ def test_app_persists_externally_created_session_before_selecting_it(
             initial.name,
             initial.identifier.model_dump(mode="json"),
         )
-        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+        app = configured_app({agent_id: agent}, pipeline, repository)
 
         async with app.run_test():
             external = await agent.new_session("External")
@@ -358,6 +378,48 @@ def test_app_persists_externally_created_session_before_selecting_it(
             assert stored.identifier == external.identifier.model_dump(mode="json")
             assert app.chats[agent_id].session_name == external.name
 
+        await agent.close()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+class ExternalCommand(SlashCommand):
+    name = "/external"
+
+    async def invoke(self, controller, agent_id, argument):
+        return CommandOutcome(
+            TranscriptEntry[SystemTranscriptMetadata](
+                "system", f"external:{argument}", EventDetailLevel.NORMAL, {"type": "system"}
+            )
+        )
+
+
+def test_app_dispatches_only_explicitly_installed_external_commands(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        active = await agent.new_session("Conversation 1")
+        agent_id = agent.configuration().id
+        await repository.save_session(agent_id, active.name, active.identifier.model_dump(mode="json"))
+        app = AgentChatApp(
+            {agent_id: agent}, pipeline, repository,
+            transcribers=default_transcribers(),
+            sidebar_statistics={agent_id: default_sidebar_statistics(agent)},
+            commands=(ExternalCommand(),),
+        )
+        async with app.run_test() as pilot:
+            editor = app.chats[agent_id].input
+            editor.text = "/external installed"
+            await pilot.press("ctrl+enter")
+            for _ in range(3):
+                await pilot.pause()
+            assert any(entry.content == "external:installed" for entry in app.chats[agent_id].transcript.entries)
+            editor.text = "/help"
+            await pilot.press("ctrl+enter")
+            await pilot.pause()
+            assert editor.text == "/help"
         await agent.close()
         await repository.close()
 
