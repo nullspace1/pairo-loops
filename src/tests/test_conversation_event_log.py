@@ -23,7 +23,10 @@ from pairo.core.events import (
     SessionUpdated,
     UserInput,
 )
-from pairo.tools.conversation_event_log import CoalescingEventLogPolicy
+from pairo.tools.conversation_event_log import (
+    CoalescingEventLogPolicy,
+    DiagnosticEventLogPolicy,
+)
 from pairo.core.permissions import CommandExecutionApprovalRequest, PermissionDecision
 
 
@@ -233,6 +236,44 @@ def test_coalescing_policy_flushes_uncompleted_progress(tmp_path: Path) -> None:
         record = json.loads(output_path.read_text(encoding="utf-8").strip())
         assert record["payload"]["output_delta"] == "50"
         await log.close()
+
+    asyncio.run(scenario())
+
+
+def test_diagnostic_policy_drops_text_deltas_and_samples_unsupported_events(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        from pairo.core.events import AgentTextDelta, AgentUnsupportedActivity
+
+        pipeline = EventPipeline()
+        output_path = tmp_path / "diagnostic.jsonl"
+        log = ConversationEventLog(
+            pipeline, output_path, DiagnosticEventLogPolicy()
+        )
+        pipeline.push(AgentTextDelta(
+            agent_id=AGENT_ID, session_name="main", text="partial"
+        ))
+        for _ in range(3):
+            pipeline.push(AgentUnsupportedActivity(
+                agent_id=AGENT_ID,
+                session_name="main",
+                description="Unsupported notification",
+            ))
+        pipeline.push(MessageSent(
+            agent_id=AGENT_ID, session_name="main", message="complete"
+        ))
+
+        await log.close()
+
+        records = [
+            json.loads(line)
+            for line in output_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert [record["event_type"] for record in records] == [
+            "AgentUnsupportedActivity",
+            "MessageSent",
+        ]
 
     asyncio.run(scenario())
 

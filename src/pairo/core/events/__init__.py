@@ -44,6 +44,7 @@ from ...tools.conversation_event_log import (
     CoalescingEventLogPolicy,
     ConversationEventLog,
     ConversationEventLogPolicy,
+    DiagnosticEventLogPolicy,
     FullFidelityEventLogPolicy,
 )
 from .event_pipeline import EventCallback, EventPipeline, Subscription
@@ -88,6 +89,7 @@ __all__ = [
     "CoalescingEventLogPolicy",
     "ConversationEventLog",
     "ConversationEventLogPolicy",
+    "DiagnosticEventLogPolicy",
     "EventCallback",
     "EventPipeline",
     "FullFidelityEventLogPolicy",

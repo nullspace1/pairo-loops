@@ -12,7 +12,12 @@ from uuid import UUID
 
 from pydantic import BaseModel
 
-from ..core.events.agent_events import AgentActivityCompleted, AgentActivityProgress
+from ..core.events.agent_events import (
+    AgentActivityCompleted,
+    AgentActivityProgress,
+    AgentTextDelta,
+    AgentUnsupportedActivity,
+)
 from ..core.events.event_pipeline import EventPipeline, Subscription
 
 
@@ -78,6 +83,30 @@ class CoalescingEventLogPolicy:
 
     def _key(self, event: AgentActivityProgress) -> tuple[UUID, str, str]:
         return event.agent_id, event.session_name, event.activity_id
+
+
+class DiagnosticEventLogPolicy(CoalescingEventLogPolicy):
+    """Keep lifecycle evidence while omitting redundant high-volume events."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._unsupported_descriptions: set[str] = set()
+        self._handlers.update(
+            {
+                AgentTextDelta: self._discard_text_delta,
+                AgentUnsupportedActivity: self._sample_unsupported,
+            }
+        )
+
+    def _discard_text_delta(self, _event: BaseModel) -> tuple[BaseModel, ...]:
+        return ()
+
+    def _sample_unsupported(self, event: BaseModel) -> tuple[BaseModel, ...]:
+        unsupported = cast(AgentUnsupportedActivity, event)
+        if unsupported.description in self._unsupported_descriptions:
+            return ()
+        self._unsupported_descriptions.add(unsupported.description)
+        return (unsupported,)
 
 
 class ConversationEventLog:
@@ -163,5 +192,6 @@ __all__ = [
     "CoalescingEventLogPolicy",
     "ConversationEventLog",
     "ConversationEventLogPolicy",
+    "DiagnosticEventLogPolicy",
     "FullFidelityEventLogPolicy",
 ]

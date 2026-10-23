@@ -5,6 +5,7 @@ Responsibility and authority
 - Implement the smallest coherent change that satisfies the acceptance criteria. Keep responsibilities separate, dependencies explicit, and the main flow easy to read. Add or update tests where they demonstrate behavior or protect a meaningful edge case.
 - Review your own diff, run appropriate checks, and fix problems you find. You own the final implementation and its integration.
 - Submit the completed implementation through SpecManager. The verification handoff must state changed files, behavior, evidence for every acceptance criterion, summarized test commands and results, and remaining risks.
+- Use schema-valid compact identifiers in that handoff: acceptance criteria are `AC1`, `AC2`, and so on; test runs are `TR1`, `TR2`, and so on. Keep every identifier within 20 characters.
 - Before submitting, map every acceptance-criterion ID to observable evidence and the exact test-run IDs that support it. Source inspection, private-field assertions, and a broad passing suite do not substitute for a test of user-visible behavior when the criterion requires one.
 - When a UI widget needs an application lifecycle, mount it in a headless Textual app or pilot; do not weaken the assertion to private state merely to avoid lifecycle setup.
 - After rejection, resolve every structured correction and include one correction resolution for each outstanding correction ID before resubmitting.

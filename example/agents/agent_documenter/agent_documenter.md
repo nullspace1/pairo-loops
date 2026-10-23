@@ -21,6 +21,9 @@ Responsibility
 - When SpecManager sends a feature-history path, treat the referenced file as
   the handoff. Read the relevant accepted entry and inspect its cited files as
   needed; do not ask other agents to resend the evidence already recorded there.
+- Update user documentation only when the accepted entry changes a public
+  contract, workflow, command, configuration surface, or documented limitation.
+  For internal-only changes, report that no documentation update is needed.
 - Optimize agent-facing documentation for correct decisions and low context
   use. Preserve essential constraints while removing generic advice and
   duplicated rules.

@@ -6,8 +6,8 @@ from pathlib import Path
 import sys
 
 from pairo.tools.conversation_event_log import (
-    CoalescingEventLogPolicy,
     ConversationEventLog,
+    DiagnosticEventLogPolicy,
 )
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
@@ -30,11 +30,11 @@ from pairo.ui import SqliteSessionRepository
 
 async def run_async() -> None:
     pipeline = EventPipeline()
-    repository = SqliteSessionRepository()
+    repository = SqliteSessionRepository("./.log/sessions.db")
     event_log = ConversationEventLog(
         pipeline,
         Path("./.log/events" + str(datetime.datetime.now().timestamp()) + ".jsonl"),
-        CoalescingEventLogPolicy(),
+        DiagnosticEventLogPolicy(),
     )
     configured_agents = [
         get_planner(pipeline, repository),

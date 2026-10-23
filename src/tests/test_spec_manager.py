@@ -265,6 +265,43 @@ def test_director_can_sleep_until_an_assigned_task_is_accepted(tmp_path: Path) -
     asyncio.run(scenario())
 
 
+def test_director_can_discover_tasks_and_use_a_bounded_wait(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manager, _, director, _, _ = setup_manager(tmp_path)
+        await tool(manager, "create_task")(
+            "Task", "Do it", CRITERIA, context(director)
+        )
+
+        tasks = await tool(manager, "list_tasks")(context(director), "pending")
+        assert isinstance(tasks, list)
+        assert tasks == [{
+            "name": "Task",
+            "description": "Do it",
+            "status": "pending",
+            "acceptance_criteria": [{"id": "AC1", "description": "It works"}],
+            "pair_id": None,
+            "outstanding_corrections": [],
+        }]
+        assert await tool(manager, "get_task")(
+            "Task", context(director)
+        ) == tasks[0]
+
+        await tool(manager, "assign_task")(
+            "pair-1", "Task", context(director)
+        )
+        result = await tool(manager, "wait_for_task")(
+            "Task", context(director), 0.001
+        )
+        assert result == {
+            "task_name": "Task",
+            "status": "still_running",
+            "task_status": "working",
+        }
+        assert not manager._assignments["pair-1"].completion.cancelled()
+
+    asyncio.run(scenario())
+
+
 def test_timeout_keeps_verification_active_until_late_acceptance(tmp_path: Path) -> None:
     async def scenario() -> None:
         manager, _, director, worker, verifier = setup_manager(tmp_path, timeout=0.01)

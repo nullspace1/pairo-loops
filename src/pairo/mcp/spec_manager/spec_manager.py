@@ -478,7 +478,10 @@ class SpecManager(MCPHttpWrapper):
     def build_mcp_server(self) -> MCPServer:
         mcp = MCPServer("spec_manager", "Spec Manager", "Coordinate feature tasks and reviews.")
 
-        @mcp.tool("create_task", "Create a pending task in FEATURES.md.")
+        @mcp.tool(
+            "create_task",
+            "Create a pending task. Acceptance criterion IDs must be AC1, AC2, and so on.",
+        )
         async def create_task(
             name: str,
             description: str,
@@ -547,6 +550,37 @@ class SpecManager(MCPHttpWrapper):
             except (ValueError, OSError) as error_value:
                 return f"Could not delete task: {error_value}"
 
+        @mcp.tool(
+            "list_tasks",
+            "List authoritative task summaries, optionally filtered by lifecycle status.",
+        )
+        async def list_tasks(
+            ctx: Context,
+            status: TaskStatus | None = None,
+        ) -> list[JsonObject] | str:
+            error = self._require_role(ctx, "director")
+            if error:
+                return error
+            async with self._lock:
+                return [
+                    self._task_summary(task)
+                    for task in self._store.tasks().values()
+                    if status is None or task.status == status
+                ]
+
+        @mcp.tool("get_task", "Get one authoritative task with criteria and assignment state.")
+        async def get_task(task_name: str, ctx: Context) -> JsonObject | str:
+            error = self._require_role(ctx, "director")
+            if error:
+                return error
+            async with self._lock:
+                task = self._store.tasks().get(task_name)
+                return (
+                    f"Task '{task_name}' does not exist."
+                    if task is None
+                    else self._task_summary(task)
+                )
+
         @mcp.tool("list_workers", "List worker/verifier pairs and their status.")
         async def list_workers(ctx: Context) -> list[JsonObject] | str:
             error = self._require_role(ctx, "director")
@@ -562,7 +596,24 @@ class SpecManager(MCPHttpWrapper):
                 return error
             return await self._assign(pair_id, task_name)
 
-        @mcp.tool("sleep_on_task", "Wait until an assigned task is accepted.")
+        @mcp.tool(
+            "wait_for_task",
+            "Wait at most 240 seconds for acceptance; still_running is a normal result.",
+        )
+        async def wait_for_task(
+            task_name: str,
+            ctx: Context,
+            timeout_seconds: Annotated[float, Field(gt=0, le=240)] = 240,
+        ) -> JsonObject | str:
+            error = self._require_role(ctx, "director")
+            if error:
+                return error
+            return await self._wait_for_task(task_name, timeout_seconds)
+
+        @mcp.tool(
+            "sleep_on_task",
+            "Legacy unbounded wait for acceptance; prefer wait_for_task.",
+        )
         async def sleep_on_task(task_name: str, ctx: Context) -> str:
             error = self._require_role(ctx, "director")
             if error:
@@ -571,7 +622,7 @@ class SpecManager(MCPHttpWrapper):
 
         @mcp.tool(
             "verify_task",
-            "Submit concise implementation, acceptance, and test evidence for verification.",
+            "Submit evidence. Criterion IDs are AC1...; test-run IDs are TR1... (max 20 characters).",
         )
         async def verify_task(evidence: VerificationEvidence, ctx: Context) -> str:
             worker_id = self._agent_id(ctx)
@@ -655,6 +706,40 @@ class SpecManager(MCPHttpWrapper):
                 return f"Task '{task_name}' is not assigned."
             completion = assignment.completion
         return await asyncio.shield(completion)
+
+    async def _wait_for_task(
+        self, task_name: str, timeout_seconds: float
+    ) -> JsonObject | str:
+        async with self._lock:
+            task = self._store.tasks().get(task_name)
+            if task is None:
+                return f"Task '{task_name}' does not exist."
+            if task.status == "accepted":
+                return {"task_name": task_name, "status": "accepted"}
+            assignment = next(
+                (
+                    candidate
+                    for candidate in self._assignments.values()
+                    if candidate.task_name == task_name
+                ),
+                None,
+            )
+            if assignment is None:
+                return {"task_name": task_name, "status": task.status}
+            completion = assignment.completion
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(completion), timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            async with self._lock:
+                current = self._store.tasks()[task_name]
+                return {
+                    "task_name": task_name,
+                    "status": "still_running",
+                    "task_status": current.status,
+                }
+        return {"task_name": task_name, "status": "accepted"}
 
     async def _start_verification(
         self,
@@ -851,6 +936,32 @@ class SpecManager(MCPHttpWrapper):
             "verifier": {"id": str(verifier.id), "name": verifier.name},
             "status": assignment.status if assignment else "idle",
             "task": assignment.task_name if assignment else None,
+        }
+
+    def _task_summary(self, task: _Task) -> JsonObject:
+        assignment = next(
+            (
+                (pair_id, candidate)
+                for pair_id, candidate in self._assignments.items()
+                if candidate.task_name == task.name
+            ),
+            None,
+        )
+        return {
+            "name": task.name,
+            "description": task.description,
+            "status": task.status,
+            "acceptance_criteria": [
+                criterion.model_dump(mode="json")
+                for criterion in task.acceptance_criteria
+            ],
+            "pair_id": assignment[0] if assignment is not None else None,
+            "outstanding_corrections": [
+                correction.model_dump(mode="json")
+                for correction in (
+                    assignment[1].outstanding_corrections if assignment else ()
+                )
+            ],
         }
 
     def _require_role(self, ctx: Context, role: str) -> str | None:

@@ -9,8 +9,9 @@ Implement the assigned task against its acceptance criteria. Call `verify_task`
 when ready and address any rejection feedback before requesting verification
 again.
 
-Before submission, map every criterion ID to observable evidence and supporting
-test-run IDs. A broad passing suite, source inspection, or a private-field
+Before submission, map every criterion ID (`AC1`, `AC2`, and so on) to
+observable evidence and supporting test-run IDs (`TR1`, `TR2`, and so on).
+These identifiers are at most 20 characters. A broad passing suite, source inspection, or a private-field
 assertion does not establish user-visible behavior. Resolve every outstanding
 correction ID before resubmitting.
 

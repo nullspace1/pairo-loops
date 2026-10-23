@@ -457,7 +457,9 @@ class CodexAgent:
             return ClientResponseCompleted(
                 message=await self._read_final_response(identifier.thread_id)
             )
-        return ClientUnsupportedActivity(description="Unsupported Codex notification")
+        return ClientUnsupportedActivity(
+            description=f"Unsupported Codex notification: {type(payload).__name__}"
+        )
 
     def _completed_activity(self, item: object) -> ClientEvent:
         """Translate only SDK item families with an intentional typed UI contract."""
@@ -484,7 +486,9 @@ class CodexAgent:
                 ),
                 error=error,
             )
-        return ClientUnsupportedActivity(description="Unsupported completed Codex activity")
+        return ClientUnsupportedActivity(
+            description=f"Unsupported completed Codex activity: {type(root).__name__}"
+        )
 
     async def _read_final_response(self, thread_id: str) -> str:
         response = await self._client.thread_read(thread_id, include_turns=True)

@@ -5,7 +5,7 @@ description: Design an implementation plan or review a developer's change agains
 
 # Implementation design
 
-Inspect the relevant code path and tests before recommending changes. Trace the entry point, data flow, persistence or external calls, and failure boundaries. Use targeted reads; ask the intern for bounded summaries when the code area is large. Verify any facts received from another agent that drive a design decision.
+Inspect the relevant code path and tests before recommending changes. Trace the entry point, data flow, persistence or external calls, and failure boundaries. Use targeted reads and verify any facts received from another agent that drive a design decision.
 
 For a plan, define component responsibilities and their interfaces, then order the work into small verifiable steps. Name files only when confirmed. Call out migration, compatibility, concurrency, and error handling where they are real risks. Tie verification to the product owner's acceptance criteria and existing tests.
 
