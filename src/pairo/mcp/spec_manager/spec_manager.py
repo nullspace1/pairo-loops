@@ -999,6 +999,10 @@ class SpecManager(MCPHttpWrapper):
         return (
             f"Implement task '{task.name}'.\nDescription: {task.description}\n"
             f"Acceptance criteria:\n{criteria}\n"
+            "Before changing code, inspect the relevant implementation and post an in-depth "
+            "plan directly to the user. Cover the current design, proposed changes, affected "
+            "files or components, ordered implementation steps, verification, and risks. Wait "
+            "for an explicit approval confirmation message from the user before implementing. "
             "When implementation is ready, call spec_manager.verify_task with "
             "a concise implementation summary, changed files, evidence for every "
             "acceptance criterion, summarized test runs, and remaining risks."
@@ -1025,8 +1029,8 @@ class SpecManager(MCPHttpWrapper):
 
 
 _ROLE_INSTRUCTIONS = {
-    "director": "Use the spec_manager tools to create, modify, delete, and assign feature tasks with stable acceptance-criterion IDs; only change or delete pending tasks. Report delegation state before waiting on an assigned task.",
-    "worker": "Implement the assigned task, then call spec_manager.verify_task with exactly one evidence record per criterion ID, referenced test-run IDs, every outstanding correction resolution, and no raw test output.",
+    "director": "Use the spec_manager tools to create, modify, delete, and assign feature tasks with stable acceptance-criterion IDs; only change or delete pending tasks. The assigned worker owns implementation planning. Report delegation state before waiting on an assigned task.",
+    "worker": "For an assigned task, inspect the relevant code and post an in-depth implementation plan directly to the user, covering the current design, proposed changes, affected files or components, ordered implementation steps, verification, and risks. Do not change code until the user sends an explicit approval confirmation message. Then implement and call verify_task with exactly one evidence record per criterion ID, referenced test-run IDs, every outstanding correction resolution, and no raw test output.",
     "verifier": "Audit every criterion and prior correction, independently check material claims, then call spec_manager.accept_task once or reject_task once with all structured corrections.",
 }
 

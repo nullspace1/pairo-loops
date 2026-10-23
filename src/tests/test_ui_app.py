@@ -5,7 +5,13 @@ from pathlib import Path
 
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import FakeAgent
-from pairo.core.events import EventPipeline, MessageSent, SessionCreated
+from pairo.core.events import (
+    AgentCommandExecutionCompleted,
+    AgentCommandExecutionProgress,
+    EventPipeline,
+    MessageSent,
+    SessionCreated,
+)
 from pairo.ui.app import AgentChatApp
 from pairo.ui.models import EventDetailLevel, TranscriptEntry
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
@@ -196,6 +202,57 @@ def test_quit_detaches_ui_event_delivery_before_textual_shutdown(
             await app.action_quit()
 
             assert not app._subscriptions
+
+        await agent.close()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_mounted_transcript_correlates_only_its_live_activity_card(
+    tmp_path: Path,
+) -> None:
+    """A real Textual mount owns activity matching rather than a global ID map."""
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        active = await agent.new_session("Conversation 1")
+        agent_id = agent.configuration().id
+        await repository.save_session(
+            agent_id, active.name, active.identifier.model_dump(mode="json")
+        )
+        app = AgentChatApp({agent_id: agent}, pipeline, repository)
+
+        async with app.run_test() as pilot:
+            pipeline.push(AgentCommandExecutionProgress(
+                agent_id=agent_id, session_name=active.name, activity_id="same",
+                output_delta="building",
+            ))
+            for _ in range(3):
+                await pilot.pause()
+            transcript = app.chats[agent_id].transcript
+            assert [entry.content for entry in transcript.entries] == [
+                "Command — In progress\n\nLatest output:\nbuilding"
+            ]
+
+            pipeline.push(AgentCommandExecutionCompleted(
+                agent_id=agent_id, session_name=active.name, activity_id="same",
+                command="make", status="completed", output="done",
+            ))
+            for _ in range(3):
+                await pilot.pause()
+            assert len(transcript.entries) == 1
+            assert "Command — Completed successfully" in transcript.entries[0].content
+            assert "Output:\ndone" in transcript.entries[0].content
+
+            pipeline.push(AgentCommandExecutionProgress(
+                agent_id=agent_id, session_name="other", activity_id="same",
+                output_delta="must not render",
+            ))
+            for _ in range(3):
+                await pilot.pause()
+            assert len(transcript.entries) == 1
 
         await agent.close()
         await repository.close()

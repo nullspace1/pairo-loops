@@ -125,6 +125,8 @@ def test_installer_configures_role_specific_skills_and_instructions(tmp_path: Pa
     assert worker.configuration().skill_folders[0].name == "worker"
     assert verifier.configuration().skill_folders[0].name == "verifier"
     assert "create, modify, delete, and assign" in director.configuration().developer_instructions
+    assert "post an in-depth implementation plan" in worker.configuration().developer_instructions
+    assert "explicit approval confirmation message" in worker.configuration().developer_instructions
     assert "criterion ID" in worker.configuration().developer_instructions
     assert "structured corrections" in verifier.configuration().developer_instructions
 
@@ -146,6 +148,9 @@ def test_assignment_creates_and_reuses_the_verifier_session(tmp_path: Path) -> N
         verifier_session = verifier.created[-1]
         assert worker_session.startswith("spec-manager-work-pair-1-Login-")
         assert verifier_session.startswith("spec-manager-verify-pair-1-Login-")
+        worker_message = worker.messages[-1][0]
+        assert "post an in-depth plan directly to the user" in worker_message
+        assert "explicit approval confirmation message" in worker_message
 
         waiting = asyncio.create_task(
             tool(manager, "verify_task")(verification_evidence(), context(worker))
@@ -420,7 +425,7 @@ def test_director_can_modify_and_delete_pending_tasks(tmp_path: Path) -> None:
 
 def test_director_cannot_modify_or_delete_an_assigned_task(tmp_path: Path) -> None:
     async def scenario() -> None:
-        manager, _, director, _, _ = setup_manager(tmp_path)
+        manager, _, director, worker, _ = setup_manager(tmp_path)
         await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
 
@@ -436,7 +441,7 @@ def test_director_cannot_modify_or_delete_an_assigned_task(tmp_path: Path) -> No
 
 def test_close_cancels_sleep_waiter_before_stopping_http_transport(tmp_path: Path) -> None:
     async def scenario() -> None:
-        manager, _, director, _, _ = setup_manager(tmp_path)
+        manager, _, director, worker, _ = setup_manager(tmp_path)
         await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
         sleeping = asyncio.create_task(tool(manager, "sleep_on_task")("Task", context(director)))

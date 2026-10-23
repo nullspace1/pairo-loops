@@ -226,10 +226,12 @@ class PermissionRequestCard(Vertical):
         label.display = True
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        event.stop()
+        if self.has_focus:
+            event.stop()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        event.stop()
+        if self.has_focus:
+            event.stop()
 
 
 class PermissionRequestTranscriber(
@@ -306,11 +308,11 @@ class PermissionRequestTranscriber(
             metadata=cast(PermissionRequestTranscriptMetadata, metadata),
         )
         try:
-            await context.transcript_service.update(
-                context.agent_id,
-                context.session_name,
-                resolved,
-            )
+            if context.mutations is None:
+                raise RuntimeError("Transcript mutation publisher is unavailable.")
+            await context.mutations.update(RoutedTranscriptEntry(
+                context.agent_id, context.session_name, resolved
+            ))
         except (LookupError, RuntimeError, ValueError) as error:
             card.show_error(f"Decision sent, but history could not be updated: {error}")
             await self._publish_error(context, request_id, error)
@@ -354,7 +356,9 @@ class PermissionRequestTranscriber(
         error: Exception,
     ) -> None:
         try:
-            await context.transcript_service.add(
+            if context.mutations is None:
+                return
+            await context.mutations.add(RoutedTranscriptEntry(
                 context.agent_id,
                 context.session_name,
                 TranscriptEntry[SystemTranscriptMetadata](
@@ -363,7 +367,7 @@ class PermissionRequestTranscriber(
                     EventDetailLevel.NORMAL,
                     {"type": "system"},
                 ),
-            )
+            ))
         except Exception:
             # The card already presents the failure. Do not recursively emit
             # another transcript event if transcript persistence is unavailable.

@@ -5,7 +5,6 @@ from uuid import UUID
 
 from pairo.core.agent import JsonObject
 
-from .activity_terminalization import PendingActivityTerminalizer
 from .models import SessionMetadata, TranscriptEntry, TranscriptMetadata
 
 
@@ -29,13 +28,6 @@ class SessionRepository(Protocol):
     async def upsert_entry(
         self, agent_id: UUID, session_name: str, entry: TranscriptEntry[TranscriptMetadata]
     ) -> bool: ...
-
-    async def terminalize_pending_activities(
-        self,
-        agent_id: UUID,
-        session_name: str,
-        terminalizer: PendingActivityTerminalizer,
-    ) -> tuple[TranscriptEntry[TranscriptMetadata], ...]: ...
 
     async def delete_entry(
         self, agent_id: UUID, session_name: str, entry_id: UUID

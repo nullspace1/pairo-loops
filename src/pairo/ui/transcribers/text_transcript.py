@@ -32,10 +32,12 @@ class TranscriptMessage(VerticalScroll):
         super().__init__(*children, classes="transcript-message")
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        event.stop()
+        if self.has_focus:
+            event.stop()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        event.stop()
+        if self.has_focus:
+            event.stop()
 
 
 class SourceHeading(Static):
@@ -88,7 +90,7 @@ class SourcedTranscript(VerticalGroup):
     """Reusable source heading plus arbitrary transcript presentation."""
 
     def __init__(self, transcript: TranscriptEntry[MetadataT], context: TranscriptRenderContext, content: Widget) -> None:
-        super().__init__(classes="sourced-transcript")
+        super().__init__(classes="sourced-transcript transcript-block")
         self._transcript = transcript
         self._render_context = context
         self._content = content
@@ -96,6 +98,7 @@ class SourcedTranscript(VerticalGroup):
     def compose(self) -> ComposeResult:
         yield SourceHeading(self._transcript, self._render_context)
         yield self._content
+
 
 
 def render_text_transcript(

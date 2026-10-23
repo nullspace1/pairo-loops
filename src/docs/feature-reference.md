@@ -12,7 +12,7 @@
 | `SynchronousEventPipeline` | Cross-thread publication and blocking coroutine submission for synchronous SDK callbacks |
 | `AgentEventListeners` | Typed, optionally agent-filtered subscriptions for agent and session events |
 | `SessionRepository` | Authoritative durable session catalog and transcripts |
-| `TranscriptService` | Explicit transcript persistence followed by transient mutation notifications; correlated live activities atomically add or update one durable card |
+| `TranscriberRegistry` | Starts stateful Textual MessagePump transcribers; each commits its own mutation before publishing its notification |
 | `run_agents` | Startup, UI launch, and failure-safe resource cleanup |
 
 ## Optional tools and integrations

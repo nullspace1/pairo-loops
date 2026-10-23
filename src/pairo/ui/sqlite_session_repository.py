@@ -15,7 +15,6 @@ import aiosqlite
 
 from pairo.core.agent import JsonObject
 
-from .activity_terminalization import PendingActivityTerminalizer
 from .models import (
     EventDetailLevel,
     SessionMetadata,
@@ -212,55 +211,6 @@ class SqliteSessionRepository:
                 await connection.rollback()
                 raise
         return created
-
-    async def terminalize_pending_activities(
-        self,
-        agent_id: UUID,
-        session_name: str,
-        terminalizer: PendingActivityTerminalizer,
-    ) -> tuple[TranscriptEntry[TranscriptMetadata], ...]:
-        """Atomically replace this routed session's pending activity cards."""
-        connection = await self._connect()
-        async with self.connection_lock:
-            await self._require_registered(agent_id, session_name)
-            try:
-                await connection.execute("BEGIN IMMEDIATE")
-                cursor = await connection.execute(
-                    """
-                    SELECT entry_id, role, content, detail_level, metadata_json
-                    FROM transcript_entries
-                    WHERE agent_id = ? AND session_name = ?
-                      AND json_extract(metadata_json, '$.type') IN
-                          ('command_execution_progress', 'mcp_tool_call_progress')
-                    ORDER BY entry_order ASC
-                    """,
-                    (str(agent_id), session_name),
-                )
-                pending = tuple(terminalizer.terminalize(self._entry_from(row)) for row in await cursor.fetchall())
-                for entry in pending:
-                    await connection.execute(
-                        """
-                        UPDATE transcript_entries
-                        SET role = ?, content = ?, detail_level = ?, metadata_json = ?
-                        WHERE entry_id = ? AND agent_id = ? AND session_name = ?
-                        """,
-                        (
-                            entry.role, entry.content, entry.detail_level.value,
-                            json.dumps(entry.metadata, sort_keys=True, separators=(",", ":")),
-                            str(entry.entry_id), str(agent_id), session_name,
-                        ),
-                    )
-                if pending:
-                    await connection.execute(
-                        """UPDATE sessions SET last_updated_at = ?
-                        WHERE agent_id = ? AND session_name = ?""",
-                        (self._timestamp(), str(agent_id), session_name),
-                    )
-                await connection.commit()
-            except BaseException:
-                await connection.rollback()
-                raise
-        return pending
 
     async def delete_entry(
         self,

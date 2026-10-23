@@ -16,7 +16,6 @@ from pairo.core.events import EventPipeline
 from ..models import EventDetailLevel, TranscriptEntry, TranscriptMetadata
 from ..transcribers import TranscriberRegistry
 from ..session_repository import SessionNotFoundError, SessionRepository
-from ..transcript_service import TranscriptService
 from .agent_sidebar import AgentSidebar
 from .chat_editor import ChatEditor
 from .sidebar_statistics import SidebarStatistics
@@ -35,7 +34,6 @@ class AgentChatPane(Vertical):
         agents: Mapping[UUID, Agent[SessionIdentifier]],
         repository: SessionRepository,
         event_pipeline: EventPipeline,
-        transcript_service: TranscriptService,
         transcribers: TranscriberRegistry,
         detail_level: EventDetailLevel,
         *,
@@ -60,7 +58,6 @@ class AgentChatPane(Vertical):
         self.session_name = active.name if active is not None else None
         self._repository = repository
         self._event_pipeline = event_pipeline
-        self._transcript_service = transcript_service
         self._transcribers = transcribers
         self._detail_level = detail_level
         self._sidebar_statistics = sidebar_statistics
@@ -72,7 +69,6 @@ class AgentChatPane(Vertical):
                     self.agent_id,
                     self.session_name,
                     self._event_pipeline,
-                    self._transcript_service,
                     self._transcribers,
                     self._detail_level,
                     agent_name=self.agent.configuration().name,

@@ -3,13 +3,13 @@
 from collections.abc import Iterable
 from uuid import UUID
 
+from textual import on
 from textual.containers import VerticalScroll
-from textual.events import MouseScrollDown, MouseScrollUp
 
 from pairo.core.events import EventPipeline
 
 from ..models import EventDetailLevel, TranscriptEntry, TranscriptMetadata
-from ..transcript_service import TranscriptService
+from ..pairo_event_piper import PairoEvent
 from ..transcribers import (
     TranscriptRenderContext,
     TranscriberRegistry,
@@ -23,7 +23,6 @@ class Transcript(VerticalScroll):
         agent_id: UUID,
         session_name: str | None,
         event_pipeline: EventPipeline,
-        transcript_service: TranscriptService,
         transcribers: TranscriberRegistry,
         detail_level: EventDetailLevel = EventDetailLevel.NORMAL,
         *,
@@ -50,7 +49,6 @@ class Transcript(VerticalScroll):
         self._agent_id = agent_id
         self._session_name = session_name
         self._event_pipeline = event_pipeline
-        self._transcript_service = transcript_service
         self._transcribers = transcribers
         self._agent_name = agent_name
         self._live_entry_ids: set[UUID] = set()
@@ -61,11 +59,10 @@ class Transcript(VerticalScroll):
         return tuple(entry for entry in self.entries if self._is_visible(entry))
 
     async def add_entry(self, entry: TranscriptEntry[TranscriptMetadata]) -> None:
-        follow_latest = self.is_vertical_scroll_end
         self.entries.append(entry)
         self._live_entry_ids.add(entry.entry_id)
         if self._is_visible(entry):
-            await self._mount_entry(entry, scroll_after_mount=follow_latest)
+            await self._mount_entry(entry)
 
     async def update_entry(self, entry: TranscriptEntry[TranscriptMetadata]) -> None:
         index = self._entry_index(entry.entry_id)
@@ -89,7 +86,7 @@ class Transcript(VerticalScroll):
     async def replace_entries(self, entries: Iterable[TranscriptEntry[TranscriptMetadata]]) -> None:
         self.entries = list(entries)
         self._live_entry_ids.clear()
-        await self._render_all(show_latest=True)
+        await self._render_all()
 
     async def set_detail_level(self, detail_level: EventDetailLevel) -> None:
         if self.detail_level != detail_level:
@@ -99,29 +96,27 @@ class Transcript(VerticalScroll):
     def set_session(self, session_name: str) -> None:
         self._session_name = session_name
 
-    def on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
-        event.prevent_default()
+    @on(PairoEvent)
+    def relay_pairo_event(self, message: PairoEvent) -> None:
+        """Deliver activity updates to mounted cards, not a transcript registry."""
+        message.stop()
+        for card in self.query(".sourced-transcript"):
+            card.post_message(PairoEvent(message.event))
 
-    def on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
-        event.prevent_default()
-
-    async def _render_all(self, *, show_latest: bool = False) -> None:
-        follow_latest = show_latest or self.is_vertical_scroll_end
-        previous_scroll_y = self.scroll_offset.y
+    async def _render_all(self) -> None:
         self._render_generation += 1
         await self.remove_children()
         for entry in self.visible_entries:
-            await self._mount_entry(entry, scroll_after_mount=False)
-        self._restore_viewport_after_layout(follow_latest, previous_scroll_y)
+            await self._mount_entry(entry)
 
-    async def _mount_entry(self, entry: TranscriptEntry[TranscriptMetadata], *, scroll_after_mount: bool) -> None:
+    async def _mount_entry(self, entry: TranscriptEntry[TranscriptMetadata]) -> None:
         metadata_type = entry.metadata.get("type", "historical")
         transcriber = self._transcribers.transcript_transcriber_for(metadata_type)
         context = TranscriptRenderContext(
             agent_id=self._agent_id,
             session_name=self._session_name or "",
             event_pipeline=self._event_pipeline,
-            transcript_service=self._transcript_service,
+            mutations=self._transcribers.mutations,
             is_live=entry.entry_id in self._live_entry_ids,
             agent_name=self._agent_name,
         )
@@ -133,24 +128,6 @@ class Transcript(VerticalScroll):
         await self.mount(widget)
         widget.refresh(layout=True)
         self.refresh(layout=True)
-        if scroll_after_mount:
-            self._restore_viewport_after_layout(True, 0)
-
-    def _restore_viewport_after_layout(
-        self, follow_latest: bool, previous_scroll_y: int
-    ) -> None:
-        generation = self._render_generation
-        self.call_after_refresh(
-            lambda: self._restore_viewport(follow_latest, previous_scroll_y)
-            if generation == self._render_generation
-            else None
-        )
-
-    def _restore_viewport(self, follow_latest: bool, previous_scroll_y: int) -> None:
-        if follow_latest:
-            self.scroll_end(animate=False)
-        else:
-            self.scroll_to(y=previous_scroll_y, animate=False)
 
     def _is_visible(self, entry: TranscriptEntry[TranscriptMetadata]) -> bool:
         return (

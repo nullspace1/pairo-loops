@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TypeVar, cast
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -19,15 +18,12 @@ from pairo.core.events import (
     AgentActivityProgress,
     AgentError,
     AgentResponseInterrupted,
-    EventCallback,
     EventPipeline,
     SessionCreated,
     SessionDeleted,
-    Subscription,
 )
 
-from .activity_progress_coordinator import ActivityProgressCoordinator
-from .activity_terminalization import ActivityTerminalOutcome
+from .pairo_event_piper import PairoEvent, TextualEventPiper, on_pairo
 from .commands import AgentCommandController
 from .models import (
     EventDetailLevel,
@@ -37,7 +33,6 @@ from .models import (
 )
 from .session_repository import SessionRepository
 from .sqlite_session_repository import SqliteSessionRepository
-from .transcript_service import TranscriptService
 from .transcript_events import (
     TranscriptEntryAdded,
     TranscriptEntryDeleted,
@@ -53,9 +48,6 @@ from .widgets import (
 )
 from .widgets.chat_editor import ChatEditor
 from .widgets.sidebar_statistics import SidebarStatistics, default_sidebar_statistics
-
-
-AppEventT = TypeVar("AppEventT", bound=BaseModel)
 
 
 class AgentChatApp(App[None]):
@@ -86,10 +78,9 @@ class AgentChatApp(App[None]):
     .transcript {
         height: 1fr; border: round $primary-background; padding: 0 1;
     }
-    .transcript-message {
-        height: auto; max-height: 12; margin: 1 0;
-        border: round $primary-background; padding: 0 1;
-    }
+    .sourced-transcript { height: auto; margin: 1 0; border: round $primary-background; padding: 0 1; }
+    .transcript-source { height: 1; text-style: bold; color: $accent; }
+    .transcript-message { height: auto; max-height: 12; }
     .permission-card {
         height: auto; margin: 1 0; border: heavy $error; padding: 0 1;
     }
@@ -104,7 +95,6 @@ class AgentChatApp(App[None]):
     .permission-decision { height: auto; color: $text-muted; text-style: bold; }
     .chat-input { width: 1fr; height: 6; }
     .completed-activity { height: auto; margin: 1 0; }
-    .sourced-transcript { height: auto; }
     .session-table-message { height: auto; margin: 1 0; }
     """
     BINDINGS = [("ctrl+q", "quit", "Quit")]
@@ -125,21 +115,14 @@ class AgentChatApp(App[None]):
         self._event_pipeline = event_pipeline
         self._owns_repository = session_repository is None
         self.session_repository = session_repository or SqliteSessionRepository()
-        self._transcript_service = TranscriptService(
-            self.session_repository,
-            self._event_pipeline,
-        )
-        self._progress_coordinator = ActivityProgressCoordinator(
-            self._transcript_service,
-        )
         configured_transcribers = (
             default_transcribers() if transcribers is None else transcribers
         )
         self._transcribers = configured_transcribers
-        self._transcribed_event_types = self._transcribers.event_types
         self._detail_level = EventDetailLevel.NORMAL
         self._sidebar_statistics = sidebar_statistics
-        self._subscriptions: list[Subscription[BaseModel]] = []
+        self._piper = TextualEventPiper(event_pipeline, self.post_message)
+        self._subscriptions: list[object] = []
         if self._sidebar_statistics is not None:
             self._sidebar_statistics.setup(self._event_pipeline, agents_by_id)
         self._controller = AgentCommandController(
@@ -157,7 +140,6 @@ class AgentChatApp(App[None]):
                 agents_by_id,
                 self.session_repository,
                 self._event_pipeline,
-                self._transcript_service,
                 self._transcribers,
                 self._detail_level,
                 sidebar_statistics=(
@@ -178,91 +160,62 @@ class AgentChatApp(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self._subscribe(TranscriptEntryAdded, self._receive_transcript_entry_added)
-        self._subscribe(TranscriptEntryUpdated, self._receive_transcript_entry_updated)
-        self._subscribe(TranscriptEntryDeleted, self._receive_transcript_entry_deleted)
-        for event_type in self._transcribed_event_types:
-            if event_type is not AgentError:
-                self._subscribe(event_type, self._transcribe_event)
-        self._subscribe(AgentResponseInterrupted, self._terminalize_interrupted)
-        self._subscribe(AgentError, self._transcribe_error_then_terminalize)
-        self._subscribe(SessionCreated, self._receive_session_created)
-        self._subscribe(SessionDeleted, self._receive_session_deleted)
+        """Attach the application-owned ingress once the Textual loop exists."""
+        await self._transcribers.start(self.session_repository, self._event_pipeline, self)
+        self._piper.attach()
+        self._subscriptions = [self._piper]
         self._active_chat().input.focus()
         self.set_interval(0.25, self._refresh_sidebars)
 
     async def on_unmount(self) -> None:
         self._stop_event_delivery()
-        await self._progress_coordinator.shutdown()
+        await self._transcribers.shutdown()
         if self._owns_repository:
             await self.session_repository.close()
 
     async def action_quit(self) -> None:
-        """Release UI delivery tasks before asking Textual to leave its message loop."""
         self._stop_event_delivery()
         self.exit()
 
-    async def _transcribe_event(
-        self,
-        event: BaseModel,
-        _subscription: Subscription[BaseModel],
-    ) -> None:
-        routed = self._transcribe(event)
-        if routed.agent_id in self.chats:
-            if isinstance(event, AgentActivityProgress):
-                await self._progress_coordinator.submit_progress(routed)
-            elif isinstance(event, AgentActivityCompleted):
-                await self._progress_coordinator.complete(routed)
-            elif routed.correlated_entry_id is None:
-                await self._transcript_service.add(
-                    routed.agent_id, routed.session_name, routed.entry,
-                )
-            else:
-                await self._transcript_service.upsert(
-                    routed.agent_id, routed.session_name, routed.entry,
-                )
+    @on_pairo(BaseModel)
+    async def receive_pairo_event(self, event: BaseModel) -> None:
+        """Deliver an event to stateful owners, then enqueue transcription."""
+        self._transcribers.deliver(event)
+        await self._transcribe_event(event)
 
-    async def _terminalize_interrupted(
-        self,
-        event: AgentResponseInterrupted,
-        _subscription: Subscription[AgentResponseInterrupted],
-    ) -> None:
-        if event.agent_id in self.chats:
-            await self._progress_coordinator.terminalize_session(
-                event.agent_id, event.session_name, ActivityTerminalOutcome.INTERRUPTED,
-            )
+    async def _transcribe_event(self, event: BaseModel) -> None:
+        """Resolve and post only; persistence is transcriber-owned."""
+        if self._transcribers.has_event_transcriber(event):
+            self._transcribers.event_transcriber_for(event).request(event)
 
-    async def _transcribe_error_then_terminalize(
-        self,
-        event: AgentError,
-        _subscription: Subscription[AgentError],
-    ) -> None:
-        """Persist the error before finalizing cards in the same FIFO callback."""
-        if event.agent_id not in self.chats:
-            return
-        routed = self._transcribe(event)
-        await self._transcript_service.add(
-            routed.agent_id, routed.session_name, routed.entry,
-        )
-        await self._progress_coordinator.terminalize_session(
-            event.agent_id, event.session_name, ActivityTerminalOutcome.ERROR,
-        )
+    @on_pairo(SessionCreated)
+    async def receive_session_created(self, event: SessionCreated) -> None:
+        await self._receive_session_created(event)
 
-    def _transcribe(self, event: BaseModel) -> RoutedTranscriptEntry[TranscriptMetadata]:
-        """Use the registry's typed conversion at the application boundary."""
-        return self._transcribers.event_transcriber_for(event).transcribe(event)
+    @on_pairo(SessionDeleted)
+    async def receive_session_deleted(self, event: SessionDeleted) -> None:
+        await self._receive_session_deleted(event)
+
+    @on_pairo(TranscriptEntryAdded)
+    async def receive_transcript_entry_added(self, event: TranscriptEntryAdded) -> None:
+        await self._receive_transcript_entry_added(event)
+
+    @on_pairo(TranscriptEntryUpdated)
+    async def receive_transcript_entry_updated(self, event: TranscriptEntryUpdated) -> None:
+        await self._receive_transcript_entry_updated(event)
+
+    @on_pairo(TranscriptEntryDeleted)
+    async def receive_transcript_entry_deleted(self, event: TranscriptEntryDeleted) -> None:
+        await self._receive_transcript_entry_deleted(event)
 
     async def _receive_session_created(
         self,
         event: SessionCreated,
-        _subscription: Subscription[SessionCreated],
+        _subscription: object | None = None,
     ) -> None:
         agent = self._agents.get(event.agent_id)
         if agent is None:
             return
-
-        # Provider-driven session creation bypasses the command controller, so
-        # the event consumer must establish persistence before updating the UI.
         await self.session_repository.save_session(
             event.agent_id,
             event.session_name,
@@ -272,12 +225,15 @@ class AgentChatApp(App[None]):
         if active is not None and active.name == event.session_name:
             pane = self.chats.get(event.agent_id)
             if pane is not None:
-                await pane.select_session(event.session_name)
+                try:
+                    await pane.select_session(event.session_name)
+                except NoMatches:
+                    return
 
     async def _receive_session_deleted(
         self,
         event: SessionDeleted,
-        _subscription: Subscription[SessionDeleted],
+        _subscription: object | None = None,
     ) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
@@ -286,7 +242,6 @@ class AgentChatApp(App[None]):
     async def _receive_transcript_entry_added(
         self,
         event: TranscriptEntryAdded,
-        _subscription: Subscription[TranscriptEntryAdded],
     ) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
@@ -299,7 +254,6 @@ class AgentChatApp(App[None]):
     async def _receive_transcript_entry_updated(
         self,
         event: TranscriptEntryUpdated,
-        _subscription: Subscription[TranscriptEntryUpdated],
     ) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
@@ -311,7 +265,6 @@ class AgentChatApp(App[None]):
     async def _receive_transcript_entry_deleted(
         self,
         event: TranscriptEntryDeleted,
-        _subscription: Subscription[TranscriptEntryDeleted],
     ) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
@@ -373,26 +326,14 @@ class AgentChatApp(App[None]):
     ) -> None:
         if pane.session_name is None:
             raise RuntimeError("The selected agent has no active session.")
-        await self._transcript_service.add(
-            pane.agent_id,
-            pane.session_name,
-            entry,
-        )
-
-    def _subscribe(
-        self,
-        event_type: type[AppEventT],
-        callback: EventCallback[AppEventT],
-    ) -> None:
-        subscription = self._event_pipeline.subscribe(event_type, callback)
-        self._subscriptions.append(
-            cast(Subscription[BaseModel], subscription)
-        )
+        mutations = self._transcribers.mutations
+        if mutations is None:
+            raise RuntimeError("Transcript transcribers are not running.")
+        await mutations.add(RoutedTranscriptEntry(pane.agent_id, pane.session_name, entry))
 
     def _stop_event_delivery(self) -> None:
-        """Detach this UI's subscriptions without taking ownership of the pipeline."""
-        for subscription in self._subscriptions:
-            self._event_pipeline.unsubscribe(subscription)
+        """Detach before teardown so no raw event can enqueue afterwards."""
+        self._piper.detach()
         self._subscriptions.clear()
 
     async def _refresh_sidebars(self) -> None:
@@ -426,4 +367,3 @@ class UserInterfaceLauncher:
 
 
 run_ui = UserInterfaceLauncher()
-
