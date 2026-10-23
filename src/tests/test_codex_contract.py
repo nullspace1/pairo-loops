@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from openai_codex.generated.v2_all import (
@@ -89,6 +90,7 @@ class FakeAsyncCodexClient:
 
 def configuration(tmp_path: Path) -> AgentConfiguration:
     return AgentConfiguration(
+        id=uuid4(),
         name="developer",
         sandbox=SandboxPermission.READ_ONLY,
         workspace=tmp_path,
@@ -191,6 +193,7 @@ def test_codex_configuration_maps_reasoning_search_permissions_and_hooks(
     writable_folder = tmp_path / "shared-output"
     writable_folder.mkdir()
     configured = AgentConfiguration(
+        id=uuid4(),
         name="developer",
         sandbox=SandboxPermission.WORKSPACE_WRITE,
         workspace=tmp_path,
@@ -279,6 +282,7 @@ def test_collect_text_recurses_in_document_order() -> None:
         pipeline = EventPipeline()
         agent = CodexAgent(
             AgentConfiguration(
+                id=uuid4(),
                 name="test",
                 sandbox=SandboxPermission.READ_ONLY,
                 workspace=".",

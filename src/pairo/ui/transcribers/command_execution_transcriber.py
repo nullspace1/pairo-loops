@@ -48,7 +48,7 @@ class CommandExecutionTranscriber(
         entry = TranscriptEntry(
             "agent",
             f"Command — In progress\n\nLatest output:\n{event.output_delta or 'No output yet.'}",
-            EventDetailLevel.NORMAL,
+            EventDetailLevel.DEBUG,
             cast(CommandExecutionProgressTranscriptMetadata, {"type": self.transcript_type}),
             prior.entry_id if prior else uuid4(),
         )
@@ -128,7 +128,7 @@ class CommandExecutionTranscriber(
             f"Command — {label}\n\nCommand:\n{event.command}"
             f"\n\nWorking directory: {event.cwd or 'Not provided'}"
             f"\n\nOutput:\n{event.output or 'No output was provided.'}",
-            EventDetailLevel.NORMAL,
+            EventDetailLevel.DEBUG,
             cast(CommandExecutionTranscriptMetadata, {"type": self.completed_transcript_type}),
             uuid4(),
         )

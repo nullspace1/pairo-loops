@@ -16,6 +16,7 @@ from pairo.ui.sqlite_session_repository import SqliteSessionRepository
 def configured_agent(name: str, tmp_path: Path, pipeline: EventPipeline) -> FakeAgent:
     return FakeAgent(
         AgentConfiguration(
+            id=uuid4(),
             name=name,
             description="Writes code" if name == "developer" else "",
             sandbox=SandboxPermission.READ_ONLY,

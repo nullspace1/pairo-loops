@@ -56,7 +56,7 @@ class AgentChatApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
     #agent-tabs, AgentChatPane, .agent-workspace { height: 1fr; }
-    .chat-main { width: 1fr; }
+    .chat-main { width: 1fr; height: 1fr; }
     .agent-sidebar {
         width: 38; height: 1fr; min-width: 28;
         border-left: solid $primary-background; padding: 0 1;
@@ -110,6 +110,21 @@ class AgentChatApp(App[None]):
         sidebar_statistics: SidebarStatistics | None = None,
     ) -> None:
         super().__init__()
+        configured_agents = tuple(agents.values())
+        configured_ids = [agent.configuration().id for agent in configured_agents]
+        duplicate_ids = {
+            agent_id for agent_id in configured_ids if configured_ids.count(agent_id) > 1
+        }
+        if duplicate_ids:
+            duplicates = ", ".join(sorted(str(agent_id) for agent_id in duplicate_ids))
+            raise ValueError(f"Agent IDs must be unique; duplicated: {duplicates}.")
+        configured_names = [agent.configuration().name for agent in configured_agents]
+        duplicate_names = {
+            name for name in configured_names if configured_names.count(name) > 1
+        }
+        if duplicate_names:
+            duplicates = ", ".join(sorted(duplicate_names))
+            raise ValueError(f"Agent names must be unique; duplicated: {duplicates}.")
         agents_by_id = dict(agents)
         self._agents = agents_by_id
         self._event_pipeline = event_pipeline
@@ -162,10 +177,31 @@ class AgentChatApp(App[None]):
     async def on_mount(self) -> None:
         """Attach the application-owned ingress once the Textual loop exists."""
         await self._transcribers.start(self.session_repository, self._event_pipeline, self)
+        await self._load_repository_sessions()
         self._piper.attach()
         self._subscriptions = [self._piper]
         self._active_chat().input.focus()
         self.set_interval(0.25, self._refresh_sidebars)
+
+    async def _load_repository_sessions(self) -> None:
+        """Restore each agent's selected session and transcript from durable state."""
+        for agent_id, agent in self._agents.items():
+            active = agent.current_session()
+            if active is None:
+                sessions = await self.session_repository.sessions_for(agent_id)
+                if not sessions:
+                    continue
+                selected = sessions[-1]
+                active = await agent.activate_session(
+                    selected.session_name, selected.identifier
+                )
+            else:
+                await self.session_repository.save_session(
+                    agent_id,
+                    active.name,
+                    active.identifier.model_dump(mode="json"),
+                )
+            await self.chats[agent_id].select_session(active.name)
 
     async def on_unmount(self) -> None:
         self._stop_event_delivery()
@@ -181,12 +217,9 @@ class AgentChatApp(App[None]):
     async def receive_pairo_event(self, event: BaseModel) -> None:
         """Deliver an event to stateful owners, then enqueue transcription."""
         self._transcribers.deliver(event)
-        await self._transcribe_event(event)
-
-    async def _transcribe_event(self, event: BaseModel) -> None:
-        """Resolve and post only; persistence is transcriber-owned."""
         if self._transcribers.has_event_transcriber(event):
             self._transcribers.event_transcriber_for(event).request(event)
+
 
     @on_pairo(SessionCreated)
     async def receive_session_created(self, event: SessionCreated) -> None:

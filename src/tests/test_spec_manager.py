@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
 
 from pairo import AgentConfiguration, SandboxPermission
 from pairo.core.clients.client import MCP_AGENT_ID_HEADER
@@ -27,6 +28,7 @@ CRITERIA = [AcceptanceCriterion(id="AC1", description="It works")]
 class AgentStub:
     def __init__(self, folder: Path, name: str) -> None:
         self._configuration = AgentConfiguration(
+            id=uuid4(),
             name=name,
             sandbox=SandboxPermission.READ_ONLY,
             workspace=folder,

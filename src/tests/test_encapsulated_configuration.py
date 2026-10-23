@@ -3,6 +3,7 @@
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import ActiveSession, AgentStatus, FakeSessionIdentifier
@@ -61,6 +62,7 @@ def test_runtime_launcher_uses_its_injected_ui_launcher() -> None:
         calls: list[str] = []
         pipeline = EventPipeline()
         configured = AgentConfiguration(
+            id=uuid4(),
             name="agent",
             model="test",
             sandbox=SandboxPermission.READ_ONLY,
@@ -92,6 +94,7 @@ def test_runtime_launcher_uses_its_injected_ui_launcher() -> None:
 
 def test_mcp_server_attacher_attaches_its_injected_server() -> None:
     agent = AgentConfiguration(
+        id=uuid4(),
         name="developer",
         model="test",
         sandbox=SandboxPermission.READ_ONLY,
@@ -107,6 +110,7 @@ def test_mcp_server_attacher_attaches_its_injected_server() -> None:
 
 def test_default_statistics_factory_and_formatters_keep_legacy_behavior() -> None:
     agent = AgentConfiguration(
+        id=uuid4(),
         name="developer",
         model="test",
         sandbox=SandboxPermission.READ_ONLY,

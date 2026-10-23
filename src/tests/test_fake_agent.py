@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 from threading import active_count
+from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
@@ -59,6 +60,7 @@ def make_agent(
 ) -> FakeAgent:
     return FakeAgent(
         AgentConfiguration(
+            id=uuid4(),
             name="fake",
             sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,

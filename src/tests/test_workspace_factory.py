@@ -1,6 +1,7 @@
 """WorkspaceFactory filesystem and configuration contracts."""
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -9,6 +10,7 @@ from pairo.core.agent import AgentConfiguration, SandboxPermission, WorkspaceFac
 
 def make_agent(tmp_path: Path) -> AgentConfiguration:
     return AgentConfiguration(
+        id=uuid4(),
         name="developer",
         sandbox=SandboxPermission.READ_ONLY,
         workspace=tmp_path,

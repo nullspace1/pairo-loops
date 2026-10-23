@@ -38,10 +38,14 @@ def make_agent(tmp_path: Path, **changes) -> AgentConfiguration:
 
 def test_agent_defaults_identity_and_collection_isolation(tmp_path: Path) -> None:
     first = make_agent(tmp_path)
+    equivalent = make_agent(tmp_path)
     second = make_agent(tmp_path, model="other")
+    differently_named = make_agent(tmp_path, name="other agent")
 
     assert isinstance(first.id, UUID)
-    assert first.id != second.id
+    assert first.id == equivalent.id
+    assert first.id == second.id
+    assert first.id != differently_named.id
     assert first.name == "agent"
     assert first.workspace == tmp_path.resolve()
     assert first.model == "model"
@@ -60,6 +64,15 @@ def test_agent_defaults_identity_and_collection_isolation(tmp_path: Path) -> Non
         first.id = second.id
     with pytest.raises(ValidationError, match="frozen"):
         first.model = "direct-assignment"
+
+
+def test_agent_name_is_required_to_derive_its_id(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="name"):
+        AgentConfiguration(
+            sandbox=SandboxPermission.READ_ONLY,
+            workspace=tmp_path,
+            model="model",
+        )
 
 
 def test_scalar_setters_validate_and_commit(tmp_path: Path) -> None:

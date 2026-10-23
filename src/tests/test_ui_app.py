@@ -2,6 +2,9 @@
 
 import asyncio
 from pathlib import Path
+from uuid import UUID, uuid4
+
+import pytest
 
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import FakeAgent
@@ -20,9 +23,12 @@ from pairo.ui.widgets.chat_editor import ChatEditor
 from textual.widgets import Button, DataTable
 
 
-def make_agent(tmp_path: Path, pipeline: EventPipeline) -> FakeAgent:
+def make_agent(
+    tmp_path: Path, pipeline: EventPipeline, agent_id: UUID | None = None
+) -> FakeAgent:
     return FakeAgent(
         AgentConfiguration(
+            id=agent_id or uuid4(),
             name="reviewer",
             sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,
@@ -54,6 +60,68 @@ def test_app_initializes_from_active_agent_and_repository(tmp_path: Path) -> Non
             assert stored.identifier == active.identifier.model_dump(mode="json")
 
         await agent.close()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_app_rejects_duplicate_agent_names(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        first = make_agent(tmp_path, pipeline)
+        second_configuration = first.configuration().model_copy(
+            update={
+                "description": "different runtime configuration",
+            }
+        )
+        second = FakeAgent(second_configuration, pipeline, lambda: "approved")
+
+        with pytest.raises(ValueError, match="Agent IDs must be unique"):
+            AgentChatApp({uuid4(): first, uuid4(): second}, pipeline)
+
+        await first.close()
+        await second.close()
+
+    asyncio.run(scenario())
+
+
+def test_app_restores_latest_session_from_repository(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        agent_id = agent.configuration().id
+        first = await agent.new_session("Earlier")
+        await repository.save_session(
+            agent_id, first.name, first.identifier.model_dump(mode="json")
+        )
+        latest = await agent.new_session("Latest")
+        await repository.save_session(
+            agent_id, latest.name, latest.identifier.model_dump(mode="json")
+        )
+        restored_entry = TranscriptEntry(
+            "agent",
+            "Stored transcript",
+            EventDetailLevel.NORMAL,
+            {"type": "message"},
+        )
+        await repository.add_entry(agent_id, latest.name, restored_entry)
+        await agent.close()
+
+        restored_agent = make_agent(tmp_path, pipeline, agent_id)
+        assert restored_agent.configuration().id == agent_id
+        app = AgentChatApp({agent_id: restored_agent}, pipeline, repository)
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            active = restored_agent.current_session()
+            assert active is not None
+            assert active.name == latest.name
+            assert active.identifier == latest.identifier
+            assert app.chats[agent_id].session_name == latest.name
+            assert restored_entry in app.chats[agent_id].transcript.entries
+
+        await restored_agent.close()
         await repository.close()
 
     asyncio.run(scenario())

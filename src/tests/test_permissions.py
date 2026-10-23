@@ -230,6 +230,7 @@ def test_codex_agent_calls_the_permission_requester_directly() -> None:
         pipeline = EventPipeline()
         requester = RecordingRequester(PermissionDecision.ACCEPT)
         configured = AgentConfiguration(
+            id=uuid4(),
             name="reviewer",
             sandbox=SandboxPermission.READ_ONLY,
             workspace=".",
@@ -289,6 +290,7 @@ def test_textual_requester_hands_sdk_callback_to_the_principal_loop() -> None:
         }
         requester = TextualPermissionRequester(pipeline, repository)
         agent = AgentConfiguration(
+            id=uuid4(),
             name="reviewer",
             sandbox=SandboxPermission.READ_ONLY,
             workspace=".",
@@ -343,6 +345,7 @@ def test_permission_failure_defaults_to_decline() -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
         configured = AgentConfiguration(
+            id=uuid4(),
             name="agent",
             sandbox=SandboxPermission.READ_ONLY,
             workspace=".",

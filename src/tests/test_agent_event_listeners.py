@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
@@ -21,9 +22,10 @@ from pairo.core.permissions import FileChangeApprovalRequest, PermissionDecision
 
 
 class ObservedAgent:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, name: str = "same display name") -> None:
         self._configuration = AgentConfiguration(
-            name="same display name",
+            id=uuid4(),
+            name=name,
             sandbox=SandboxPermission.READ_ONLY,
             workspace=workspace,
             model="test-model",
@@ -41,8 +43,8 @@ class ObservedAgent:
         return self._configuration
 
 
-def _agent(workspace: Path) -> ObservedAgent:
-    return ObservedAgent(workspace)
+def _agent(workspace: Path, name: str = "same display name") -> ObservedAgent:
+    return ObservedAgent(workspace, name)
 
 
 def _usage() -> TokenUsage:
@@ -115,7 +117,7 @@ def test_message_filtering_uses_id_and_registrations_are_future_only(tmp_path: P
     async def scenario() -> None:
         pipeline = EventPipeline()
         first_agent = _agent(tmp_path)
-        second_agent = _agent(tmp_path)
+        second_agent = _agent(tmp_path, "second agent")
         early = MessageSent(agent_id=first_agent.id, session_name="s", message="early")
         pipeline.push(early)
         listeners = AgentEventListeners(pipeline)

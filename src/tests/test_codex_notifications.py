@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from threading import get_ident
 from types import SimpleNamespace
+from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -58,6 +59,7 @@ class NotificationClient:
 
 def make_agent(tmp_path: Path, pipeline: EventPipeline, client: NotificationClient) -> CodexAgent:
     configured = AgentConfiguration(
+        id=uuid4(),
         name="codex",
         sandbox=SandboxPermission.READ_ONLY,
         workspace=tmp_path,

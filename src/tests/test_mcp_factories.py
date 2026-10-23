@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -14,9 +15,13 @@ from pairo.mcp.context7 import context7
 from pairo.mcp.github import add_github_mcp_server
 
 
-def configured_agent(tmp_path: Path, name: str = "developer") -> AgentConfiguration:
+def configured_agent(
+    tmp_path: Path, name: str = "developer", description: str = ""
+) -> AgentConfiguration:
     return AgentConfiguration(
+        id=uuid4(),
         name=name,
+        description=description,
         sandbox=SandboxPermission.READ_ONLY,
         workspace=tmp_path,
         model="test",
@@ -95,11 +100,12 @@ def test_chatroom_registers_agent_ids() -> None:
 
     chatroom.add_chatroom("main", {configured.id: agent})
     assert chatroom._is_in_chatroom("main", configured.id)
-    assert not chatroom._is_in_chatroom("main", configured_agent(Path.cwd()).id)
+    other = configured_agent(Path.cwd(), "other agent")
+    assert not chatroom._is_in_chatroom("main", other.id)
     assert configured.mcp_servers == (chatroom.as_http_mcp_server(),)
 
     with pytest.raises(ValueError, match="does not match"):
-        chatroom.add_chatroom("invalid", {configured_agent(Path.cwd()).id: agent})
+        chatroom.add_chatroom("invalid", {other.id: agent})
 
 
 def test_chatroom_can_create_a_session_for_a_registered_agent() -> None:
@@ -142,7 +148,7 @@ def test_repeated_factory_registration_is_idempotent(tmp_path: Path) -> None:
 def test_factory_configures_agents_with_duplicate_names(tmp_path: Path) -> None:
     agents = [
         configured_agent(tmp_path, "shared"),
-        configured_agent(tmp_path, "shared"),
+        configured_agent(tmp_path, "shared", "second configuration"),
     ]
 
     server = add_github_mcp_server(agents)

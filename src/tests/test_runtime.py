@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -24,6 +25,7 @@ class StubAgent:
     ) -> None:
         self.calls = calls
         self._configuration = AgentConfiguration(
+            id=uuid4(),
             name="agent",
             sandbox=SandboxPermission.READ_ONLY,
             workspace=workspace,
@@ -140,6 +142,7 @@ def test_textual_quit_returns_run_agents_and_releases_idle_resources(
     async def scenario() -> None:
         pipeline = EventPipeline()
         configuration = AgentConfiguration(
+            id=uuid4(),
             name="agent",
             sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,

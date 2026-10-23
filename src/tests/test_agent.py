@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from uuid import uuid4
 
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import Agent, AgentStatus, FakeAgent, FakeSessionIdentifier
@@ -12,6 +13,7 @@ def test_fake_agent_satisfies_the_runtime_protocol(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
         configured = AgentConfiguration(
+            id=uuid4(),
             name="fake",
             sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,
