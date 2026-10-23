@@ -138,8 +138,10 @@ enumerating event classes. Each line has `timestamp` (ISO-8601 UTC),
 (`event.model_dump(mode="json")`). The logger is independent of transcript
 persistence and never publishes logging events. The default
 `FullFidelityEventLogPolicy` writes every event. `CoalescingEventLogPolicy`
-keeps only the latest activity-progress snapshot and flushes it before activity
-completion or log flush/close; the example harness uses this lower-noise mode.
+keeps only the latest activity-progress snapshot for each agent, session,
+typed activity family, and provider activity ID. A completion flushes only its
+matching pending snapshot; log flush/close drains all remaining snapshots. The
+example harness uses this lower-noise mode.
 
 Await `flush()` when readers need all already queued records visible and
 durably flushed. Await `close()` during shutdown: it drains already queued

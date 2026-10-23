@@ -69,6 +69,13 @@ across agents, sessions, or command and MCP families. The derived entry key is
 opaque: the raw provider ID is not displayed and is not stored in transcript
 metadata.
 
+The coalescing conversation log uses that same typed family identity. A command
+and an MCP call may therefore share a provider activity ID without either
+progress update being replaced; each completion flushes only its matching
+family's pending progress. Persisted pending cards are terminalized through
+registered command and MCP family handlers, rather than a UI payload-type
+branch; an unregistered durable type is rejected safely.
+
 `TranscriptService` asks the repository to atomically add or update the entry,
 then publishes `TranscriptEntryAdded` or `TranscriptEntryUpdated` to match the
 committed mutation. If persistence fails, it publishes neither notification.
@@ -108,7 +115,11 @@ Both widgets start collapsed. Missing optional values render safe fallback
 text or JSON `null`; SDK enum class names and provider bookkeeping do not
 appear in their titles. The transcript continues to persist `agent` as its
 source role, and rendering uses the configured agent display name for the
-visible source heading.
+visible source heading. The same reusable heading wraps every renderer:
+standard durable roles map to User, System, or the configured agent name;
+new network rows persist the sender's display name as their source. Legacy
+network rows keep their safe `Network` fallback, and UUID-shaped legacy role
+values are never rendered as a source label.
 
 ## Compatibility boundary
 

@@ -8,6 +8,7 @@ from pairo.core.events import (
     AgentMcpToolCallCompleted,
     AgentTokenUsageUpdated,
     MessageSent,
+    NetworkMessageSent,
     TokenUsage,
 )
 from pairo.ui.models import EventDetailLevel, TranscriptEntry
@@ -18,6 +19,8 @@ from pairo.ui.transcribers import (
     default_transcribers,
 )
 from pairo.ui.transcribers.session_table_transcriber import SessionTableTranscriber
+from pairo.ui.transcribers.network_message_sent_transcriber import NetworkMessageSentTranscriber
+from pairo.ui.transcribers.text_transcript import TranscriptSourcePresenter
 
 
 AGENT_ID = uuid4()
@@ -124,3 +127,28 @@ def test_token_usage_is_written_as_a_session_log_entry() -> None:
     assert formatted.entry.metadata == {"type": "token_usage"}
     assert "turn: 100 input (40 cached)" in formatted.entry.content
     assert "session: 375 total" in formatted.entry.content
+
+
+def test_network_sender_is_the_durable_human_source() -> None:
+    entry = NetworkMessageSentTranscriber().write(
+        NetworkMessageSent(
+            channel_name="team",
+            sender_id=uuid4(),
+            sender_name="Researcher",
+            recipient_id=AGENT_ID,
+            session_name="Conversation 1",
+            message="Found it.",
+        )
+    ).entry
+
+    assert entry.role == "Researcher"
+    assert TranscriptSourcePresenter("Reviewer").present(entry.role) == "Researcher"
+
+
+def test_source_presenter_uses_safe_legacy_fallbacks() -> None:
+    presenter = TranscriptSourcePresenter("Reviewer")
+
+    assert presenter.present("agent") == "Reviewer"
+    assert presenter.present("network") == "Network"
+    assert presenter.present("") == "System"
+    assert presenter.present(str(uuid4())) == "System"

@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from ..core.events.agent_events import (
     AgentActivityCompleted,
     AgentActivityProgress,
+    ActivityFamily,
     AgentTextDelta,
     AgentUnsupportedActivity,
 )
@@ -43,7 +44,7 @@ class CoalescingEventLogPolicy:
     """Keep only the latest progress update for each routed activity."""
 
     def __init__(self) -> None:
-        self._progress: dict[tuple[UUID, str, str], AgentActivityProgress] = {}
+        self._progress: dict[tuple[UUID, str, ActivityFamily, str], AgentActivityProgress] = {}
         self._handlers: dict[
             type[BaseModel], Callable[[BaseModel], tuple[BaseModel, ...]]
         ] = {
@@ -68,21 +69,22 @@ class CoalescingEventLogPolicy:
 
     def _complete_activity(self, event: BaseModel) -> tuple[BaseModel, ...]:
         completed = cast(AgentActivityCompleted, event)
-        route = (completed.agent_id, completed.session_name)
-        matching = tuple(
-            progress
-            for key, progress in self._progress.items()
-            if key[:2] == route
-        )
-        for progress in matching:
-            del self._progress[self._key(progress)]
+        progress = self._progress.pop(self._key(completed), None)
+        matching = () if progress is None else (progress,)
         return (*matching, completed)
 
     def _pass_through(self, event: BaseModel) -> tuple[BaseModel, ...]:
         return (event,)
 
-    def _key(self, event: AgentActivityProgress) -> tuple[UUID, str, str]:
-        return event.agent_id, event.session_name, event.activity_id
+    def _key(
+        self, event: AgentActivityProgress | AgentActivityCompleted
+    ) -> tuple[UUID, str, ActivityFamily, str]:
+        return (
+            event.agent_id,
+            event.session_name,
+            event.activity_family,
+            event.activity_id,
+        )
 
 
 class DiagnosticEventLogPolicy(CoalescingEventLogPolicy):

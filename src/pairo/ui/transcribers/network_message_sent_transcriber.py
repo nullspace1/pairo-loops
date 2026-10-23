@@ -23,7 +23,7 @@ class NetworkMessageSentTranscriber(
             event.recipient_id,
             event.session_name,
             TranscriptEntry(
-                "network",
+                event.sender_name,
                 f"[{event.channel_name}] {event.sender_name}: {event.message}",
                 EventDetailLevel.NORMAL,
                 {"type": "network"},

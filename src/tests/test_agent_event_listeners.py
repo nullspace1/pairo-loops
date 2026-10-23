@@ -9,6 +9,8 @@ from pydantic import BaseModel
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.events import (
     AgentActivityCompleted, AgentActivityProgress, AgentActivityStarted, AgentError,
+    AgentCommandExecutionCompleted, AgentCommandExecutionProgress,
+    AgentMcpToolCallCompleted, AgentMcpToolCallProgress,
     AgentPlanDelta, AgentReasoningDelta, AgentResponseCompleted,
     AgentResponseInterrupted, AgentTextDelta, AgentTokenUsageUpdated,
     AgentEventListeners, EventPipeline, ImageSent, MessageSent, NetworkMessageSent,
@@ -60,8 +62,10 @@ def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_
             AgentPlanDelta(agent_id=agent.id, session_name="s", text="plan"),
             AgentReasoningDelta(agent_id=agent.id, session_name="s", text="reason"),
             AgentActivityStarted(agent_id=agent.id, session_name="s", activity={}),
-            AgentActivityProgress(agent_id=agent.id, session_name="s", activity={}),
-            AgentActivityCompleted(agent_id=agent.id, session_name="s", activity={}),
+            AgentCommandExecutionProgress(agent_id=agent.id, session_name="s", activity_id="command", output_delta="progress"),
+            AgentMcpToolCallProgress(agent_id=agent.id, session_name="s", activity_id="tool", message="progress"),
+            AgentCommandExecutionCompleted(agent_id=agent.id, session_name="s", activity_id="command", command="echo", status="completed"),
+            AgentMcpToolCallCompleted(agent_id=agent.id, session_name="s", activity_id="tool", server="tools", tool="inspect", arguments={}, status="completed"),
             AgentResponseCompleted(agent_id=agent.id, session_name="s", message="done"),
             AgentResponseInterrupted(agent_id=agent.id, session_name="s"),
             AgentTokenUsageUpdated(agent_id=agent.id, session_name="s", last=usage, total=usage),
@@ -96,7 +100,7 @@ def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_
 
         for event in events:
             pipeline.push(event)
-        while len(observed) < 38:
+        while len(observed) < 42:
             await asyncio.sleep(0)
         for event in events:
             expected_deliveries = 4 if isinstance(event, SessionCreated) else 2

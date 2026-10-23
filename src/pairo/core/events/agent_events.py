@@ -19,6 +19,7 @@ CommandExecutionCompletionStatus: TypeAlias = Literal[
 McpToolCallCompletionStatus: TypeAlias = Literal[
     "inProgress", "completed", "failed"
 ]
+ActivityFamily: TypeAlias = Literal["command_execution", "mcp_tool_call"]
 
 
 class ClientEvent(BaseModel, ABC):
@@ -208,9 +209,19 @@ class AgentActivityStarted(RoutedAgentEvent):
 class AgentActivityProgress(RoutedAgentEvent, ABC):
     """Common subscription type for typed routed activity progress events."""
 
+    @property
+    @abstractmethod
+    def activity_family(self) -> ActivityFamily:
+        """Stable provider-neutral identity used to correlate this activity."""
+
 
 class AgentActivityCompleted(RoutedAgentEvent, ABC):
     """Common subscription type for typed routed completed activity events."""
+
+    @property
+    @abstractmethod
+    def activity_family(self) -> ActivityFamily:
+        """Stable provider-neutral identity used to correlate this activity."""
 
 
 class AgentUnsupportedActivity(RoutedAgentEvent):
@@ -268,10 +279,18 @@ class AgentCommandExecutionProgress(AgentActivityProgress):
     activity_id: str
     output_delta: str
 
+    @property
+    def activity_family(self) -> Literal["command_execution"]:
+        return "command_execution"
+
 
 class AgentMcpToolCallProgress(AgentActivityProgress):
     activity_id: str
     message: str
+
+    @property
+    def activity_family(self) -> Literal["mcp_tool_call"]:
+        return "mcp_tool_call"
 
 
 class AgentCommandExecutionCompleted(AgentActivityCompleted):
@@ -282,6 +301,10 @@ class AgentCommandExecutionCompleted(AgentActivityCompleted):
     exit_code: int | None = None
     output: str | None = None
 
+    @property
+    def activity_family(self) -> Literal["command_execution"]:
+        return "command_execution"
+
 
 class AgentMcpToolCallCompleted(AgentActivityCompleted):
     activity_id: str
@@ -291,6 +314,10 @@ class AgentMcpToolCallCompleted(AgentActivityCompleted):
     status: McpToolCallCompletionStatus
     result: JsonValue | None = None
     error: str | None = None
+
+    @property
+    def activity_family(self) -> Literal["mcp_tool_call"]:
+        return "mcp_tool_call"
 
 
 class AgentResponseCompleted(RoutedAgentEvent):
@@ -362,6 +389,7 @@ __all__ = [
     "ClientMcpToolCallCompleted", "ClientMcpToolCallProgress",
     "ClientUnsupportedActivity",
     "ClientActivityStarted", "ClientEvent", "ClientPlanDelta",
+    "ActivityFamily",
     "ClientReasoningDelta", "ClientResponseCompleted",
     "ClientResponseInterrupted", "ClientTextDelta", "ClientTokenUsageUpdated",
     "RoutedAgentEvent",

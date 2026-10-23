@@ -11,6 +11,8 @@ from pairo.core.events import (
     AgentActivityStarted,
     AgentCommandExecutionCompleted,
     AgentCommandExecutionProgress,
+    AgentMcpToolCallCompleted,
+    AgentMcpToolCallProgress,
     AgentError,
     ConversationEventLog,
     EventPipeline,
@@ -301,3 +303,24 @@ def test_flush_waits_for_an_in_progress_close(tmp_path: Path) -> None:
         await close_task
 
     asyncio.run(scenario())
+
+
+def test_coalescing_policy_keeps_same_id_progress_separate_by_activity_family() -> None:
+    policy = CoalescingEventLogPolicy()
+    command_progress = AgentCommandExecutionProgress(
+        agent_id=AGENT_ID, session_name="main", activity_id="same", output_delta="command"
+    )
+    mcp_progress = AgentMcpToolCallProgress(
+        agent_id=AGENT_ID, session_name="main", activity_id="same", message="mcp"
+    )
+    command_completed = AgentCommandExecutionCompleted(
+        agent_id=AGENT_ID, session_name="main", activity_id="same", command="pytest", status="completed"
+    )
+    mcp_completed = AgentMcpToolCallCompleted(
+        agent_id=AGENT_ID, session_name="main", activity_id="same", server="tools", tool="inspect", arguments={}, status="completed"
+    )
+
+    assert policy.accept(command_progress) == ()
+    assert policy.accept(mcp_progress) == ()
+    assert policy.accept(command_completed) == (command_progress, command_completed)
+    assert policy.accept(mcp_completed) == (mcp_progress, mcp_completed)

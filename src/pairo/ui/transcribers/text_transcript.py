@@ -7,6 +7,7 @@ from textual.containers import VerticalGroup, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Static
 from typing import TypeVar
+from uuid import UUID
 
 from ..models import TranscriptEntry
 from .transcript_render_context import TranscriptRenderContext
@@ -41,11 +42,46 @@ class SourceHeading(Static):
     """A human-readable durable transcript source, never a routing identifier."""
 
     def __init__(self, transcript: TranscriptEntry[MetadataT], context: TranscriptRenderContext) -> None:
-        source = transcript.role.strip()
-        labels = {"": "System", "activity": context.agent_name, "agent": context.agent_name,
-                  "permission": context.agent_name, "usage": context.agent_name,
-                  "system": "System", "user": "User", "network": "Network"}
-        super().__init__(labels.get(source, source), classes="transcript-source")
+        super().__init__(
+            TranscriptSourcePresenter(context.agent_name).present(transcript.role),
+            classes="transcript-source",
+        )
+
+
+class TranscriptSourcePresenter:
+    """Turn durable source values into labels which are safe to show people.
+
+    ``role`` remains the persisted source column for backwards compatibility.
+    The standard historical roles are translated here, while a named network
+    sender (or another caller-supplied display label) remains readable.
+    """
+
+    def __init__(self, agent_name: str) -> None:
+        self._agent_name = agent_name or "Agent"
+
+    def present(self, source: str) -> str:
+        normalized = source.strip()
+        labels = {
+            "": "System",
+            "activity": self._agent_name,
+            "agent": self._agent_name,
+            "permission": self._agent_name,
+            "usage": self._agent_name,
+            "system": "System",
+            "user": "User",
+            # Legacy network rows did not retain a sender display name.
+            "network": "Network",
+        }
+        if normalized in labels:
+            return labels[normalized]
+        return "System" if self._is_identifier(normalized) else normalized
+
+    def _is_identifier(self, value: str) -> bool:
+        try:
+            UUID(value)
+        except ValueError:
+            return False
+        return True
 
 
 class SourcedTranscript(VerticalGroup):
