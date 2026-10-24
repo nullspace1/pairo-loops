@@ -17,6 +17,7 @@ if str(SOURCE_ROOT) not in sys.path:
 from agents.agent_documenter.agent_documenter import get_agent_documenter
 from agents.developer.developer import get_developer
 from agents.planner.planner import get_planner
+from agents.prompt_optimizer.prompt_optimizer import get_prompt_optimizer
 from agents.verifier.verifier import get_verifier
 from pairo import (
     WorkerVerifierPair,
@@ -41,8 +42,11 @@ async def run_async() -> None:
         get_developer("developer", pipeline, repository),
         get_verifier(pipeline, repository),
         get_agent_documenter(pipeline, repository),
+        get_prompt_optimizer(pipeline, repository),
     ]
-    planner, developer, verifier, _agent_documenter = configured_agents
+    planner, developer, verifier, _agent_documenter, _prompt_optimizer = (
+        configured_agents
+    )
     add_github_mcp_server(
         [
             agent.configuration()

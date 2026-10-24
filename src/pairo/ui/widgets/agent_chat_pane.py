@@ -1,6 +1,8 @@
 """Composite workspace for one agent."""
 
 from collections.abc import Mapping
+import asyncio
+from dataclasses import dataclass
 from uuid import UUID
 
 from textual import on
@@ -20,6 +22,35 @@ from .agent_sidebar import AgentSidebar
 from .chat_editor import ChatEditor
 from .sidebar_statistics import SidebarStatistics
 from .transcript import Transcript
+
+
+class _PendingTranscriptMutation:
+    async def apply(self, transcript: Transcript) -> None:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingAdd(_PendingTranscriptMutation):
+    entry: TranscriptEntry[TranscriptMetadata]
+
+    async def apply(self, transcript: Transcript) -> None:
+        await transcript.add_entry(self.entry)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingUpdate(_PendingTranscriptMutation):
+    entry: TranscriptEntry[TranscriptMetadata]
+
+    async def apply(self, transcript: Transcript) -> None:
+        await transcript.update_entry(self.entry)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingDelete(_PendingTranscriptMutation):
+    entry_id: UUID
+
+    async def apply(self, transcript: Transcript) -> None:
+        await transcript.delete_entry(self.entry_id)
 
 
 class AgentChatPane(Vertical):
@@ -61,6 +92,9 @@ class AgentChatPane(Vertical):
         self._transcribers = transcribers
         self._detail_level = detail_level
         self._sidebar_statistics = sidebar_statistics
+        self._session_generation = 0
+        self._pending_mutations: list[_PendingTranscriptMutation] = []
+        self._transition_lock = asyncio.Lock()
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="agent-workspace"):
@@ -97,13 +131,17 @@ class AgentChatPane(Vertical):
 
     async def on_mount(self) -> None:
         if self.session_name is not None:
-            try:
-                entries = await self._repository.entries_for(
-                    self.agent_id, self.session_name
-                )
-            except SessionNotFoundError:
-                return
-            await self.transcript.replace_entries(entries)
+            async with self._transition_lock:
+                session_name = self.session_name
+                try:
+                    entries = await self._repository.entries_for(self.agent_id, session_name)
+                except SessionNotFoundError:
+                    return
+                if not self.is_mounted or session_name != self.session_name:
+                    return
+                await self.transcript.populate_entries(entries)
+                if self.is_mounted and session_name == self.session_name:
+                    await self._apply_pending_mutations()
 
     @on(Select.Changed, ".detail-filter")
     def change_detail_level(self, event: Select.Changed) -> None:
@@ -126,22 +164,25 @@ class AgentChatPane(Vertical):
         return self.query_one(AgentSidebar)
 
     async def add_entry(self, session_name: str, entry: TranscriptEntry[TranscriptMetadata]) -> None:
-        if session_name == self.session_name:
-            await self.transcript.add_entry(entry)
+        await self._apply_or_queue(session_name, _PendingAdd(entry))
 
     async def update_entry(self, session_name: str, entry: TranscriptEntry[TranscriptMetadata]) -> None:
-        if session_name == self.session_name:
-            await self.transcript.update_entry(entry)
+        await self._apply_or_queue(session_name, _PendingUpdate(entry))
 
     async def delete_entry(self, session_name: str, entry_id: UUID) -> None:
-        if session_name == self.session_name:
-            await self.transcript.delete_entry(entry_id)
+        await self._apply_or_queue(session_name, _PendingDelete(entry_id))
 
     async def select_session(self, session_name: str) -> None:
-        self.session_name = session_name
-        entries = await self._repository.entries_for(self.agent_id, session_name)
-        self.transcript.set_session(session_name)
-        await self.transcript.replace_entries(entries)
+        async with self._transition_lock:
+            self.session_name = session_name
+            self._session_generation += 1
+            self._pending_mutations.clear()
+            entries = await self._repository.entries_for(self.agent_id, session_name)
+            if not self.is_mounted or session_name != self.session_name:
+                return
+            await self.transcript.switch_session(session_name, entries)
+            if self.is_mounted and session_name == self.session_name:
+                await self._apply_pending_mutations()
 
     async def set_detail_level(self, detail_level: EventDetailLevel) -> None:
         self._detail_level = detail_level
@@ -152,3 +193,19 @@ class AgentChatPane(Vertical):
 
     async def refresh_sidebar(self) -> None:
         await self.sidebar.refresh_data()
+
+    async def _apply_or_queue(
+        self, session_name: str, mutation: _PendingTranscriptMutation
+    ) -> None:
+        async with self._transition_lock:
+            if not self.is_mounted or session_name != self.session_name:
+                return
+            if self.transcript.is_displaying_session(session_name):
+                await mutation.apply(self.transcript)
+                return
+            self._pending_mutations.append(mutation)
+
+    async def _apply_pending_mutations(self) -> None:
+        pending, self._pending_mutations = self._pending_mutations, []
+        for mutation in pending:
+            await mutation.apply(self.transcript)

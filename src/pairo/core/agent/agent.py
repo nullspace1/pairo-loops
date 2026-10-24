@@ -5,14 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID, uuid4
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    computed_field,
     field_serializer,
     field_validator,
     model_validator,
@@ -43,6 +41,7 @@ class AgentConfiguration(BaseModel):
         strict=True,
     )
 
+    id: UUID = Field(default_factory=uuid4, frozen=True)
     name: str = Field(frozen=True)
     description: str = ""
     sandbox: SandboxPermission
@@ -62,22 +61,6 @@ class AgentConfiguration(BaseModel):
     skill_folders: tuple[Path, ...] = ()
     hooks: Mapping[HookType, tuple[Hook, ...]] = Field(default_factory=dict)
     folder_permissions: Mapping[Path, SandboxPermission] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def discard_legacy_id(cls, values: Any) -> Any:
-        """Keep identity derived from the configured name alone."""
-        if not isinstance(values, dict):
-            return values
-        normalized = dict(values)
-        normalized.pop("id", None)
-        return normalized
-
-    @computed_field
-    @property
-    def id(self) -> UUID:
-        """Return the stable runtime UUID derived from the agent name."""
-        return uuid5(NAMESPACE_URL, f"pairo-agent:{self.name}")
 
     @field_validator("name")
     @classmethod

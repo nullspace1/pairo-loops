@@ -43,8 +43,8 @@ def test_agent_defaults_identity_and_collection_isolation(tmp_path: Path) -> Non
     differently_named = make_agent(tmp_path, name="other agent")
 
     assert isinstance(first.id, UUID)
-    assert first.id == equivalent.id
-    assert first.id == second.id
+    assert first.id != equivalent.id
+    assert first.id != second.id
     assert first.id != differently_named.id
     assert first.name == "agent"
     assert first.workspace == tmp_path.resolve()
