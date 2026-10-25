@@ -5,9 +5,13 @@ description: Implement an assigned spec-manager task and request verification.
 
 # Spec Manager Worker
 
-Implement the assigned task against its acceptance criteria. Call `verify_task`
-when ready and address any rejection feedback before requesting verification
-again.
+Implement only the assigned planner-authored component against its acceptance
+criteria. Do not generate a second plan or seek plan approval. Run focused
+verification and call `verify_task` before the next component proceeds; the
+planner owns the final integration component and full-suite evidence. Address
+any rejection feedback before requesting verification again. If the
+specification must change, ask the user first; only then call
+`request_specification_change` with a nonblank summary of the user's approval.
 
 Before submission, map every criterion ID (`AC1`, `AC2`, and so on) to
 observable evidence and supporting test-run IDs (`TR1`, `TR2`, and so on).

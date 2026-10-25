@@ -21,6 +21,9 @@ def get_developer(name, pipeline, repository):
     workspace_factory.add_workspace(
          Path("./src"), SandboxPermission.WORKSPACE_WRITE
     )
+    workspace_factory.add_workspace(
+            Path("./example"), SandboxPermission.WORKSPACE_WRITE
+    )
     instructions = (agent_directory / "developer.md").read_text(encoding="utf-8")
     configuration = AgentConfiguration(
         name=name,

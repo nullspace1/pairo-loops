@@ -17,7 +17,7 @@ from mcp.server.mcpserver import Context
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from pairo.core.agent import JsonObject, SessionIdentifier
-from pairo.core.clients import Agent
+from pairo.core.clients import Agent, AgentStatus
 from pairo.core.clients.client import MCP_AGENT_ID_HEADER
 from pairo.core.mcp.mcp_http_wrapper import MCPHttpWrapper
 
@@ -182,6 +182,24 @@ class CorrectionResolution(BaseModel):
         return normalized
 
 
+class SpecificationChangeRequest(BaseModel):
+    """A worker's user-approved request to alter later component work."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    proposal: Annotated[str, Field(min_length=1, max_length=2_000)]
+    rationale: Annotated[str, Field(min_length=1, max_length=2_000)]
+    prior_user_approval: Annotated[str, Field(min_length=1, max_length=2_000)]
+
+    @field_validator("proposal", "rationale", "prior_user_approval")
+    @classmethod
+    def normalize_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Specification-change request fields cannot be blank.")
+        return normalized
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerVerifierPair:
     """A stable worker/verifier pairing exposed to the director by ``pair_id``."""
@@ -223,6 +241,37 @@ class _Assignment:
     review_result: asyncio.Future[str | None] | None = None
     evidence: VerificationEvidence | None = None
     outstanding_corrections: tuple[VerificationCorrection, ...] = ()
+
+
+class _IdleSafeDelivery:
+    """Deliver one handoff after the recipient is idle, or fail predictably."""
+
+    def __init__(self, timeout: float, poll_interval: float) -> None:
+        self._timeout = timeout
+        self._poll_interval = poll_interval
+        self._closing = asyncio.Event()
+
+    async def deliver(
+        self, recipient: Agent[SessionIdentifier], message: str, source: str
+    ) -> None:
+        deadline = asyncio.get_running_loop().time() + self._timeout
+        while recipient.status() is not AgentStatus.IDLE:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError("Recipient did not become idle before handoff timeout.")
+            try:
+                await asyncio.wait_for(
+                    self._closing.wait(), timeout=min(self._poll_interval, remaining)
+                )
+            except asyncio.TimeoutError:
+                continue
+            raise asyncio.CancelledError("Spec manager is closing.")
+        if self._closing.is_set():
+            raise asyncio.CancelledError("Spec manager is closing.")
+        await recipient.send_message(message, source=source)
+
+    def close(self) -> None:
+        self._closing.set()
 
 
 class _FeatureStore:
@@ -405,12 +454,16 @@ class SpecManager(MCPHttpWrapper):
         port: int = 8082,
         verification_timeout: float = 300,
         documenter: Agent[SessionIdentifier] | None = None,
+        handoff_timeout: float = 30,
+        handoff_poll_interval: float = 0.05,
     ) -> None:
         root = Path(folder).resolve()
         if not root.is_dir():
             raise ValueError("Spec manager folder must be an existing directory.")
         if verification_timeout <= 0:
             raise ValueError("Verification timeout must be greater than zero.")
+        if handoff_timeout <= 0 or handoff_poll_interval <= 0:
+            raise ValueError("Handoff timeout and polling interval must be greater than zero.")
         self._validate_registration(agents, director, pairs)
         self._validate_documenter_registration(agents, documenter, director, pairs)
         self._director = director
@@ -422,6 +475,7 @@ class SpecManager(MCPHttpWrapper):
         self._store = _FeatureStore(root)
         self._history = _FeatureHistoryStore(root)
         self._verification_timeout = verification_timeout
+        self._delivery = _IdleSafeDelivery(handoff_timeout, handoff_poll_interval)
         self._lock = asyncio.Lock()
         super().__init__(port=port)
 
@@ -653,6 +707,19 @@ class SpecManager(MCPHttpWrapper):
                 return "Only a registered verifier may accept a task."
             return await self._decide(pair, accepted=True)
 
+        @mcp.tool(
+            "request_specification_change",
+            "Request a user-approved specification change without changing active work.",
+        )
+        async def request_specification_change(
+            request: SpecificationChangeRequest, ctx: Context
+        ) -> str:
+            worker_id = self._agent_id(ctx)
+            pair = self._worker_pairs.get(worker_id) if worker_id else None
+            if pair is None:
+                return "Only a registered worker may request a specification change."
+            return await self._request_specification_change(pair, request)
+
         return mcp
 
     async def _assign(self, pair_id: str, task_name: str) -> str:
@@ -674,18 +741,27 @@ class SpecManager(MCPHttpWrapper):
                 await pair.verifier.new_session(
                     self._session_name("verify", pair_id, task.name)
                 )
-                await pair.worker.send_message(
-                    self._worker_message(task),
-                    source=self._director.configuration().name,
-                )
                 self._store.set_status(task.name, "working")
             except Exception as error:
                 return f"Could not assign task '{task.name}': {error}"
-            self._assignments[pair_id] = _Assignment(
+            assignment = _Assignment(
                 task.name,
                 asyncio.get_running_loop().create_future(),
             )
-            return f"Assigned task '{task.name}' to pair '{pair_id}'."
+            self._assignments[pair_id] = assignment
+        try:
+            await self._delivery.deliver(
+                pair.worker,
+                self._worker_message(task),
+                self._director.configuration().name,
+            )
+        except (Exception, asyncio.CancelledError) as error:
+            async with self._lock:
+                if self._assignments.get(pair_id) is assignment:
+                    del self._assignments[pair_id]
+                    self._store.set_status(task.name, "pending")
+            return f"Could not assign task '{task.name}': {error}"
+        return f"Assigned task '{task.name}' to pair '{pair_id}'."
 
     async def _sleep_on_task(self, task_name: str) -> str:
         async with self._lock:
@@ -758,16 +834,26 @@ class SpecManager(MCPHttpWrapper):
                 return f"Could not start verification: {evidence_error}"
             future: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
             try:
-                await pair.verifier.send_message(
-                    self._verifier_message(task, evidence),
-                    source=pair.worker.configuration().name,
-                )
                 self._store.set_status(task.name, "verifying")
             except Exception as error:
                 return f"Could not start verification: {error}"
             assignment.status = "verifying"
             assignment.review_result = future
             assignment.evidence = evidence
+        try:
+            await self._delivery.deliver(
+                pair.verifier,
+                self._verifier_message(task, evidence),
+                pair.worker.configuration().name,
+            )
+        except (Exception, asyncio.CancelledError) as error:
+            async with self._lock:
+                if assignment.review_result is future:
+                    self._store.set_status(task.name, "working")
+                    assignment.status = "working"
+                    assignment.review_result = None
+                    assignment.evidence = None
+            return f"Could not start verification: {error}"
         try:
             result = await asyncio.wait_for(
                 asyncio.shield(future), timeout=self._verification_timeout
@@ -867,15 +953,6 @@ class SpecManager(MCPHttpWrapper):
                     )
                 if not accepted:
                     assignment.outstanding_corrections = corrections
-                    await pair.worker.send_message(
-                        f"Task '{task_name}' was rejected by "
-                        f"{pair.verifier.configuration().name}. Required corrections:\n"
-                        + "\n".join(
-                            f"- {item.id} ({', '.join(item.criterion_ids)}): {item.message}"
-                            for item in corrections
-                        ),
-                        source=pair.verifier.configuration().name,
-                    )
             except Exception as error:
                 return f"Could not record verification decision: {error}"
             if accepted:
@@ -886,21 +963,73 @@ class SpecManager(MCPHttpWrapper):
                 assignment.status = "working"
                 assignment.review_result = None
                 assignment.evidence = None
-            if future is not None and not future.done():
-                future.set_result(
-                    None if accepted else f"{len(corrections)} correction(s) required."
-                )
-
         outcome = f"Accepted task '{task_name}'." if accepted else f"Rejected task '{task_name}'."
-        if accepted and self._documenter is not None:
+        recipient = self._documenter if accepted else pair.worker
+        if recipient is not None:
+            message = (
+                f"Feature history updated: {self._history.path}"
+                if accepted
+                else self._correction_message(task_name, pair, corrections)
+            )
+            source = "spec_manager" if accepted else pair.verifier.configuration().name
             try:
-                await self._documenter.send_message(
-                    f"Feature history updated: {self._history.path}",
-                    source="spec_manager",
-                )
-            except Exception as error:
-                outcome += f" Documenter notification failed: {error}"
+                await self._delivery.deliver(recipient, message, source)
+            except (Exception, asyncio.CancelledError) as error:
+                outcome += f" Handoff notification failed: {error}"
+        if future is not None and not future.done():
+            future.set_result(
+                None if accepted else f"{len(corrections)} correction(s) required."
+            )
         return outcome
+
+    def _correction_message(
+        self,
+        task_name: str,
+        pair: WorkerVerifierPair,
+        corrections: tuple[VerificationCorrection, ...],
+    ) -> str:
+        details = "\n".join(
+            f"- {item.id} ({', '.join(item.criterion_ids)}): {item.message}"
+            for item in corrections
+        )
+        return (
+            f"Task '{task_name}' was rejected by {pair.verifier.configuration().name}. "
+            f"Required corrections:\n{details}"
+        )
+
+    async def _request_specification_change(
+        self,
+        pair: WorkerVerifierPair,
+        request: SpecificationChangeRequest,
+    ) -> str:
+        async with self._lock:
+            assignment = self._assignments.get(pair.pair_id)
+            if assignment is None:
+                return f"Pair '{pair.pair_id}' has no active component."
+            task = self._store.tasks()[assignment.task_name]
+            message = self._change_request_message(task, pair, request)
+        try:
+            await self._delivery.deliver(
+                self._director, message, pair.worker.configuration().name
+            )
+        except (Exception, asyncio.CancelledError) as error:
+            return f"Could not deliver specification-change request: {error}"
+        return f"Sent specification-change request for component '{task.name}' to the planner."
+
+    def _change_request_message(
+        self,
+        task: _Task,
+        pair: WorkerVerifierPair,
+        request: SpecificationChangeRequest,
+    ) -> str:
+        return (
+            "User-approved specification-change request.\n"
+            f"Component: {task.name}\nWorker: {pair.worker.configuration().name}\n"
+            f"Proposal: {request.proposal}\nRationale: {request.rationale}\n"
+            f"Prior user approval: {request.prior_user_approval}\n"
+            "Do not mutate this active component. Modify only pending components or "
+            "create a follow-up task."
+        )
 
     async def close(self) -> None:
         """Release task waiters before asking HTTP to drain active requests.
@@ -911,6 +1040,7 @@ class SpecManager(MCPHttpWrapper):
         the futures leaves the assignment and its task file unchanged while the
         request handlers unwind.
         """
+        self._delivery.close()
         await self._cancel_assignment_waiters()
         await super().close()
 
@@ -999,11 +1129,11 @@ class SpecManager(MCPHttpWrapper):
         return (
             f"Implement task '{task.name}'.\nDescription: {task.description}\n"
             f"Acceptance criteria:\n{criteria}\n"
-            "Before changing code, inspect the relevant implementation and post an in-depth "
-            "plan directly to the user. Cover the current design, proposed changes, affected "
-            "files or components, ordered implementation steps, verification, and risks. Wait "
-            "for an explicit approval confirmation message from the user before implementing. "
-            "When implementation is ready, call spec_manager.verify_task with "
+            "This is one planner-authored component. Implement only this component; do not "
+            "create a second implementation plan or seek a second plan approval. Run focused "
+            "verification now and call spec_manager.verify_task before the next component can "
+            "proceed. If the specification must change, first obtain user approval, then call "
+            "request_specification_change with that approval summary. When implementation is ready, call spec_manager.verify_task with "
             "a concise implementation summary, changed files, evidence for every "
             "acceptance criterion, summarized test runs, and remaining risks."
         )
@@ -1029,8 +1159,8 @@ class SpecManager(MCPHttpWrapper):
 
 
 _ROLE_INSTRUCTIONS = {
-    "director": "Use the spec_manager tools to create, modify, delete, and assign feature tasks with stable acceptance-criterion IDs; only change or delete pending tasks. The assigned worker owns implementation planning. Report delegation state before waiting on an assigned task.",
-    "worker": "For an assigned task, inspect the relevant code and post an in-depth implementation plan directly to the user, covering the current design, proposed changes, affected files or components, ordered implementation steps, verification, and risks. Do not change code until the user sends an explicit approval confirmation message. Then implement and call verify_task with exactly one evidence record per criterion ID, referenced test-run IDs, every outstanding correction resolution, and no raw test output.",
+    "director": "Inspect the code and tests, present the user a complete plan, and obtain approval before creating tasks. Split the approved plan into independently verifiable planner-authored components, assign them sequentially, and reserve a final integration component for full-suite checks. Use the spec_manager tools to create, modify, delete, and assign tasks with stable acceptance-criterion IDs; only change or delete pending tasks. Resolve approved worker change requests only by modifying pending components or creating follow-up tasks. Report delegation state before waiting on an assigned task.",
+    "worker": "Implement only the assigned planner-authored component; do not generate a plan or seek a second plan approval. Run focused verification and call verify_task before later components proceed, with exactly one evidence record per criterion ID, referenced test-run IDs, every outstanding correction resolution, and no raw test output. Ask the user before invoking request_specification_change and include their nonblank approval summary.",
     "verifier": "Audit every criterion and prior correction, independently check material claims, then call spec_manager.accept_task once or reject_task once with all structured corrections.",
 }
 
@@ -1047,6 +1177,8 @@ class SpecManagerInstaller:
         port: int = 8082,
         verification_timeout: float = 300,
         documenter: Agent[SessionIdentifier] | None = None,
+        handoff_timeout: float = 30,
+        handoff_poll_interval: float = 0.05,
     ) -> SpecManager:
         manager = SpecManager(
             folder,
@@ -1056,6 +1188,8 @@ class SpecManagerInstaller:
             port,
             verification_timeout,
             documenter,
+            handoff_timeout,
+            handoff_poll_interval,
         )
         participants = [(director, "director")]
         participants.extend((pair.worker, "worker") for pair in pairs)
@@ -1096,6 +1230,7 @@ __all__ = [
     "CorrectionResolution",
     "SpecManager",
     "SpecManagerInstaller",
+    "SpecificationChangeRequest",
     "TestRunSummary",
     "VerificationEvidence",
     "VerificationCorrection",

@@ -25,10 +25,6 @@ warn_unused_ignores = true
 
 [tool.setuptools.packages.find]
 include = ["pairo*"]
-
-[tool.setuptools.package-data]
-pairo = ["mcp/spec_manager/spec_manager_skills/*/spec-manager-*/SKILL.md"]
-
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

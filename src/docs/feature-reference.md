@@ -26,7 +26,6 @@ These utilities extend the core runtime without changing its ownership model.
 | `Chatroom` | Direct message and session routing among registered runtime agents |
 | `context7` | Adds the Context7 MCP server to agent configurations |
 | `add_github_mcp_server` | Adds a GitHub MCP server to agent configurations |
-| `SpecManager` | Director/worker/verifier task coordination, accepted-evidence history, and optional documenter notification |
 
 ## Agent contract
 
@@ -194,15 +193,6 @@ the root sandbox permission, and each source directory's permission to the
 configuration. Individual linked directories cannot use
 `DANGER_FULL_ACCESS`; on Windows, link creation falls back to a directory
 junction when symbolic-link privilege is unavailable.
-
-`SpecManager` configures its director and worker/verifier participants with an
-MCP server and role guidance. Tasks use structured acceptance-criterion IDs;
-verification evidence must map every criterion and every outstanding
-correction exactly once. `FEATURES.md` accepts only structured `pairo-task`
-blocks and rejects the former single-line format. Accepted evidence is retained in
-`output/FEATURE_HISTORY.md`; an optional documenter receives that file's path
-without receiving a spec-manager role. Closing the manager cancels its waiters
-before stopping the HTTP transport and does not alter task-file status.
 
 `run_agents(agents, pipeline, repository)` validates the UUID mapping, creates
 and persists initial sessions concurrently, launches the UI, and closes agents

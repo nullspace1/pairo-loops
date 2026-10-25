@@ -19,14 +19,11 @@ from agents.developer.developer import get_developer
 from agents.planner.planner import get_planner
 from agents.prompt_optimizer.prompt_optimizer import get_prompt_optimizer
 from agents.verifier.verifier import get_verifier
-from pairo import (
-    WorkerVerifierPair,
-    install_spec_manager,
-    run_agents,
-)
+from pairo import run_agents
 from pairo.core.events import EventPipeline
 from pairo.mcp.github import add_github_mcp_server
 from pairo.ui import SqliteSessionRepository
+from spec_manager import WorkerVerifierPair, install_spec_manager
 
 
 async def run_async() -> None:

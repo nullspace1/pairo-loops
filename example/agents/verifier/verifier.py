@@ -20,6 +20,7 @@ def get_verifier(pipeline, repository):
     agent_directory = Path(__file__).resolve().parent
     workspace_factory = WorkspaceFactory(temp, SandboxPermission.WORKSPACE_WRITE)
     workspace_factory.add_workspace(Path("./src"), SandboxPermission.READ_ONLY)
+    workspace_factory.add_workspace(Path("./example"), SandboxPermission.READ_ONLY)
 
     configuration = AgentConfiguration(
         name="verifier",

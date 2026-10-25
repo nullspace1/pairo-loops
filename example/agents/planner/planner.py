@@ -26,6 +26,10 @@ def get_planner(pipeline, repository):
     workspace_factory.add_workspace(
         Path("./src"), SandboxPermission.READ_ONLY
     )
+    
+    workspace_factory.add_workspace(
+        Path("./example"), SandboxPermission.READ_ONLY
+    )
 
     configuration = AgentConfiguration(
         name="planner",

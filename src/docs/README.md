@@ -37,8 +37,8 @@ does not retain or replay them; the repository is the durable session and
 transcript boundary.
 
 Optional utilities and integrations, including `ConversationEventLog`,
-`WorkspaceFactory`, chatrooms, external MCP server installers, and
-`SpecManager`, build on this core architecture. They are cataloged separately
+`WorkspaceFactory`, chatrooms, and external MCP server installers, build on
+this core architecture. They are cataloged separately
 in the [feature reference](feature-reference.md#optional-tools-and-integrations).
 
 For exact method contracts and lifecycle constraints, continue to the

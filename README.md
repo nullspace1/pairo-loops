@@ -65,6 +65,11 @@ asyncio.run(main())
 the UI, and closes agents and persistence on success or failure. The pipeline
 has no lifecycle of its own.
 
+The repository's multi-agent example also includes an example-local
+[SpecManager component workflow](example/SPEC_MANAGER_WORKFLOW.md) for
+planner-owned task decomposition, component verification, and approved
+specification changes. It is not part of the reusable `pairo` package.
+
 ## Sessions and commands
 
 Only the active session is retained by an agent. The SQLite repository stores

@@ -42,24 +42,11 @@ from .core import (
     WebSearchMode,
     WorkspaceFactory,
 )
-from .mcp.spec_manager import (
-    AcceptanceCriterion,
-    AcceptanceEvidence,
-    CorrectionResolution,
-    SpecManager,
-    TestRunSummary,
-    VerificationEvidence,
-    VerificationCorrection,
-    WorkerVerifierPair,
-    install_spec_manager,
-)
 from .runtime import run_agents
 
 __all__ = [
     "ActiveSession",
     "AdditionalPermissionsApprovalRequest",
-    "AcceptanceCriterion",
-    "AcceptanceEvidence",
     "AgentConfiguration",
     "Agent",
     "AgentStatus",
@@ -73,7 +60,6 @@ __all__ = [
     "ConversationEventLog",
     "ConversationEventLogPolicy",
     "DiagnosticEventLogPolicy",
-    "CorrectionResolution",
     "FakeAgent",
     "FakeSessionIdentifier",
     "FileChangeApprovalRequest",
@@ -97,14 +83,8 @@ __all__ = [
     "StdioMCPServer",
     "Subscription",
     "SynchronousEventPipeline",
-    "SpecManager",
-    "TestRunSummary",
-    "VerificationEvidence",
-    "VerificationCorrection",
-    "WorkerVerifierPair",
     "WebSearchMode",
     "WorkspaceFactory",
-    "install_spec_manager",
     "run_agents",
 ]
 
