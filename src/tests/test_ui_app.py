@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from pairo.core.agent import AgentConfiguration, SandboxPermission
-from pairo.core.clients import FakeAgent
+from pairo.core.clients import AgentStatus, FakeAgent
 from pairo.core.events import (
     AgentCommandExecutionCompleted,
     AgentCommandExecutionProgress,
@@ -32,12 +32,15 @@ from textual.widgets import Button, DataTable
 
 
 def make_agent(
-    tmp_path: Path, pipeline: EventPipeline, agent_id: UUID | None = None
+    tmp_path: Path,
+    pipeline: EventPipeline,
+    agent_id: UUID | None = None,
+    name: str = "reviewer",
 ) -> FakeAgent:
     return FakeAgent(
         AgentConfiguration(
             id=agent_id or uuid4(),
-            name="reviewer",
+            name=name,
             sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,
             model="test",
@@ -292,6 +295,90 @@ def test_quit_detaches_ui_event_delivery_before_textual_shutdown(
             assert not app._subscriptions
 
         await agent.close()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_app_closes_with_many_messages_queued_from_multiple_agents(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agents: dict[UUID, FakeAgent] = {}
+        for index in range(5):
+            agent = make_agent(tmp_path, pipeline, name=f"agent-{index}")
+            agents[agent.configuration().id] = agent
+        for index, agent in enumerate(agents.values()):
+            active = await agent.new_session(f"Conversation {index}")
+            await repository.save_session(
+                agent.configuration().id,
+                active.name,
+                active.identifier.model_dump(mode="json"),
+            )
+        app = configured_app(agents, pipeline, repository)
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            messages = [
+                (agent, f"message-{agent_index}-{message_index}")
+                for agent_index, agent in enumerate(agents.values())
+                for message_index in range(50)
+            ]
+            await asyncio.gather(
+                *(agent.send_message(message) for agent, message in messages)
+            )
+
+            await asyncio.wait_for(app.action_quit(), timeout=2)
+            assert not app._subscriptions
+
+        await asyncio.gather(*(agent.close() for agent in agents.values()))
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_app_closes_with_thousands_of_messages_while_all_agents_are_idle(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agents: dict[UUID, FakeAgent] = {}
+        session_names: dict[UUID, str] = {}
+        for index in range(5):
+            agent = make_agent(tmp_path, pipeline, name=f"idle-agent-{index}")
+            active = await agent.new_session(f"Idle conversation {index}")
+            agent_id = agent.configuration().id
+            agents[agent_id] = agent
+            session_names[agent_id] = active.name
+            await repository.save_session(
+                agent_id,
+                active.name,
+                active.identifier.model_dump(mode="json"),
+            )
+        app = configured_app(agents, pipeline, repository)
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert all(agent.status() is AgentStatus.IDLE for agent in agents.values())
+
+            for agent_index, agent_id in enumerate(agents):
+                for message_index in range(5_000):
+                    pipeline.push(
+                        MessageSent(
+                            agent_id=agent_id,
+                            session_name=session_names[agent_id],
+                            message=f"loaded-message-{agent_index}-{message_index}",
+                        )
+                    )
+
+            assert all(agent.status() is AgentStatus.IDLE for agent in agents.values())
+            await asyncio.wait_for(app.action_quit(), timeout=2)
+            assert not app._subscriptions
+
+        await asyncio.gather(*(agent.close() for agent in agents.values()))
         await repository.close()
 
     asyncio.run(scenario())
