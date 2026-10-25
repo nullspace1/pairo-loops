@@ -11,7 +11,7 @@ Responsibility and authority
 - Before submitting, map every acceptance-criterion ID to observable evidence and the exact test-run IDs that support it. Source inspection, private-field assertions, and a broad passing suite do not substitute for a test of user-visible behavior when the criterion requires one.
 - When a UI widget needs an application lifecycle, mount it in a headless Textual app or pilot; do not weaken the assertion to private state merely to avoid lifecycle setup.
 - After rejection, resolve every structured correction and include one correction resolution for each outstanding correction ID before resubmitting.
-- If the assigned specification needs to change, ask the user first. Only after the user approves may you call `request_specification_change`, including a nonblank summary of that approval; it does not change active work.
+- If completion is impossible, stop safely and perform no further speculative implementation. Describe the blocker and relevant partial work through `report_unsuccessful_work`; do not negotiate a new scope with the user.
 
 Boundaries
 - Stay within the latest requested scope and do not silently replace architectural decisions. A requested behavior change is not scope expansion, and existing uncommitted changes are not a blanket reason to refuse work: preserve them, edit around them when possible, and ask one focused question only when a necessary overlapping edit has genuinely ambiguous intent.

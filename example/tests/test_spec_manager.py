@@ -17,8 +17,8 @@ from spec_manager import (
     AcceptanceEvidence,
     CorrectionResolution,
     SpecManager,
-    SpecificationChangeRequest,
     TestRunSummary as RunSummary,
+    UnsuccessfulWorkReport,
     VerificationEvidence,
     VerificationCorrection,
     WorkerVerifierPair,
@@ -39,13 +39,11 @@ def test_spec_manager_is_example_local_and_not_exported_by_pairo() -> None:
     assert not hasattr(pairo, "install_spec_manager")
 
 
-def test_specification_change_request_requires_prior_approval_summary() -> None:
+def test_unsuccessful_work_report_requires_a_nonblank_bounded_reason() -> None:
     with pytest.raises(ValidationError, match="cannot be blank"):
-        SpecificationChangeRequest(
-            proposal="Move the component.",
-            rationale="It is example-specific.",
-            prior_user_approval="   ",
-        )
+        UnsuccessfulWorkReport(reason="   ")
+    with pytest.raises(ValidationError):
+        UnsuccessfulWorkReport(reason="Blocked.", partial_work="x" * 4_001)
 
 
 class AgentStub:
@@ -159,7 +157,8 @@ def test_installer_configures_role_specific_skills_and_instructions(tmp_path: Pa
     assert verifier.configuration().skill_folders[0].name == "verifier"
     assert "create, modify, delete, and assign" in director.configuration().developer_instructions
     assert "do not generate a plan" in worker.configuration().developer_instructions
-    assert "request_specification_change" in worker.configuration().developer_instructions
+    assert "report_unsuccessful_work" in worker.configuration().developer_instructions
+    assert "stop safely" in worker.configuration().developer_instructions
     assert "criterion ID" in worker.configuration().developer_instructions
     assert "structured corrections" in verifier.configuration().developer_instructions
 
@@ -324,6 +323,7 @@ def test_director_can_discover_tasks_and_use_a_bounded_wait(tmp_path: Path) -> N
             "acceptance_criteria": [{"id": "AC1", "description": "It works"}],
             "pair_id": None,
             "outstanding_corrections": [],
+            "unsuccessful_work": None,
         }]
         assert await tool(manager, "get_task")(
             "Task", context(director)
@@ -547,32 +547,144 @@ def test_close_cancels_verification_waiter_before_stopping_http_transport(tmp_pa
     asyncio.run(scenario())
 
 
-def test_specification_change_request_requires_worker_approval_and_preserves_task(
+def test_unsuccessful_work_is_authorized_persisted_and_releases_pair(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        manager, _, director, worker, _ = setup_manager(tmp_path)
+        manager, agents, director, worker, verifier = setup_manager(tmp_path)
         await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
+        report = UnsuccessfulWorkReport(
+            reason="A required service is unavailable.",
+            partial_work="Added the isolated parser test.",
+        )
+        old_tool = "request" + "_specification" + "_change"
+        assert manager._mcp_server._tool_manager.get_tool(old_tool) is None
+        assert "Only a registered worker" in await tool(manager, "report_unsuccessful_work")(
+            report, context(director)
+        )
+        assert '"status": "pending"' in (tmp_path / "FEATURES.md").read_text()
         await tool(manager, "assign_task")("pair-1", "Task", context(director))
-        request = SpecificationChangeRequest(
-            proposal="Use a local package.",
-            rationale="This is example-only behavior.",
-            prior_user_approval="The user approved the package move.",
+        assert "Only a registered worker" in await tool(manager, "report_unsuccessful_work")(
+            report, context(verifier)
         )
-        assert "Only a registered worker" in await tool(manager, "request_specification_change")(
-            request, context(director)
-        )
+
         director.state = AgentStatus.GENERATING
-        requested = asyncio.create_task(
-            tool(manager, "request_specification_change")(request, context(worker))
+        reported = asyncio.create_task(
+            tool(manager, "report_unsuccessful_work")(report, context(worker))
         )
         await asyncio.sleep(0.01)
         assert director.messages == []
-        assert '"status": "working"' in (tmp_path / "FEATURES.md").read_text()
+        assert "pair-1" not in manager._assignments
+        assert "Created" in await tool(manager, "create_task")(
+            "Planner can proceed", "Record the revised plan", CRITERIA, context(director)
+        )
+        persisted = (tmp_path / "FEATURES.md").read_text(encoding="utf-8")
+        assert '"status": "unsuccessful"' in persisted
+        assert "A required service is unavailable." in persisted
+        assert "Added the isolated parser test." in persisted
+
         director.state = AgentStatus.IDLE
-        assert "Sent specification-change request" in await requested
-        assert "Prior user approval" in director.messages[-1][0]
-        assert "Do not mutate this active component" in director.messages[-1][0]
+        assert "Ended task 'Task' unsuccessfully" in await reported
+        assert len(director.messages) == 1
+        assert "Component: Task" in director.messages[0][0]
+        assert "Worker: worker" in director.messages[0][0]
+        assert "Partial work: Added the isolated parser test." in director.messages[0][0]
+
+        reloaded = SpecManager(
+            tmp_path, agents, director, [WorkerVerifierPair("pair-1", worker, verifier)]
+        )
+        task = reloaded._store.tasks()["Task"]
+        assert task.status == "unsuccessful"
+        assert task.unsuccessful_work == report
+        assert "not pending" in await tool(manager, "modify_task")(
+            "Task", "Changed", CRITERIA, context(director)
+        )
+        assert "not pending" in await tool(manager, "delete_task")("Task", context(director))
+
+        await tool(manager, "create_task")("Replacement", "Try another route", CRITERIA, context(director))
+        assert "Assigned" in await tool(manager, "assign_task")(
+            "pair-1", "Replacement", context(director)
+        )
+
+    asyncio.run(scenario())
+
+
+def test_unsuccessful_work_resolves_waiters_and_rejects_verifying_work(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manager, _, director, worker, verifier = setup_manager(tmp_path)
+        await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
+        await tool(manager, "assign_task")("pair-1", "Task", context(director))
+
+        sleeping = asyncio.create_task(tool(manager, "sleep_on_task")("Task", context(director)))
+        waiting = asyncio.create_task(
+            tool(manager, "wait_for_task")("Task", context(director), 1)
+        )
+        report = UnsuccessfulWorkReport(reason="The dependency cannot be installed.")
+        assert "Ended task" in await tool(manager, "report_unsuccessful_work")(
+            report, context(worker)
+        )
+        assert await sleeping == "Task 'Task' ended unsuccessfully: The dependency cannot be installed."
+        assert await waiting == {
+            "task_name": "Task",
+            "status": "unsuccessful",
+            "reason": "The dependency cannot be installed.",
+            "partial_work": None,
+        }
+        assert await tool(manager, "wait_for_task")("Task", context(director), 1) == await waiting
+
+        await tool(manager, "create_task")("Review", "Do it", CRITERIA, context(director))
+        await tool(manager, "assign_task")("pair-1", "Review", context(director))
+        verifier.state = AgentStatus.GENERATING
+        verifying = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
+        await asyncio.sleep(0)
+        assert "no working task" in await tool(manager, "report_unsuccessful_work")(
+            report, context(worker)
+        )
+        assert '"status": "verifying"' in (tmp_path / "FEATURES.md").read_text()
+        verifier.state = AgentStatus.IDLE
+        await asyncio.sleep(0)
+        assert "Rejected" in await tool(manager, "reject_task")(
+            [VerificationCorrection(id="C1", criterion_ids=["AC1"], message="Fix it")],
+            context(verifier),
+        )
+        assert "correction(s) required" in await verifying
+
+    asyncio.run(scenario())
+
+
+def test_unsuccessful_work_notification_timeout_and_shutdown_keep_failure(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        manager, _, director, worker, _ = setup_manager(tmp_path, handoff_timeout=0.01)
+        await tool(manager, "create_task")("Timeout", "Do it", CRITERIA, context(director))
+        await tool(manager, "assign_task")("pair-1", "Timeout", context(director))
+        director.state = AgentStatus.GENERATING
+        timed_out = await tool(manager, "report_unsuccessful_work")(
+            UnsuccessfulWorkReport(reason="Planner is busy."), context(worker)
+        )
+        assert "Planner notification failed" in timed_out
+        assert '"status": "unsuccessful"' in (tmp_path / "FEATURES.md").read_text()
+        assert director.messages == []
+
+        shutdown_folder = tmp_path / "shutdown"
+        shutdown_folder.mkdir()
+        shutdown, _, shutdown_director, shutdown_worker, _ = setup_manager(shutdown_folder)
+        await tool(shutdown, "create_task")("Shutdown", "Do it", CRITERIA, context(shutdown_director))
+        await tool(shutdown, "assign_task")("pair-1", "Shutdown", context(shutdown_director))
+        shutdown_director.state = AgentStatus.GENERATING
+        reporting = asyncio.create_task(
+            tool(shutdown, "report_unsuccessful_work")(
+                UnsuccessfulWorkReport(reason="Shutdown race."), context(shutdown_worker)
+            )
+        )
+        await asyncio.sleep(0)
+        assert "pair-1" not in shutdown._assignments
+        await shutdown.close()
+        assert "Planner notification failed" in await reporting
+        assert '"status": "unsuccessful"' in (
+            shutdown_folder / "FEATURES.md"
+        ).read_text()
 
     asyncio.run(scenario())
 

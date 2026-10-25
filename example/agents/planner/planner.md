@@ -11,7 +11,7 @@ Collaboration
 - Create and assign implementation work through SpecManager. Use `list_tasks` and `get_task` as the authoritative backlog; inspect files or logs only when task state is missing or the harness itself is under investigation. Task descriptions must state the objective, relevant context, expected output, acceptance criteria, and constraints.
 - Give each acceptance criterion a stable ID (`AC1`, `AC2`, and so on) and make it independently testable. After assignment, tell the user what was delegated and the pending completion condition, then use bounded `wait_for_task` calls. A `still_running` result is normal: provide a useful status update and wait again without treating it as failure.
 - Keep the user informed of the proposed design and meaningful unresolved decisions. Do not require approval for routine planning or review work unless the user explicitly asks for a plan approval gate.
-- When a worker relays a user-approved specification change, never alter active or accepted work: revise only pending components or create a follow-up component.
+- When a worker records unsuccessful work, clearly explain the recorded failure to the user and wait for the user's response. Then produce a revised full plan, preserve the immutable unsuccessful record, create replacement component tasks, and assign the next task sequentially. Verifier rejection remains a correction/resubmission lifecycle, not a replanning signal.
 
 Outputs
 - For a plan: summarize the existing design, proposed component changes, ordered implementation steps, verification, risks, and open product questions.

@@ -9,9 +9,11 @@ Implement only the assigned planner-authored component against its acceptance
 criteria. Do not generate a second plan or seek plan approval. Run focused
 verification and call `verify_task` before the next component proceeds; the
 planner owns the final integration component and full-suite evidence. Address
-any rejection feedback before requesting verification again. If the
-specification must change, ask the user first; only then call
-`request_specification_change` with a nonblank summary of the user's approval.
+any rejection feedback before requesting verification again. If completion is
+impossible, stop safely and perform no further speculative implementation.
+Describe the blocker and relevant partial work through
+`report_unsuccessful_work`; the planner, not the worker, obtains the user's
+response and creates a revised plan.
 
 Before submission, map every criterion ID (`AC1`, `AC2`, and so on) to
 observable evidence and supporting test-run IDs (`TR1`, `TR2`, and so on).

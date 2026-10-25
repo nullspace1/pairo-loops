@@ -22,7 +22,7 @@ from pairo.core.clients.client import MCP_AGENT_ID_HEADER
 from pairo.core.mcp.mcp_http_wrapper import MCPHttpWrapper
 
 
-TaskStatus = Literal["pending", "working", "verifying", "accepted"]
+TaskStatus = Literal["pending", "working", "verifying", "accepted", "unsuccessful"]
 PairStatus = Literal["idle", "working", "verifying"]
 _WaitResult = TypeVar("_WaitResult")
 _FEATURE_HEADER = "# Features\n"
@@ -182,22 +182,29 @@ class CorrectionResolution(BaseModel):
         return normalized
 
 
-class SpecificationChangeRequest(BaseModel):
-    """A worker's user-approved request to alter later component work."""
+class UnsuccessfulWorkReport(BaseModel):
+    """A worker's bounded record of why active component work cannot continue."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    proposal: Annotated[str, Field(min_length=1, max_length=2_000)]
-    rationale: Annotated[str, Field(min_length=1, max_length=2_000)]
-    prior_user_approval: Annotated[str, Field(min_length=1, max_length=2_000)]
+    reason: Annotated[str, Field(min_length=1, max_length=2_000)]
+    partial_work: Annotated[str | None, Field(max_length=4_000)] = None
 
-    @field_validator("proposal", "rationale", "prior_user_approval")
+    @field_validator("reason")
     @classmethod
-    def normalize_text(cls, value: str) -> str:
+    def normalize_reason(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized:
-            raise ValueError("Specification-change request fields cannot be blank.")
+            raise ValueError("Unsuccessful-work reason cannot be blank.")
         return normalized
+
+    @field_validator("partial_work")
+    @classmethod
+    def normalize_partial_work(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +229,7 @@ class _Task(BaseModel):
     description: str
     acceptance_criteria: list[AcceptanceCriterion]
     status: TaskStatus
+    unsuccessful_work: UnsuccessfulWorkReport | None = None
 
     @model_validator(mode="after")
     def require_unique_criteria(self) -> "_Task":
@@ -236,7 +244,7 @@ class _Task(BaseModel):
 @dataclass(slots=True)
 class _Assignment:
     task_name: str
-    completion: asyncio.Future[str]
+    completion: asyncio.Future[UnsuccessfulWorkReport | None]
     status: PairStatus = "working"
     review_result: asyncio.Future[str | None] | None = None
     evidence: VerificationEvidence | None = None
@@ -708,17 +716,17 @@ class SpecManager(MCPHttpWrapper):
             return await self._decide(pair, accepted=True)
 
         @mcp.tool(
-            "request_specification_change",
-            "Request a user-approved specification change without changing active work.",
+            "report_unsuccessful_work",
+            "End an active working component unsuccessfully with its blocker and partial work.",
         )
-        async def request_specification_change(
-            request: SpecificationChangeRequest, ctx: Context
+        async def report_unsuccessful_work(
+            report: UnsuccessfulWorkReport, ctx: Context
         ) -> str:
             worker_id = self._agent_id(ctx)
             pair = self._worker_pairs.get(worker_id) if worker_id else None
             if pair is None:
-                return "Only a registered worker may request a specification change."
-            return await self._request_specification_change(pair, request)
+                return "Only a registered worker may report unsuccessful work."
+            return await self._report_unsuccessful_work(pair, report)
 
         return mcp
 
@@ -770,6 +778,9 @@ class SpecManager(MCPHttpWrapper):
                 return f"Task '{task_name}' does not exist."
             if task.status == "accepted":
                 return f"Task '{task_name}' is already accepted."
+            if task.status == "unsuccessful":
+                assert task.unsuccessful_work is not None
+                return self._unsuccessful_sleep_result(task_name, task.unsuccessful_work)
             assignment = next(
                 (
                     candidate
@@ -781,7 +792,12 @@ class SpecManager(MCPHttpWrapper):
             if assignment is None:
                 return f"Task '{task_name}' is not assigned."
             completion = assignment.completion
-        return await asyncio.shield(completion)
+        result = await asyncio.shield(completion)
+        return (
+            f"Accepted task '{task_name}'."
+            if result is None
+            else self._unsuccessful_sleep_result(task_name, result)
+        )
 
     async def _wait_for_task(
         self, task_name: str, timeout_seconds: float
@@ -792,6 +808,9 @@ class SpecManager(MCPHttpWrapper):
                 return f"Task '{task_name}' does not exist."
             if task.status == "accepted":
                 return {"task_name": task_name, "status": "accepted"}
+            if task.status == "unsuccessful":
+                assert task.unsuccessful_work is not None
+                return self._unsuccessful_wait_result(task_name, task.unsuccessful_work)
             assignment = next(
                 (
                     candidate
@@ -815,7 +834,12 @@ class SpecManager(MCPHttpWrapper):
                     "status": "still_running",
                     "task_status": current.status,
                 }
-        return {"task_name": task_name, "status": "accepted"}
+        result = completion.result()
+        return (
+            {"task_name": task_name, "status": "accepted"}
+            if result is None
+            else self._unsuccessful_wait_result(task_name, result)
+        )
 
     async def _start_verification(
         self,
@@ -958,7 +982,7 @@ class SpecManager(MCPHttpWrapper):
             if accepted:
                 del self._assignments[pair.pair_id]
                 if not assignment.completion.done():
-                    assignment.completion.set_result(f"Accepted task '{task_name}'.")
+                    assignment.completion.set_result(None)
             else:
                 assignment.status = "working"
                 assignment.review_result = None
@@ -997,38 +1021,51 @@ class SpecManager(MCPHttpWrapper):
             f"Required corrections:\n{details}"
         )
 
-    async def _request_specification_change(
+    async def _report_unsuccessful_work(
         self,
         pair: WorkerVerifierPair,
-        request: SpecificationChangeRequest,
+        report: UnsuccessfulWorkReport,
     ) -> str:
+        """Persist a terminal worker outcome before attempting the planner handoff."""
         async with self._lock:
             assignment = self._assignments.get(pair.pair_id)
-            if assignment is None:
-                return f"Pair '{pair.pair_id}' has no active component."
-            task = self._store.tasks()[assignment.task_name]
-            message = self._change_request_message(task, pair, request)
+            if assignment is None or assignment.status != "working":
+                return f"Pair '{pair.pair_id}' has no working task to end unsuccessfully."
+            try:
+                task = self._store.tasks()[assignment.task_name]
+                failed_task = task.model_copy(
+                    update={"status": "unsuccessful", "unsuccessful_work": report}
+                )
+                self._store.replace(failed_task)
+            except Exception as error:
+                return f"Could not record unsuccessful work: {error}"
+            del self._assignments[pair.pair_id]
+            if not assignment.completion.done():
+                assignment.completion.set_result(report)
+            message = self._unsuccessful_work_message(failed_task, pair, report)
+        outcome = f"Ended task '{failed_task.name}' unsuccessfully."
         try:
             await self._delivery.deliver(
                 self._director, message, pair.worker.configuration().name
             )
         except (Exception, asyncio.CancelledError) as error:
-            return f"Could not deliver specification-change request: {error}"
-        return f"Sent specification-change request for component '{task.name}' to the planner."
+            return f"{outcome} Planner notification failed: {error}"
+        return f"{outcome} Notified the planner."
 
-    def _change_request_message(
+    def _unsuccessful_work_message(
         self,
         task: _Task,
         pair: WorkerVerifierPair,
-        request: SpecificationChangeRequest,
+        report: UnsuccessfulWorkReport,
     ) -> str:
+        partial_work = report.partial_work or "None reported."
         return (
-            "User-approved specification-change request.\n"
+            "Unsuccessful component work recorded.\n"
             f"Component: {task.name}\nWorker: {pair.worker.configuration().name}\n"
-            f"Proposal: {request.proposal}\nRationale: {request.rationale}\n"
-            f"Prior user approval: {request.prior_user_approval}\n"
-            "Do not mutate this active component. Modify only pending components or "
-            "create a follow-up task."
+            f"Reason: {report.reason}\nPartial work: {partial_work}\n"
+            "Inform the user of this recorded failure, wait for their response, then "
+            "produce a revised full plan. Preserve this unsuccessful record, create "
+            "replacement component tasks, and reassign them sequentially."
         )
 
     async def close(self) -> None:
@@ -1092,7 +1129,27 @@ class SpecManager(MCPHttpWrapper):
                     assignment[1].outstanding_corrections if assignment else ()
                 )
             ],
+            "unsuccessful_work": (
+                task.unsuccessful_work.model_dump(mode="json")
+                if task.unsuccessful_work is not None
+                else None
+            ),
         }
+
+    def _unsuccessful_wait_result(
+        self, task_name: str, report: UnsuccessfulWorkReport
+    ) -> JsonObject:
+        return {
+            "task_name": task_name,
+            "status": "unsuccessful",
+            "reason": report.reason,
+            "partial_work": report.partial_work,
+        }
+
+    def _unsuccessful_sleep_result(
+        self, task_name: str, report: UnsuccessfulWorkReport
+    ) -> str:
+        return f"Task '{task_name}' ended unsuccessfully: {report.reason}"
 
     def _require_role(self, ctx: Context, role: str) -> str | None:
         agent_id = self._agent_id(ctx)
@@ -1132,8 +1189,9 @@ class SpecManager(MCPHttpWrapper):
             "This is one planner-authored component. Implement only this component; do not "
             "create a second implementation plan or seek a second plan approval. Run focused "
             "verification now and call spec_manager.verify_task before the next component can "
-            "proceed. If the specification must change, first obtain user approval, then call "
-            "request_specification_change with that approval summary. When implementation is ready, call spec_manager.verify_task with "
+            "proceed. If completion is impossible, stop speculative implementation, describe "
+            "the blocker and any partial work, and call spec_manager.report_unsuccessful_work. "
+            "When implementation is ready, call spec_manager.verify_task with "
             "a concise implementation summary, changed files, evidence for every "
             "acceptance criterion, summarized test runs, and remaining risks."
         )
@@ -1159,8 +1217,8 @@ class SpecManager(MCPHttpWrapper):
 
 
 _ROLE_INSTRUCTIONS = {
-    "director": "Inspect the code and tests, present the user a complete plan, and obtain approval before creating tasks. Split the approved plan into independently verifiable planner-authored components, assign them sequentially, and reserve a final integration component for full-suite checks. Use the spec_manager tools to create, modify, delete, and assign tasks with stable acceptance-criterion IDs; only change or delete pending tasks. Resolve approved worker change requests only by modifying pending components or creating follow-up tasks. Report delegation state before waiting on an assigned task.",
-    "worker": "Implement only the assigned planner-authored component; do not generate a plan or seek a second plan approval. Run focused verification and call verify_task before later components proceed, with exactly one evidence record per criterion ID, referenced test-run IDs, every outstanding correction resolution, and no raw test output. Ask the user before invoking request_specification_change and include their nonblank approval summary.",
+    "director": "Inspect the code and tests, present the user a complete plan, and obtain approval before creating tasks. Split the approved plan into independently verifiable planner-authored components, assign them sequentially, and reserve a final integration component for full-suite checks. Use the spec_manager tools to create, modify, delete, and assign tasks with stable acceptance-criterion IDs; only change or delete pending tasks. After recorded unsuccessful work, clearly inform the user of the failure, wait for the user's response, produce a revised full plan, preserve the unsuccessful record, create replacement components, and reassign sequentially. Report delegation state before waiting on an assigned task.",
+    "worker": "Implement only the assigned planner-authored component; do not generate a plan or seek a second plan approval. Run focused verification and call verify_task before later components proceed, with exactly one evidence record per criterion ID, referenced test-run IDs, every outstanding correction resolution, and no raw test output. If completion is impossible, stop safely, report the blocker and relevant partial work through report_unsuccessful_work, and perform no further speculative implementation.",
     "verifier": "Audit every criterion and prior correction, independently check material claims, then call spec_manager.accept_task once or reject_task once with all structured corrections.",
 }
 
@@ -1230,7 +1288,7 @@ __all__ = [
     "CorrectionResolution",
     "SpecManager",
     "SpecManagerInstaller",
-    "SpecificationChangeRequest",
+    "UnsuccessfulWorkReport",
     "TestRunSummary",
     "VerificationEvidence",
     "VerificationCorrection",

@@ -20,5 +20,9 @@ instead of changing active or accepted work. Check pair availability before
 assigning pending work. After assignment, report the delegated task and pending
 completion condition before using `wait_for_task`. Treat `still_running` as a
 normal bounded-wait result, provide a useful status update, and wait again.
-For a user-approved worker specification-change request, modify only pending
-components or create a follow-up task; never mutate active or accepted work.
+After a worker records unsuccessful work, clearly inform the user of the
+recorded failure and wait for the user's response. Use that response to produce
+a revised full plan, preserve the immutable unsuccessful record, create new
+replacement component tasks, and assign the next replacement sequentially.
+Verifier rejection is separate: it returns the active component to the worker
+for correction and resubmission rather than triggering replanning.
