@@ -1,6 +1,8 @@
 """Lifecycle and endpoint contract tests for local MCP HTTP hosting."""
 
 import asyncio
+import sys
+from types import ModuleType
 
 import pytest
 
@@ -32,6 +34,7 @@ class HarnessWrapper(MCPHttpWrapper):
         ({"port": 65536}, "between 1 and 65535"),
         ({"port": 8080, "host": "  "}, "host cannot be empty"),
         ({"port": 8080, "startup_timeout_sec": 0}, "greater than zero"),
+        ({"port": 8080, "shutdown_timeout_sec": 0}, "greater than zero"),
     ],
 )
 def test_wrapper_validates_constructor_arguments(kwargs, message) -> None:
@@ -89,3 +92,45 @@ def test_wrapper_starts_legacy_server_once_and_closes_it(monkeypatch) -> None:
         assert not wrapper.is_running
 
     asyncio.run(scenario())
+
+
+def test_wrapper_bounds_uvicorn_graceful_shutdown(monkeypatch) -> None:
+    configurations: list[dict[str, object]] = []
+
+    class FakeStreamableServer:
+        name = "streamable-server"
+
+        def streamable_http_app(self, **_kwargs):
+            return object()
+
+    class FakeConfig:
+        def __init__(self, _application, **kwargs) -> None:
+            configurations.append(kwargs)
+
+    class FakeServer:
+        def __init__(self, _configuration) -> None:
+            pass
+
+        async def serve(self) -> None:
+            pass
+
+    async def scenario() -> None:
+        class IsolatedWrapper(MCPHttpWrapper):
+            def build_mcp_server(self):
+                return FakeStreamableServer()
+
+        module = ModuleType("uvicorn")
+        setattr(module, "Config", FakeConfig)
+        setattr(module, "Server", FakeServer)
+        monkeypatch.setitem(sys.modules, "uvicorn", module)
+        await IsolatedWrapper(port=9123, shutdown_timeout_sec=7)._serve_mcp_server()
+
+    asyncio.run(scenario())
+    assert configurations == [
+        {
+            "host": "127.0.0.1",
+            "port": 9123,
+            "log_level": "error",
+            "timeout_graceful_shutdown": 7,
+        }
+    ]

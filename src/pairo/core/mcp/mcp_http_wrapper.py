@@ -55,6 +55,7 @@ class MCPHttpWrapper(ABC):
         port: int,
         host: str = "127.0.0.1",
         startup_timeout_sec: float = 10.0,
+        shutdown_timeout_sec: int = 5,
         log_level: MCPHttpLogLevel = MCPHttpLogLevel.ERROR,
     ) -> None:
         normalized_host = host.strip()
@@ -64,10 +65,13 @@ class MCPHttpWrapper(ABC):
             raise ValueError("MCP HTTP port must be between 1 and 65535.")
         if startup_timeout_sec <= 0:
             raise ValueError("MCP startup timeout must be greater than zero.")
+        if shutdown_timeout_sec <= 0:
+            raise ValueError("MCP shutdown timeout must be greater than zero.")
 
         self._host = normalized_host
         self._port = port
         self._startup_timeout_sec = startup_timeout_sec
+        self._shutdown_timeout_sec = shutdown_timeout_sec
         self._log_level = log_level
         self._server_task: asyncio.Task[None] | None = None
         self._uvicorn_server: Any | None = None
@@ -180,6 +184,7 @@ class MCPHttpWrapper(ABC):
             host=self._host,
             port=self._port,
             log_level=self._log_level.value.lower(),
+            timeout_graceful_shutdown=self._shutdown_timeout_sec,
         )
         self._uvicorn_server = uvicorn.Server(configuration)
         await self._uvicorn_server.serve()

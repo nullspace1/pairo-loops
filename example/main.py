@@ -67,8 +67,11 @@ async def run_async() -> None:
         await spec_manager.boot_up()
         await run_agents(agents, pipeline, repository)
     finally:
-        await spec_manager.close()
         await event_log.close()
+        await spec_manager.close()
+
+        
+        
 
 
 def run() -> None:
