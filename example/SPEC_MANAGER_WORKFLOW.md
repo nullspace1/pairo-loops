@@ -57,7 +57,9 @@ sequenceDiagram
                 SpecManager-->>Developer: Best-effort correction notice when IDLE
             else Component accepted
                 Verifier->>SpecManager: accept_task
-                SpecManager-->>Documenter: Notify with history path when IDLE (optional)
+                opt No planned components remain open
+                    SpecManager-->>Documenter: Notify once with batched history when IDLE
+                end
                 Planner->>SpecManager: Assign the next component
             end
         end
@@ -116,7 +118,10 @@ Records live under the `folder` passed to `install_spec_manager`. The current
 example passes `Path("./tmp")`, so tasks are stored in `tmp/FEATURES.md` as
 structured `pairo-task` blocks and accepted evidence is appended to
 `tmp/output/FEATURE_HISTORY.md`. Existing structured task files remain
-compatible. Active pair ownership and outstanding correction records survive a
+compatible. The optional documenter is notified only after every planned task
+is accepted or unsuccessful, so one documentation pass can cover the complete
+batch instead of revising the same page after each component. Active pair
+ownership and outstanding correction records survive a
 manager restart. Because verification evidence and waiters are process-local,
 a task interrupted while `verifying` recovers as `working` for the same pair;
 the developer submits verification again. Unsuccessful records remain in

@@ -1,5 +1,6 @@
-"""Async storage boundary for session metadata and transcripts."""
+"""Async storage boundary for session metadata, transcripts, and sidebar values."""
 
+from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
@@ -10,6 +11,18 @@ from .models import SessionMetadata, TranscriptEntry, TranscriptMetadata
 
 class SessionNotFoundError(LookupError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class StatisticValue:
+    """One durable, display-ready sidebar value identified by its statistic key."""
+
+    key: str
+    value: str
+
+    def __post_init__(self) -> None:
+        if not self.key.strip():
+            raise ValueError("Statistic key cannot be empty.")
 
 
 class SessionRepository(Protocol):
@@ -48,5 +61,25 @@ class SessionRepository(Protocol):
     async def session_for_identifier(
         self, identifier: JsonObject
     ) -> SessionMetadata: ...
+
+    async def upsert_agent_statistic(
+        self, agent_id: UUID, statistic: StatisticValue
+    ) -> None: ...
+
+    async def remove_agent_statistic(self, agent_id: UUID, key: str) -> None: ...
+
+    async def agent_statistics_for(self, agent_id: UUID) -> tuple[StatisticValue, ...]: ...
+
+    async def upsert_session_statistic(
+        self, agent_id: UUID, session_name: str, statistic: StatisticValue
+    ) -> None: ...
+
+    async def remove_session_statistic(
+        self, agent_id: UUID, session_name: str, key: str
+    ) -> None: ...
+
+    async def session_statistics_for(
+        self, agent_id: UUID, session_name: str
+    ) -> tuple[StatisticValue, ...]: ...
 
     async def close(self) -> None: ...

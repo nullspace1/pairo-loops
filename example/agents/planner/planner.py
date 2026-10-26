@@ -37,7 +37,7 @@ def get_planner(pipeline, repository):
         approval_mode=ApprovalMode.USER,
         permission_requester=TextualPermissionRequester(pipeline, repository),
         workspace=temp,
-        model="gpt-5.6-sol",
+        model="gpt-5.6-terra",
         skill_folders=(agent_directory / "skills",),
         base_instructions=instructions,
         reasoning_effort=ReasoningEffort.MEDIUM,

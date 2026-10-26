@@ -225,7 +225,7 @@ def test_assignment_creates_and_reuses_the_verifier_session(tmp_path: Path) -> N
     asyncio.run(scenario())
 
 
-def test_accepted_feature_history_is_referenced_only_to_documenter(
+def test_accepted_feature_history_is_referenced_to_documenter_after_batch(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -253,10 +253,24 @@ def test_accepted_feature_history_is_referenced_only_to_documenter(
         await tool(manager, "create_task")(
             "History", "Record accepted work", CRITERIA, context(director)
         )
+        await tool(manager, "create_task")(
+            "Integration", "Complete the planned batch", CRITERIA, context(director)
+        )
         await tool(manager, "assign_task")(
             "pair-1", "History", context(director)
         )
         verification = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
+        await asyncio.sleep(0)
+        assert "Accepted" in await tool(manager, "accept_task")(context(verifier))
+        assert await verification == "Task accepted."
+        assert documenter.messages == []
+
+        await tool(manager, "assign_task")(
+            "pair-1", "Integration", context(director)
+        )
+        final_verification = asyncio.create_task(
             tool(manager, "verify_task")(verification_evidence(), context(worker))
         )
         await asyncio.sleep(0)
@@ -266,10 +280,11 @@ def test_accepted_feature_history_is_referenced_only_to_documenter(
         assert documenter.messages == []
         documenter.state = AgentStatus.IDLE
         assert "Accepted" in await decision
-        assert await verification == "Task accepted."
+        assert await final_verification == "Task accepted."
 
         content = history.read_text(encoding="utf-8")
         assert "## History" in content
+        assert "## Integration" in content
         assert "Record accepted work" in content
         assert "### Implementation" in content
         assert "### Acceptance evidence" in content

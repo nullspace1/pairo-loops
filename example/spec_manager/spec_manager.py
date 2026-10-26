@@ -1053,7 +1053,11 @@ class SpecManager(MCPHttpWrapper):
                 if future is not None and not future.done():
                     future.set_result(correction_result)
         outcome = f"Accepted task '{task_name}'." if accepted else f"Rejected task '{task_name}'."
-        recipient = self._documenter if accepted else pair.worker
+        recipient: Agent[SessionIdentifier] | None = pair.worker
+        if accepted:
+            recipient = (
+                self._documenter if self._documentation_batch_is_complete() else None
+            )
         if recipient is not None:
             message = (
                 f"Feature history updated: {self._history.path}"
@@ -1069,6 +1073,13 @@ class SpecManager(MCPHttpWrapper):
         if accepted and future is not None and not future.done():
             future.set_result(correction_result)
         return outcome
+
+    def _documentation_batch_is_complete(self) -> bool:
+        """Return whether all planned components have reached a terminal state."""
+        return all(
+            task.status in ("accepted", "unsuccessful")
+            for task in self._store.tasks().values()
+        )
 
     def _correction_message(
         self,

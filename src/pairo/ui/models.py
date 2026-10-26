@@ -127,7 +127,3 @@ class SessionMetadata:
     created_at: datetime
     last_message_at: datetime | None
     last_updated_at: datetime
-
-    @property
-    def duration_seconds(self) -> float:
-        return (self.last_updated_at - self.created_at).total_seconds()

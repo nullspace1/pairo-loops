@@ -13,10 +13,8 @@ from pairo.mcp._agent_configuration import MCPServerAttacher
 from pairo.runtime import RuntimeLauncher
 from pairo.ui.widgets.sidebar_statistics.default_sidebar_statistics import (
     DefaultSidebarStatisticsFactory,
-    DurationFormatter,
     TimestampFormatter,
     default_sidebar_statistics,
-    format_duration,
     format_time,
 )
 
@@ -128,7 +126,6 @@ def test_default_statistics_factory_and_formatters_keep_legacy_behavior() -> Non
         "created",
         "last_message",
         "last_update",
-        "duration",
         "token_usage",
     ]
     local_timestamp = timestamp.astimezone()
@@ -137,9 +134,7 @@ def test_default_statistics_factory_and_formatters_keep_legacy_behavior() -> Non
         f"{local_timestamp:%Y-%m-%d %H:%M:%S} {offset[:3]}:{offset[3:]}"
     )
     assert TimestampFormatter().format(timestamp) == expected_timestamp
-    assert DurationFormatter().format(-3.2) == "00:00:00"
     assert format_time(timestamp) == TimestampFormatter().format(timestamp)
-    assert format_duration(3661.9) == DurationFormatter().format(3661.9)
     assert [
         statistic.key
         for statistic in default_sidebar_statistics(runtime_agent).agent_information

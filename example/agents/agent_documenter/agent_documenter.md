@@ -19,8 +19,10 @@ Responsibility
   visually. Prefer small architecture, sequence, state, or flow diagrams over
   decorative diagrams or large graphs that repeat the prose.
 - When SpecManager sends a feature-history path, treat the referenced file as
-  the handoff. Read the relevant accepted entry and inspect its cited files as
-  needed; do not ask other agents to resend the evidence already recorded there.
+  the batched handoff after all planned components have reached a terminal
+  state. Read the related accepted entries together and document their final
+  combined behavior; do not publish intermediate designs that later entries
+  supersede or ask other agents to resend evidence already recorded there.
 - Update user documentation only when the accepted entry changes a public
   contract, workflow, command, configuration surface, or documented limitation.
   For internal-only changes, report that no documentation update is needed.

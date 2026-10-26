@@ -11,7 +11,7 @@
 | `EventPipeline` | Principal-loop transient broadcasting through independent buffered subscriptions |
 | `SynchronousEventPipeline` | Cross-thread publication and blocking coroutine submission for synchronous SDK callbacks |
 | `AgentEventListeners` | Typed, optionally agent-filtered subscriptions for agent and session events |
-| `SessionRepository` | Authoritative durable session catalog and transcripts |
+| `SessionRepository` | Authoritative durable sessions, transcripts, and sidebar values |
 | `TranscriberRegistry` | Starts stateful Textual MessagePump transcribers; each commits its own mutation before publishing its notification |
 | `run_agents` | Startup, UI launch, and failure-safe resource cleanup |
 
@@ -207,10 +207,22 @@ persist successful session creation and activation; pipeline events are
 transient notifications. Widgets read configuration, status, and active
 session directly from each runtime agent.
 
+`SessionRepository` also persists sidebar values through the typed
+`StatisticValue(key, value)` boundary. Use `upsert_agent_statistic` and
+`agent_statistics_for` for values shared by an agent, and
+`upsert_session_statistic` and `session_statistics_for` for values belonging to
+one registered session. The corresponding `remove_*` methods delete a value.
+Loaded values retain insertion order, while updating an existing key changes
+its value without moving it. SQLite stores these values as display-ready
+strings in additive tables; deleting a session cascades to its session-scoped
+values but leaves agent-scoped values intact. Existing session and transcript
+databases remain readable.
+
 The chat editor is multiline: **Enter** inserts a newline and **Ctrl+Enter**
 submits. Empty or whitespace-only submissions remain in the editor after their
 error; successful submissions clear it. The sidebar shows agent and current
-session information only. Use `/session new`, `/session switch`, `/delete`, and
+session information, including configured persisted statistics. Use `/session
+new`, `/session switch`, `/delete`, and
 `/sessions` for session workflows; `/sessions` records a durable table with
 session names, current status, and timestamps. Completed command and MCP
 actions are collapsed transcript items and can be expanded for their details.
@@ -309,16 +321,51 @@ repository only when it created that repository. The caller remains
 responsible for closing a supplied repository; `run_agents` performs that
 cleanup when it is the caller.
 
-## Sidebar statistics migration
+## Sidebar statistics
 
 Custom sidebar fields are now Textual message pumps rather than polling
 providers. Replace an implementation of `SidebarStatisticProvider` with a
 `SidebarStatistic` subclass, pass its stable key, label, and
 `SidebarStatisticCategory` to `super().__init__`, and implement
 `async compute(context)`. Do not subscribe to `EventPipeline` or implement the
-old `statistic(context)` method. Textual connects and tears down each statistic
-and supplies a `SidebarStatisticContext` containing the exact agent, active
-session, and persisted session metadata.
+old `statistic(context)` method. `AgentChatApp` owns each configured statistic,
+configures each distinct module once with the repository, app, and configured
+agent set, and tears it down when the app exits. A module may serve multiple
+agents; it keeps per-agent contexts and the app preserves agent/session
+scoping. The app supplies a `SidebarStatisticContext` containing the exact
+agent, active session, and persisted session metadata.
+
+The lifecycle answers: **who computes, persists, and renders a sidebar value?**
+
+```mermaid
+sequenceDiagram
+    participant App as AgentChatApp
+    participant Stat as SidebarStatistic
+    participant Repo as SessionRepository
+    participant Side as AgentSidebar
+    App->>Stat: configure(repository, app, agents) once
+    loop lifecycle rebuild
+        App->>Stat: build(context)
+        Stat->>Repo: persist or remove owned value
+        App->>Repo: load ordered agent/session maps
+        App->>Side: assign render-only maps
+    end
+    Note over Stat,Repo: Live refresh persists before notifying the UI
+    Stat->>Repo: upsert or remove value
+    Stat-->>App: SaveAgentStatistic or SaveSessionStatistic
+    App->>Side: update matching active map
+```
+
+`build(context)` is an initial or reload hook and is intentionally silent;
+`AgentChatApp` reloads committed repository values after the configured
+statistics build in deterministic order. Live event handlers call `refresh()`;
+the statistic persists first and then optionally posts a scoped save message.
+Stateful statistics can override `has_initial_value(context)` and return
+`False` when they have no authoritative value for that context; this preserves
+the repository value until a live event supplies one. For example, token usage
+does not replace persisted usage with an empty-cache placeholder during reload.
+`AgentSidebar` and `AgentChatPane` only render the field definitions and maps;
+they do not configure statistics, dispatch events, or write the repository.
 
 For a callback-backed value, use `FixedStatistic` instead of writing a
 subclass:
@@ -349,8 +396,9 @@ configuration = UserInterfaceConfiguration().use_sidebar_statistics(statistics)
 in `agent_information` or `current_session` in display order, use
 `SidebarStatisticCategory.SESSION` for session `FixedStatistic` values, and
 keep keys unique within each category. A computed value of `None` is omitted.
-When one configured collection serves multiple agents, the UI copies it so each
-sidebar owns independent message pumps and event state.
+When configuring multiple agents, a shared configured module is supported and
+is connected once for the complete agent set. Duplicate keys or duplicate
+module ownership within one `SidebarStatistics` collection are rejected.
 
 For an event-driven field, add typed `@on_pairo(...)` handlers to the
 `SidebarStatistic` subclass. A relevant handler updates the statistic's owned

@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from .sidebar_field_group import SidebarFieldGroup
     from .sidebar_statistics import (
         DefaultSidebarStatisticsFactory,
-        DurationFormatter,
         FixedStatistic,
         SaveAgentStatistic,
         SaveSessionStatistic,
@@ -31,7 +30,6 @@ _MODULES = {
     "SidebarField": "sidebar_field",
     "SidebarFieldGroup": "sidebar_field_group",
     "DefaultSidebarStatisticsFactory": "sidebar_statistics",
-    "DurationFormatter": "sidebar_statistics",
     "FixedStatistic": "sidebar_statistics",
     "SaveAgentStatistic": "sidebar_statistics",
     "SaveSessionStatistic": "sidebar_statistics",
@@ -61,7 +59,6 @@ __all__ = [
     "SidebarField",
     "SidebarFieldGroup",
     "DefaultSidebarStatisticsFactory",
-    "DurationFormatter",
     "FixedStatistic",
     "SaveAgentStatistic",
     "SaveSessionStatistic",

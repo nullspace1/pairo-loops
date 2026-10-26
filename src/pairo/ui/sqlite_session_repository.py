@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -21,7 +21,7 @@ from .models import (
     TranscriptEntry,
     TranscriptMetadata,
 )
-from .session_repository import SessionNotFoundError
+from .session_repository import SessionNotFoundError, StatisticValue
 
 
 def _utc_now() -> datetime:
@@ -314,6 +314,89 @@ class SqliteSessionRepository:
             raise RuntimeError("The provider identifier matches multiple sessions.")
         return self._metadata_from(rows[0])
 
+    async def upsert_agent_statistic(
+        self, agent_id: UUID, statistic: StatisticValue
+    ) -> None:
+        connection = await self._connect()
+        await connection.execute(
+            """
+            INSERT INTO agent_statistics (agent_id, statistic_key, statistic_value)
+            VALUES (?, ?, ?)
+            ON CONFLICT(agent_id, statistic_key) DO UPDATE SET
+                statistic_value = excluded.statistic_value
+            """,
+            (str(agent_id), statistic.key, statistic.value),
+        )
+        await connection.commit()
+
+    async def remove_agent_statistic(self, agent_id: UUID, key: str) -> None:
+        connection = await self._connect()
+        await connection.execute(
+            "DELETE FROM agent_statistics WHERE agent_id = ? AND statistic_key = ?",
+            (str(agent_id), key),
+        )
+        await connection.commit()
+
+    async def agent_statistics_for(self, agent_id: UUID) -> tuple[StatisticValue, ...]:
+        connection = await self._connect()
+        cursor = await connection.execute(
+            """
+            SELECT statistic_key, statistic_value
+            FROM agent_statistics
+            WHERE agent_id = ?
+            ORDER BY statistic_order ASC
+            """,
+            (str(agent_id),),
+        )
+        return self._statistics_from(await cursor.fetchall())
+
+    async def upsert_session_statistic(
+        self, agent_id: UUID, session_name: str, statistic: StatisticValue
+    ) -> None:
+        connection = await self._connect()
+        await self._require_registered(agent_id, session_name)
+        await connection.execute(
+            """
+            INSERT INTO session_statistics (
+                agent_id, session_name, statistic_key, statistic_value
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(agent_id, session_name, statistic_key) DO UPDATE SET
+                statistic_value = excluded.statistic_value
+            """,
+            (str(agent_id), session_name, statistic.key, statistic.value),
+        )
+        await connection.commit()
+
+    async def remove_session_statistic(
+        self, agent_id: UUID, session_name: str, key: str
+    ) -> None:
+        connection = await self._connect()
+        await self._require_registered(agent_id, session_name)
+        await connection.execute(
+            """
+            DELETE FROM session_statistics
+            WHERE agent_id = ? AND session_name = ? AND statistic_key = ?
+            """,
+            (str(agent_id), session_name, key),
+        )
+        await connection.commit()
+
+    async def session_statistics_for(
+        self, agent_id: UUID, session_name: str
+    ) -> tuple[StatisticValue, ...]:
+        connection = await self._connect()
+        await self._require_registered(agent_id, session_name)
+        cursor = await connection.execute(
+            """
+            SELECT statistic_key, statistic_value
+            FROM session_statistics
+            WHERE agent_id = ? AND session_name = ?
+            ORDER BY statistic_order ASC
+            """,
+            (str(agent_id), session_name),
+        )
+        return self._statistics_from(await cursor.fetchall())
+
     async def close(self) -> None:
         if not self._closed:
             self._closed = True
@@ -373,6 +456,29 @@ class SqliteSessionRepository:
 
             CREATE INDEX IF NOT EXISTS transcript_session_order
                 ON transcript_entries (agent_id, session_name, entry_order);
+
+            CREATE TABLE IF NOT EXISTS agent_statistics (
+                statistic_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT NOT NULL CHECK (length(agent_id) > 0),
+                statistic_key TEXT NOT NULL CHECK (length(statistic_key) > 0),
+                statistic_value TEXT NOT NULL,
+                UNIQUE (agent_id, statistic_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS session_statistics (
+                statistic_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT NOT NULL,
+                session_name TEXT NOT NULL,
+                statistic_key TEXT NOT NULL CHECK (length(statistic_key) > 0),
+                statistic_value TEXT NOT NULL,
+                FOREIGN KEY (agent_id, session_name)
+                    REFERENCES sessions (agent_id, session_name)
+                    ON DELETE CASCADE,
+                UNIQUE (agent_id, session_name, statistic_key)
+            );
+
+            CREATE INDEX IF NOT EXISTS session_statistic_order
+                ON session_statistics (agent_id, session_name, statistic_order);
             """
         )
         cursor = await connection.execute("PRAGMA table_info(transcript_entries)")
@@ -450,6 +556,10 @@ class SqliteSessionRepository:
             metadata=cast(TranscriptMetadata, metadata),
             entry_id=UUID(row["entry_id"]),
         )
+
+    @staticmethod
+    def _statistics_from(rows: Iterable[sqlite3.Row]) -> tuple[StatisticValue, ...]:
+        return tuple(StatisticValue(row["statistic_key"], row["statistic_value"]) for row in rows)
 
 
 __all__ = ["SqliteSessionRepository"]

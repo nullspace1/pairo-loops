@@ -33,8 +33,8 @@ flowchart LR
 `run_agents` creates initial sessions, persists their metadata, launches the
 Textual UI, and closes agents and the repository on exit. Each agent owns only
 its active provider session. `EventPipeline` broadcasts in-process events but
-does not retain or replay them; the repository is the durable session and
-transcript boundary.
+does not retain or replay them; the repository is the durable session,
+transcript, and sidebar-statistic boundary.
 
 Optional utilities and integrations, including `ConversationEventLog`,
 `WorkspaceFactory`, chatrooms, and external MCP server installers, build on

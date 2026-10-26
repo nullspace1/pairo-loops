@@ -63,7 +63,8 @@ from .widgets import (
 )
 from .widgets.chat_editor import ChatEditor
 from .widgets.sidebar_statistics import (
-    SaveAgentStatistic, SaveSessionStatistic, SidebarStatistics, default_sidebar_statistics,
+    SaveAgentStatistic, SaveSessionStatistic, SidebarStatistic, SidebarStatistics,
+    default_sidebar_statistics,
 )
 
 
@@ -150,7 +151,8 @@ class AgentChatApp(App[None]):
         self.session_repository = session_repository
         self._transcribers = transcribers
         self._detail_level = EventDetailLevel.NORMAL
-        self._sidebar_statistics = self._isolated_sidebar_statistics(sidebar_statistics)
+        self._sidebar_statistics = dict(sidebar_statistics)
+        self._statistic_modules = self._configured_statistic_modules()
         self._piper = TextualEventPiper(
             event_pipeline,
             self.post_message,
@@ -174,6 +176,7 @@ class AgentChatApp(App[None]):
             ),
         )
         self._subscriptions: list[object] = []
+        self._statistics_ready = False
         self._controller = AgentCommandController(
             agents_by_id,
             event_pipeline,
@@ -192,7 +195,7 @@ class AgentChatApp(App[None]):
                 self._event_pipeline,
                 self._transcribers,
                 self._detail_level,
-                sidebar_statistics=self._sidebar_statistics[agent.configuration().id],
+                sidebar_fields=(self._sidebar_statistics[agent.configuration().id].agent_fields, self._sidebar_statistics[agent.configuration().id].session_fields),
                 id=f"chat-content-{index}",
             )
             for index, agent in enumerate(agents_by_id.values())
@@ -209,7 +212,10 @@ class AgentChatApp(App[None]):
     async def on_mount(self) -> None:
         """Attach the application-owned ingress once the Textual loop exists."""
         await self._transcribers.start(self.session_repository, self._event_pipeline, self)
+        await self._configure_statistics()
         await self._load_repository_sessions()
+        await self._rebuild_all_statistics()
+        self._statistics_ready = True
         self._piper.attach()
         self._subscriptions = [self._piper]
         self._active_chat().input.focus()
@@ -236,6 +242,8 @@ class AgentChatApp(App[None]):
 
     async def on_unmount(self) -> None:
         self._stop_event_delivery()
+        for statistic in self._statistic_modules:
+            await statistic.teardown()
         await self._transcribers.shutdown()
 
     def _validate_sidebar_statistics(
@@ -255,45 +263,77 @@ class AgentChatApp(App[None]):
                 )
             raise ValueError("Sidebar statistics must match configured agents (" + "; ".join(details) + ").")
 
-    def _isolated_sidebar_statistics(
-        self, statistics: Mapping[UUID, SidebarStatistics]
-    ) -> dict[UUID, SidebarStatistics]:
-        """Do not let separate sidebars share stateful Textual message pumps."""
-        isolated: dict[UUID, SidebarStatistics] = {}
+    def _configured_statistic_modules(self) -> tuple[SidebarStatistic, ...]:
+        """Return every configured module once, preserving configuration order."""
+        modules: list[SidebarStatistic] = []
         seen: set[int] = set()
-        for agent_id, configured in statistics.items():
-            if id(configured) in seen:
-                isolated[agent_id] = configured.copy_for_sidebar()
-            else:
-                isolated[agent_id] = configured
-                seen.add(id(configured))
-        return isolated
+        for statistics in self._sidebar_statistics.values():
+            for statistic in statistics.agent_information + statistics.current_session:
+                if id(statistic) not in seen:
+                    modules.append(statistic)
+                    seen.add(id(statistic))
+        return tuple(modules)
+
+    async def _configure_statistics(self) -> None:
+        for statistic in self._statistic_modules:
+            await statistic.configure(
+                self.session_repository,
+                self,
+                self._agents.values(),
+            )
+
+    async def _statistic_context(self, agent_id: UUID):
+        from .widgets.sidebar_statistics import SidebarStatisticContext
+        agent = self._agents[agent_id]
+        active = agent.current_session()
+        metadata = None
+        if active is not None:
+            try:
+                metadata = await self.session_repository.get_session(agent_id, active.name)
+            except SessionNotFoundError:
+                pass
+        return SidebarStatisticContext(agent, active, metadata)
+
+    async def _rebuild_statistics(self, agent_id: UUID) -> None:
+        context = await self._statistic_context(agent_id)
+        try:
+            await self._sidebar_statistics[agent_id].build(context)
+        except SessionNotFoundError:
+            # A queued tab/session rebuild can retain a context whose session
+            # was deleted before its statistic writes complete.  The deletion
+            # handler schedules the replacement scope, so leave this stale
+            # rebuild without publishing a cross-scope map.
+            return
+        agent_values = {item.key: item.value for item in await self.session_repository.agent_statistics_for(agent_id)}
+        session_values: dict[str, str] = {}
+        if context.active_session is not None:
+            session_values = {item.key: item.value for item in await self.session_repository.session_statistics_for(agent_id, context.active_session.name)}
+        pane = self.chats[agent_id]
+        if pane.is_mounted:
+            pane.sidebar.agent_values = agent_values
+            pane.sidebar.session_values = session_values
+
+    async def _rebuild_all_statistics(self) -> None:
+        for agent_id in self._agents:
+            await self._rebuild_statistics(agent_id)
 
     @on(SaveAgentStatistic)
     def save_agent_statistic(self, message: SaveAgentStatistic) -> None:
         agent_id = message.agent.configuration().id
         if self._agents.get(agent_id) is not message.agent:
             return
-        pane = self.chats.get(agent_id)
-        if pane is None or not pane.is_mounted:
-            return
-        try:
-            pane.sidebar.save_agent_statistic(message.key, message.value)
-        except NoMatches:
-            return
+        pane = self.chats[agent_id]
+        if pane.is_mounted:
+            pane.sidebar.agent_values = {**pane.sidebar.agent_values, message.key: message.value}
 
     @on(SaveSessionStatistic)
     def save_session_statistic(self, message: SaveSessionStatistic) -> None:
         agent_id = message.agent.configuration().id
         if self._agents.get(agent_id) is not message.agent:
             return
-        pane = self.chats.get(agent_id)
-        if pane is None or not pane.is_mounted:
-            return
-        try:
-            pane.sidebar.save_session_statistic(message.key, message.value, message.session)
-        except NoMatches:
-            return
+        pane = self.chats[agent_id]
+        if pane.is_mounted and message.agent.current_session() is message.session:
+            pane.sidebar.session_values = {**pane.sidebar.session_values, message.key: message.value}
 
     async def action_quit(self) -> None:
         self._stop_event_delivery()
@@ -303,12 +343,8 @@ class AgentChatApp(App[None]):
     async def receive_pairo_event(self, event: BaseModel) -> None:
         """Deliver an event to stateful owners, then enqueue transcription."""
         self._transcribers.deliver(event)
-        for pane in self.chats.values():
-            try:
-                pane.sidebar._statistics.post(PairoEvent(event))
-            except NoMatches:
-                # A queued ingress can reach a pane after Textual has unmounted it.
-                continue
+        for statistic in self._statistic_modules:
+            statistic.post_message(PairoEvent(event))
         if self._transcribers.has_event_transcriber(event):
             self._transcribers.event_transcriber_for(event).request(event)
 
@@ -329,7 +365,7 @@ class AgentChatApp(App[None]):
             if pane is not None:
                 try:
                     await pane.select_session(event.session_name)
-                    await pane.sidebar.activate_statistics()
+                    await self._rebuild_statistics(event.agent_id)
                 except NoMatches:
                     return
 
@@ -339,7 +375,7 @@ class AgentChatApp(App[None]):
         if pane is not None:
             try:
                 await pane.select_session(event.selected_session_name)
-                await pane.sidebar.activate_statistics()
+                await self._rebuild_statistics(event.agent_id)
             except (NoMatches, SessionNotFoundError):
                 # Deletion events can arrive after teardown or a later deletion.
                 return
@@ -382,7 +418,7 @@ class AgentChatApp(App[None]):
                     event.agent_id, event.session_name
                 )
                 await pane.select_session(event.session_name)
-                await pane.sidebar.activate_statistics()
+                await self._rebuild_statistics(event.agent_id)
             except (NoMatches, SessionNotFoundError):
                 # A stale navigation request can arrive after deletion or teardown.
                 return
@@ -436,6 +472,15 @@ class AgentChatApp(App[None]):
         self._detail_level = message.detail_level
         for pane in self.chats.values():
             await pane.set_detail_level(message.detail_level)
+
+    @on(TabbedContent.TabActivated)
+    async def rebuild_statistics_for_active_tab(self, _event: TabbedContent.TabActivated) -> None:
+        if not self._statistics_ready:
+            return
+        tabs = self.query_one("#agent-tabs", TabbedContent)
+        agent_id = next((configured_id for configured_id, pane_id in self._pane_ids.items() if pane_id == tabs.active), None)
+        if agent_id is not None:
+            self.call_after_refresh(self._rebuild_statistics, agent_id)
 
     def select_agent(self, agent_id: UUID) -> None:
         tabs = self.query_one("#agent-tabs", TabbedContent)

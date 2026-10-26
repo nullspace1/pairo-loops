@@ -1,6 +1,6 @@
 """Composite workspace for one agent."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import asyncio
 from dataclasses import dataclass
 from uuid import UUID
@@ -20,7 +20,7 @@ from ..transcribers import TranscriberRegistry
 from ..session_repository import SessionNotFoundError, SessionRepository
 from .agent_sidebar import AgentSidebar
 from .chat_editor import ChatEditor
-from .sidebar_statistics import SidebarStatistics
+from .sidebar_statistics.statistics import SidebarFieldDefinition
 from .transcript import Transcript
 
 
@@ -68,7 +68,7 @@ class AgentChatPane(Vertical):
         transcribers: TranscriberRegistry,
         detail_level: EventDetailLevel,
         *,
-        sidebar_statistics: SidebarStatistics | None = None,
+        sidebar_fields: tuple[Sequence[SidebarFieldDefinition], Sequence[SidebarFieldDefinition]],
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -91,7 +91,7 @@ class AgentChatPane(Vertical):
         self._event_pipeline = event_pipeline
         self._transcribers = transcribers
         self._detail_level = detail_level
-        self._sidebar_statistics = sidebar_statistics
+        self._sidebar_fields = sidebar_fields
         self._session_generation = 0
         self._pending_mutations: list[_PendingTranscriptMutation] = []
         self._transition_lock = asyncio.Lock()
@@ -120,12 +120,8 @@ class AgentChatPane(Vertical):
                         classes="detail-filter",
                     )
             yield AgentSidebar(
-                self.agent,
-                self._agents,
-                self._repository,
-                self._detail_level,
-                self._event_pipeline,
-                statistics=self._sidebar_statistics,
+                self._sidebar_fields[0],
+                self._sidebar_fields[1],
                 classes="agent-sidebar",
             )
 

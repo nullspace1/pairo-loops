@@ -29,17 +29,6 @@ class TimestampFormatter:
         return f"{local:%Y-%m-%d %H:%M:%S} {readable_offset}".rstrip()
 
 
-class DurationFormatter:
-    """Render elapsed seconds as a non-negative hours/minutes/seconds value."""
-
-    def format(self, seconds: float) -> str:
-        """Return the legacy ``HH:MM:SS`` representation."""
-        whole_seconds = max(0, int(seconds))
-        hours, remainder = divmod(whole_seconds, 3600)
-        minutes, remaining_seconds = divmod(remainder, 60)
-        return f"{hours:02d}:{minutes:02d}:{remaining_seconds:02d}"
-
-
 class ConstantStatisticValue:
     """Provide a constant asynchronous statistic value without callback closures."""
 
@@ -57,12 +46,10 @@ class DefaultSidebarStatisticsFactory:
         self,
         agent: Agent[SessionIdentifier],
         timestamp_formatter: TimestampFormatter | None = None,
-        duration_formatter: DurationFormatter | None = None,
     ) -> None:
         self._agent = agent
         self._configuration = agent.configuration()
         self._timestamp_formatter = timestamp_formatter or TimestampFormatter()
-        self._duration_formatter = duration_formatter or DurationFormatter()
 
     def build(self) -> SidebarStatistics:
         """Compose the default agent, MCP-server, and session statistic providers."""
@@ -113,7 +100,6 @@ class DefaultSidebarStatisticsFactory:
             FixedStatistic("created", "Created", self._created, SidebarStatisticCategory.SESSION),
             FixedStatistic("last_message", "Last message", self._last_message, SidebarStatisticCategory.SESSION),
             FixedStatistic("last_update", "Last update", self._last_update, SidebarStatisticCategory.SESSION),
-            FixedStatistic("duration", "Duration", self._duration, SidebarStatisticCategory.SESSION),
             TokenUsageStatistic(),
         )
 
@@ -173,10 +159,6 @@ class DefaultSidebarStatisticsFactory:
             context.session.last_updated_at if context.session else None
         )
 
-    async def _duration(self, context: SidebarStatisticContext) -> str:
-        if context.session is None:
-            return self._duration_formatter.format(0)
-        return self._duration_formatter.format(context.session.duration_seconds)
 
     def _display_enum(self, value: Enum | None) -> str:
         return "Default" if value is None else str(value.value)
@@ -197,18 +179,12 @@ def format_time(value: datetime | None) -> str:
     return TimestampFormatter().format(value)
 
 
-def format_duration(seconds: float) -> str:
-    """Compatibility entry point for duration rendering."""
-    return DurationFormatter().format(seconds)
-
 
 __all__ = [
     "ConstantStatisticValue",
     "DefaultSidebarStatistics",
     "DefaultSidebarStatisticsFactory",
-    "DurationFormatter",
     "TimestampFormatter",
     "default_sidebar_statistics",
-    "format_duration",
     "format_time",
 ]

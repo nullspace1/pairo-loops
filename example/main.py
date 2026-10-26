@@ -28,7 +28,7 @@ from spec_manager import WorkerVerifierPair, install_spec_manager
 
 async def run_async() -> None:
     pipeline = EventPipeline()
-    repository = SqliteSessionRepository("./.log/sessions.db")
+    repository = SqliteSessionRepository("./.db/sessions.db")
     event_log = ConversationEventLog(
         pipeline,
         Path("./.log/events" + str(datetime.datetime.now().timestamp()) + ".jsonl"),
