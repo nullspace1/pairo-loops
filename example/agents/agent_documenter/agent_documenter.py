@@ -28,7 +28,7 @@ def get_agent_documenter(pipeline, repository):
         approval_mode=ApprovalMode.USER,
         permission_requester=TextualPermissionRequester(pipeline, repository),
         workspace=project_root,
-        model="gpt-5.6-sol",
+        model="gpt-5.6-luna",
         skill_folders=(agent_directory / "skills",),
         base_instructions=(agent_directory / "agent_documenter.md").read_text(
             encoding="utf-8"

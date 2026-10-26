@@ -10,7 +10,7 @@ from pairo.core.agent import SessionIdentifier
 from pairo.core.clients import Agent
 
 from .fixed_statistic import FixedStatistic
-from .statistic import SidebarStatisticContext, SidebarStatisticProvider
+from .statistic import SidebarStatisticCategory, SidebarStatisticContext, SidebarStatistic
 from .statistics import SidebarStatistics
 from .token_usage_statistic import TokenUsageStatistic
 
@@ -71,7 +71,7 @@ class DefaultSidebarStatisticsFactory:
             self._session_statistics(),
         )
 
-    def _agent_statistics(self) -> tuple[SidebarStatisticProvider, ...]:
+    def _agent_statistics(self) -> tuple[SidebarStatistic, ...]:
         return (
             FixedStatistic("name", "Name", self._agent_name),
             FixedStatistic("id", "ID", self._agent_id),
@@ -90,7 +90,7 @@ class DefaultSidebarStatisticsFactory:
             ),
         )
 
-    def _server_statistics(self) -> tuple[SidebarStatisticProvider, ...]:
+    def _server_statistics(self) -> tuple[SidebarStatistic, ...]:
         statistics = tuple(
             FixedStatistic(
                 f"mcp_server:{server.name}",
@@ -107,13 +107,13 @@ class DefaultSidebarStatisticsFactory:
             ),
         )
 
-    def _session_statistics(self) -> tuple[SidebarStatisticProvider, ...]:
+    def _session_statistics(self) -> tuple[SidebarStatistic, ...]:
         return (
-            FixedStatistic("session_name", "Name", self._session_name),
-            FixedStatistic("created", "Created", self._created),
-            FixedStatistic("last_message", "Last message", self._last_message),
-            FixedStatistic("last_update", "Last update", self._last_update),
-            FixedStatistic("duration", "Duration", self._duration),
+            FixedStatistic("session_name", "Name", self._session_name, SidebarStatisticCategory.SESSION),
+            FixedStatistic("created", "Created", self._created, SidebarStatisticCategory.SESSION),
+            FixedStatistic("last_message", "Last message", self._last_message, SidebarStatisticCategory.SESSION),
+            FixedStatistic("last_update", "Last update", self._last_update, SidebarStatisticCategory.SESSION),
+            FixedStatistic("duration", "Duration", self._duration, SidebarStatisticCategory.SESSION),
             TokenUsageStatistic(),
         )
 
@@ -212,4 +212,3 @@ __all__ = [
     "format_duration",
     "format_time",
 ]
-

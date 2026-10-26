@@ -12,6 +12,7 @@ from openai_codex.generated.v2_all import (
     CommandExecutionStatus,
     CommandExecutionThreadItem,
     FileChangeOutputDeltaNotification,
+    ItemStartedNotification,
     McpToolCallProgressNotification,
     McpToolCallResult,
     McpToolCallError,
@@ -525,11 +526,34 @@ def test_codex_drops_command_and_mcp_progress_at_provider_boundary(tmp_path: Pat
     asyncio.run(scenario())
 
 
-def test_codex_caps_terminal_command_output_with_head_tail_and_count(tmp_path: Path) -> None:
+def test_codex_drops_command_and_mcp_starts_at_provider_boundary(tmp_path: Path) -> None:
     async def scenario() -> None:
-        agent = CodexAgent(
-            configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient(), command_output_limit=64
+        agent = CodexAgent(configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient())
+        identifier = CodexSessionIdentifier(thread_id="thread-1")
+        command = CommandExecutionThreadItem(
+            id="command-1", type="commandExecution", command="pytest", cwd="C:/work",
+            status=CommandExecutionStatus.in_progress, commandActions=[], exitCode=None,
         )
+        mcp = McpToolCallThreadItem(
+            id="call-1", type="mcpToolCall", server="tools", tool="inspect",
+            arguments={}, status=McpToolCallStatus.in_progress,
+        )
+        for item in (command, mcp):
+            event = await agent._translate_notification(
+                identifier,
+                SimpleNamespace(payload=ItemStartedNotification(
+                    item=item, startedAtMs=0, threadId="thread-1", turnId="turn-1"
+                )),
+            )
+            assert event is None
+        await agent.close()
+
+    asyncio.run(scenario())
+
+
+def test_codex_terminal_command_event_retains_complete_provider_output(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        agent = CodexAgent(configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient())
         output = "H" * 40 + "discard" * 20 + "T" * 40
         event = agent._completed_activity(CommandExecutionThreadItem(
             id="command-1", type="commandExecution", command="pytest", cwd="C:/work",
@@ -537,28 +561,7 @@ def test_codex_caps_terminal_command_output_with_head_tail_and_count(tmp_path: P
             aggregatedOutput=output,
         ))
         assert isinstance(event, ClientCommandExecutionCompleted)
-        assert event.output is not None
-        assert len(event.output) <= 64
-        assert event.output.startswith("H")
-        assert event.output.endswith("T")
-        assert "characters omitted" in event.output
-        await agent.close()
-
-    asyncio.run(scenario())
-
-def test_codex_default_command_output_limit_is_64_kib(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        agent = CodexAgent(configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient())
-        output = "H" * (CodexAgent.DEFAULT_COMMAND_OUTPUT_LIMIT + 100) + "T"
-        event = agent._completed_activity(CommandExecutionThreadItem(
-            id="command-1", type="commandExecution", command="pytest", cwd="C:/work",
-            status=CommandExecutionStatus.completed, commandActions=[], exitCode=0,
-            aggregatedOutput=output,
-        ))
-        assert isinstance(event, ClientCommandExecutionCompleted)
-        assert event.output is not None
-        assert len(event.output) <= 64 * 1024
-        assert event.output.endswith("T")
+        assert event.output == output
         await agent.close()
 
     asyncio.run(scenario())

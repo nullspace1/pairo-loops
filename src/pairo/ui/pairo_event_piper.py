@@ -53,9 +53,9 @@ def on_pairo(
         async def receive(self: object, message: PairoEvent) -> R | None:
             if not isinstance(message.event, event_type):
                 return None
-            result = handler(self, cast(EventT, message.event))  # type: ignore[call-arg, arg-type]
+            result = handler(self, message.event)  # type: ignore[call-arg, arg-type]
             if isawaitable(result):
-                return await result
+                return cast(R, await result)
             return result
 
         return cast(TypingCallable[P, R], on(PairoEvent)(receive))

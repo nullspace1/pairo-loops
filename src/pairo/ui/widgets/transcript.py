@@ -3,14 +3,12 @@
 from collections.abc import Callable, Iterable
 from uuid import UUID
 
-from textual import on
 from textual.containers import VerticalGroup, VerticalScroll
 from textual.widget import Widget
 
 from pairo.core.events import EventPipeline
 
 from ..models import EventDetailLevel, TranscriptEntry, TranscriptMetadata
-from ..pairo_event_piper import PairoEvent
 from ..transcribers import (
     TranscriptRenderContext,
     TranscriberRegistry,
@@ -177,13 +175,6 @@ class Transcript(VerticalScroll):
         for widget in self._entry_widgets.values():
             widget.set_visible_at(detail_level)
         self.refresh(layout=True)
-
-    @on(PairoEvent)
-    def relay_pairo_event(self, message: PairoEvent) -> None:
-        """Deliver activity updates to mounted cards, not a transcript registry."""
-        message.stop()
-        for card in self.query(".sourced-transcript"):
-            card.post_message(PairoEvent(message.event))
 
     async def _mount_entry(self, entry: TranscriptEntry[TranscriptMetadata]) -> None:
         widget = TranscriptEntryWidget(entry, self._render_entry)

@@ -105,44 +105,16 @@ class _PermissionContext:
     requester: PermissionRequester | None
 
 
-class _CommandOutputLimiter:
-    """Bound terminal command output without hiding either end of the result."""
-
-    def __init__(self, limit: int) -> None:
-        self._limit = limit
-
-    def limit(self, output: str | None) -> str | None:
-        if output is None or len(output) <= self._limit:
-            return output
-        omitted = len(output)
-        while True:
-            marker = f"\n… [{omitted} characters omitted] …\n"
-            available = self._limit - len(marker)
-            if available < 2:
-                return output[: self._limit]
-            head_size = available // 2
-            tail_size = available - head_size
-            omitted = len(output) - head_size - tail_size
-            next_marker = f"\n… [{omitted} characters omitted] …\n"
-            if next_marker == marker:
-                return output[:head_size] + marker + output[-tail_size:]
-
-
 class CodexAgent:
     """Own one configured Codex agent and its currently active conversation."""
 
     _COMPACTION_TIMEOUT_SECONDS = 30.0
-    DEFAULT_COMMAND_OUTPUT_LIMIT = 64 * 1024
-
     def __init__(
         self,
         configuration: AgentConfiguration,
         event_pipeline: EventPipeline,
         client: AsyncCodexClient | None = None,
-        command_output_limit: int = DEFAULT_COMMAND_OUTPUT_LIMIT,
     ) -> None:
-        if command_output_limit < 1:
-            raise ValueError("command_output_limit must be positive.")
         self._configuration = configuration
         self._pipeline = event_pipeline
         self._permission_pipeline = SynchronousEventPipeline(event_pipeline)
@@ -158,7 +130,6 @@ class CodexAgent:
         self._closed = False
         self._permission_lock = Lock()
         self._permission_context: _PermissionContext | None = None
-        self._command_output_limiter = _CommandOutputLimiter(command_output_limit)
 
     def configuration(self) -> AgentConfiguration:
         return self._configuration
@@ -464,6 +435,9 @@ class CodexAgent:
         ):
             return ClientReasoningDelta(text=str(payload.delta))
         if isinstance(payload, ItemStartedNotification):
+            root = getattr(payload.item, "root", payload.item)
+            if isinstance(root, (CommandExecutionThreadItem, McpToolCallThreadItem)):
+                return None
             return ClientActivityStarted(activity=self._dump(payload.item))
         if isinstance(payload, ItemCompletedNotification):
             return self._completed_activity(payload.item)
@@ -491,9 +465,9 @@ class CodexAgent:
                 activity_id=root.id,
                 command=root.command,
                 cwd=str(root.cwd) if root.cwd is not None else None,
-                status=cast(CommandExecutionCompletionStatus, root.status.value),
+                status=root.status.value,
                 exit_code=root.exit_code,
-                output=self._command_output_limiter.limit(root.aggregated_output),
+                output=root.aggregated_output,
             )
         if isinstance(root, McpToolCallThreadItem):
             error = None if root.error is None else root.error.message
@@ -502,7 +476,7 @@ class CodexAgent:
                 server=root.server,
                 tool=root.tool,
                 arguments=self._json_value(root.arguments),
-                status=cast(McpToolCallCompletionStatus, root.status.value),
+                status=root.status.value,
                 result=(
                     None if root.result is None else self._json_value(root.result)
                 ),
@@ -677,7 +651,7 @@ class CodexAgent:
     def _dump(self, value: object) -> JsonObject:
         dumped = self._json_value(value)
         if isinstance(dumped, dict):
-            return cast(JsonObject, dumped)
+            return dumped
         return {"value": dumped}
 
     # invariant: boundary-exception[external-sdk] -- generated SDK values must cross the event boundary as JSON

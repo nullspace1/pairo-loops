@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import (

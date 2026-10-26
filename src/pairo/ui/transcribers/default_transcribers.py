@@ -11,7 +11,7 @@ from .token_usage_updated_transcriber import TokenUsageUpdatedTranscriber
 from .transcriber import TranscriberRegistry
 
 
-def default_transcribers() -> TranscriberRegistry:
+def default_transcribers(command_output_limit: int = CommandExecutionTranscriber.DEFAULT_COMMAND_OUTPUT_LIMIT) -> TranscriberRegistry:
     """Build the standard transcriber registry used by the UI."""
     registry = TranscriberRegistry()
     registry.register(MessageSentTranscriber())
@@ -19,7 +19,7 @@ def default_transcribers() -> TranscriberRegistry:
     registry.register(NetworkMessageSentTranscriber())
     registry.register(PermissionRequestTranscriber())
     registry.register_durable(SessionTableTranscriber())
-    registry.register(CommandExecutionTranscriber())
+    registry.register(CommandExecutionTranscriber(command_output_limit))
     registry.register(McpToolCallTranscriber())
     registry.register(TokenUsageUpdatedTranscriber())
     return registry

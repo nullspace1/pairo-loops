@@ -14,13 +14,13 @@ from .permission_request_transcriber import (
     PermissionRequestCard,
     PermissionRequestTranscriber,
 )
-from .routed_transcript_entry import ActivityIdentity, RoutedTranscriptEntry
+from .routed_transcript_entry import RoutedTranscriptEntry
 from .session_table_transcriber import SessionTableTranscriber, SessionTableWidget
 from .text_transcript import TranscriptMessage, render_text_transcript
 from .token_usage_updated_transcriber import TokenUsageUpdatedTranscriber
+from ..models import TranscriptMetadata
 from .transcriber import (
     EventTranscriber,
-    TranscriptMetadata,
     TranscriptTranscriber,
     Transcriber,
     TranscriberRegistry,
@@ -40,7 +40,6 @@ __all__ = [
     "PermissionDetailWidget",
     "PermissionRequestCard",
     "PermissionRequestTranscriber",
-    "ActivityIdentity",
     "RoutedTranscriptEntry",
     "SessionTableTranscriber",
     "SessionTableWidget",

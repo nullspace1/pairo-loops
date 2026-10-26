@@ -141,7 +141,7 @@ class AgentEventListeners:
         self._agent_reasoning_delta = _EventObserverRegistration(pipeline, AgentReasoningDelta)
         self._agent_activity_started = _EventObserverRegistration(pipeline, AgentActivityStarted)
         self._agent_activity_completed = _EventObserverRegistration(
-            pipeline, cast(type[AgentActivityCompleted], AgentActivityCompleted)
+            pipeline, AgentActivityCompleted  # type: ignore[type-abstract]
         )
         self._agent_response_completed = _EventObserverRegistration(pipeline, AgentResponseCompleted)
         self._agent_response_interrupted = _EventObserverRegistration(pipeline, AgentResponseInterrupted)

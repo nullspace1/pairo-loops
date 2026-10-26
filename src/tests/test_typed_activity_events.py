@@ -1,5 +1,6 @@
 """Focused contracts for typed routed activity events and summaries."""
 
+import re
 from uuid import uuid4
 
 import pytest
@@ -15,6 +16,7 @@ from pairo.core.events import (
 from pairo.ui.transcribers import (
     CommandExecutionTranscriber,
     McpToolCallTranscriber,
+    TranscriberRegistry,
     default_transcribers,
 )
 
@@ -76,6 +78,91 @@ def test_command_summary_renders_human_outcome_and_optional_details(
     assert "Working directory: Not provided" in entry.content
     assert "No output was provided." in entry.content
     assert "CommandExecutionStatus" not in entry.content
+
+
+def test_command_transcriber_bounds_unicode_output_without_mutating_event() -> None:
+    limit = 64
+    output = "🧪" * 80 + " middle " + "終" * 80
+    event = AgentCommandExecutionCompleted(
+        agent_id=AGENT_ID, session_name="main", activity_id="command", command="pytest -q",
+        status="completed", output=output,
+    )
+
+    entry = CommandExecutionTranscriber(limit).write(event).entry
+    bounded_output = entry.content.rsplit("\n\nOutput:\n", maxsplit=1)[1]
+    marker = re.search(r"\n… \[(\d+) characters omitted\] …\n", bounded_output)
+
+    assert marker is not None
+    assert len(bounded_output) <= limit
+    assert bounded_output.startswith(output[:1])
+    assert bounded_output.endswith(output[-1:])
+    assert int(marker.group(1)) == len(output) - (
+        len(bounded_output) - len(marker.group(0))
+    )
+    assert event.output == output
+
+
+def test_command_transcriber_preserves_none_and_in_limit_output() -> None:
+    transcriber = CommandExecutionTranscriber(64)
+    no_output = AgentCommandExecutionCompleted(
+        agent_id=AGENT_ID, session_name="main", activity_id="none", command="true",
+        status="completed", output=None,
+    )
+    short_output = AgentCommandExecutionCompleted(
+        agent_id=AGENT_ID, session_name="main", activity_id="short", command="echo",
+        status="completed", output="café",
+    )
+
+    assert "No output was provided." in transcriber.write(no_output).entry.content
+    assert transcriber.write(short_output).entry.content.endswith("Output:\ncafé")
+    assert no_output.output is None
+    assert short_output.output == "café"
+
+
+def test_command_transcriber_uses_a_64_kib_default_limit() -> None:
+    output = "H" * (64 * 1024 + 100) + "T"
+    event = AgentCommandExecutionCompleted(
+        agent_id=AGENT_ID, session_name="main", activity_id="default", command="pytest",
+        status="completed", output=output,
+    )
+
+    bounded_output = CommandExecutionTranscriber().write(event).entry.content.rsplit(
+        "\n\nOutput:\n", maxsplit=1
+    )[1]
+
+    assert len(bounded_output) <= 64 * 1024
+    assert bounded_output.endswith("T")
+    assert event.output == output
+
+
+@pytest.mark.parametrize(
+    "limit", [0, CommandExecutionTranscriber.MINIMUM_COMMAND_OUTPUT_LIMIT - 1]
+)
+def test_command_transcriber_rejects_limits_that_cannot_retain_a_complete_marker(
+    limit: int,
+) -> None:
+    with pytest.raises(ValueError, match="head character"):
+        CommandExecutionTranscriber(limit)
+
+
+def test_command_transcriber_accepts_minimum_limit_and_factory_or_custom_configuration() -> None:
+    minimum = CommandExecutionTranscriber.MINIMUM_COMMAND_OUTPUT_LIMIT
+    event = AgentCommandExecutionCompleted(
+        agent_id=AGENT_ID, session_name="main", activity_id="command", command="pytest",
+        status="completed", output="H" + "discard" * 100 + "T",
+    )
+    registry = default_transcribers(command_output_limit=minimum)
+    custom_registry = TranscriberRegistry()
+    custom_registry.register(CommandExecutionTranscriber(minimum))
+
+    for configured_registry in (registry, custom_registry):
+        bounded_output = configured_registry.event_transcriber_for(event).transcribe(
+            event
+        ).entry.content.rsplit("\n\nOutput:\n", maxsplit=1)[1]
+        assert len(bounded_output) <= minimum
+        assert bounded_output.startswith("H")
+        assert bounded_output.endswith("T")
+        assert "characters omitted" in bounded_output
 
 
 def test_mcp_summary_renders_failure_and_preserves_optional_error_data() -> None:

@@ -62,7 +62,9 @@ from .widgets import (
     AgentChatPane,
 )
 from .widgets.chat_editor import ChatEditor
-from .widgets.sidebar_statistics import SidebarStatistics, default_sidebar_statistics
+from .widgets.sidebar_statistics import (
+    SaveAgentStatistic, SaveSessionStatistic, SidebarStatistics, default_sidebar_statistics,
+)
 
 
 class AgentChatApp(App[None]):
@@ -148,7 +150,7 @@ class AgentChatApp(App[None]):
         self.session_repository = session_repository
         self._transcribers = transcribers
         self._detail_level = EventDetailLevel.NORMAL
-        self._sidebar_statistics = dict(sidebar_statistics)
+        self._sidebar_statistics = self._isolated_sidebar_statistics(sidebar_statistics)
         self._piper = TextualEventPiper(
             event_pipeline,
             self.post_message,
@@ -172,8 +174,6 @@ class AgentChatApp(App[None]):
             ),
         )
         self._subscriptions: list[object] = []
-        for statistics in self._unique_sidebar_statistics():
-            statistics.setup(self._event_pipeline, agents_by_id)
         self._controller = AgentCommandController(
             agents_by_id,
             event_pipeline,
@@ -213,7 +213,6 @@ class AgentChatApp(App[None]):
         self._piper.attach()
         self._subscriptions = [self._piper]
         self._active_chat().input.focus()
-        self.set_interval(0.25, self._refresh_sidebars)
 
     async def _load_repository_sessions(self) -> None:
         """Restore each agent's selected session and transcript from durable state."""
@@ -238,14 +237,6 @@ class AgentChatApp(App[None]):
     async def on_unmount(self) -> None:
         self._stop_event_delivery()
         await self._transcribers.shutdown()
-        for statistics in self._unique_sidebar_statistics():
-            statistics.teardown()
-
-    def _unique_sidebar_statistics(self) -> tuple[SidebarStatistics, ...]:
-        unique: dict[int, SidebarStatistics] = {}
-        for statistics in self._sidebar_statistics.values():
-            unique[id(statistics)] = statistics
-        return tuple(unique.values())
 
     def _validate_sidebar_statistics(
         self,
@@ -264,6 +255,46 @@ class AgentChatApp(App[None]):
                 )
             raise ValueError("Sidebar statistics must match configured agents (" + "; ".join(details) + ").")
 
+    def _isolated_sidebar_statistics(
+        self, statistics: Mapping[UUID, SidebarStatistics]
+    ) -> dict[UUID, SidebarStatistics]:
+        """Do not let separate sidebars share stateful Textual message pumps."""
+        isolated: dict[UUID, SidebarStatistics] = {}
+        seen: set[int] = set()
+        for agent_id, configured in statistics.items():
+            if id(configured) in seen:
+                isolated[agent_id] = configured.copy_for_sidebar()
+            else:
+                isolated[agent_id] = configured
+                seen.add(id(configured))
+        return isolated
+
+    @on(SaveAgentStatistic)
+    def save_agent_statistic(self, message: SaveAgentStatistic) -> None:
+        agent_id = message.agent.configuration().id
+        if self._agents.get(agent_id) is not message.agent:
+            return
+        pane = self.chats.get(agent_id)
+        if pane is None or not pane.is_mounted:
+            return
+        try:
+            pane.sidebar.save_agent_statistic(message.key, message.value)
+        except NoMatches:
+            return
+
+    @on(SaveSessionStatistic)
+    def save_session_statistic(self, message: SaveSessionStatistic) -> None:
+        agent_id = message.agent.configuration().id
+        if self._agents.get(agent_id) is not message.agent:
+            return
+        pane = self.chats.get(agent_id)
+        if pane is None or not pane.is_mounted:
+            return
+        try:
+            pane.sidebar.save_session_statistic(message.key, message.value, message.session)
+        except NoMatches:
+            return
+
     async def action_quit(self) -> None:
         self._stop_event_delivery()
         self.exit()
@@ -272,6 +303,12 @@ class AgentChatApp(App[None]):
     async def receive_pairo_event(self, event: BaseModel) -> None:
         """Deliver an event to stateful owners, then enqueue transcription."""
         self._transcribers.deliver(event)
+        for pane in self.chats.values():
+            try:
+                pane.sidebar._statistics.post(PairoEvent(event))
+            except NoMatches:
+                # A queued ingress can reach a pane after Textual has unmounted it.
+                continue
         if self._transcribers.has_event_transcriber(event):
             self._transcribers.event_transcriber_for(event).request(event)
 
@@ -292,6 +329,7 @@ class AgentChatApp(App[None]):
             if pane is not None:
                 try:
                     await pane.select_session(event.session_name)
+                    await pane.sidebar.activate_statistics()
                 except NoMatches:
                     return
 
@@ -301,6 +339,7 @@ class AgentChatApp(App[None]):
         if pane is not None:
             try:
                 await pane.select_session(event.selected_session_name)
+                await pane.sidebar.activate_statistics()
             except (NoMatches, SessionNotFoundError):
                 # Deletion events can arrive after teardown or a later deletion.
                 return
@@ -343,6 +382,7 @@ class AgentChatApp(App[None]):
                     event.agent_id, event.session_name
                 )
                 await pane.select_session(event.session_name)
+                await pane.sidebar.activate_statistics()
             except (NoMatches, SessionNotFoundError):
                 # A stale navigation request can arrive after deletion or teardown.
                 return
@@ -427,15 +467,6 @@ class AgentChatApp(App[None]):
         """Detach before teardown so no raw event can enqueue afterwards."""
         self._piper.detach()
         self._subscriptions.clear()
-
-    async def _refresh_sidebars(self) -> None:
-        for pane in self.chats.values():
-            try:
-                await pane.refresh_sidebar()
-            except NoMatches:
-                # A timer tick can race with Textual unmounting a chat pane.
-                continue
-
 
 class UserInterfaceLauncher:
     """Callable entry point for the default Textual interface."""

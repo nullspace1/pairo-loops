@@ -54,7 +54,7 @@ sequenceDiagram
             alt Corrections required
                 Verifier->>SpecManager: reject_task(corrections)
                 SpecManager-->>Developer: Return complete corrections from verify_task
-                SpecManager-->>Developer: Deliver corrections when IDLE
+                SpecManager-->>Developer: Best-effort correction notice when IDLE
             else Component accepted
                 Verifier->>SpecManager: accept_task
                 SpecManager-->>Documenter: Notify with history path when IDLE (optional)
@@ -69,8 +69,10 @@ task has stable acceptance-criterion IDs such as `AC1` and `AC2`. The developer
 implements only the assigned component, runs focused verification, and calls
 `verify_task`. The verifier either accepts it or returns all structured
 corrections in the waiting `verify_task` result; the idle-safe correction
-notification is supplemental. The planner assigns the next component only
-after acceptance; a final integration component owns the full-suite checks.
+notification is supplemental. A busy recipient, notification timeout,
+transport failure, or shutdown does not delay or replace that result. The
+planner assigns the next component only after acceptance; a final integration
+component owns the full-suite checks.
 
 `verify_task` evidence includes an implementation summary, changed files, one
 evidence record per acceptance criterion, summarized test runs, correction
@@ -103,14 +105,20 @@ worker correction and resubmission.
 ## Handoffs and persisted records
 
 Every SpecManager-originated assignment, verification request, correction,
-unsuccessful-work planner notification, and documenter notice waits until its
-recipient is idle and is delivered once. Delivery has bounded timeout and
-shutdown behavior; a failed assignment is returned to pending rather than
-silently remaining active.
+unsuccessful-work planner notification, and documenter notice waits until the
+recipient is idle before delivery is attempted. Delivery has bounded timeout
+and shutdown behavior. A failed assignment is returned to pending rather than
+silently remaining active; the correction notice is supplemental, so its
+failure does not roll back the persisted rejection or the corrections already
+returned by `verify_task`.
 
 Records live under the `folder` passed to `install_spec_manager`. The current
 example passes `Path("./tmp")`, so tasks are stored in `tmp/FEATURES.md` as
 structured `pairo-task` blocks and accepted evidence is appended to
 `tmp/output/FEATURE_HISTORY.md`. Existing structured task files remain
-compatible; unsuccessful records remain in `FEATURES.md` with their reason and
-partial-work context. The former unstructured format is not supported.
+compatible. Active pair ownership and outstanding correction records survive a
+manager restart. Because verification evidence and waiters are process-local,
+a task interrupted while `verifying` recovers as `working` for the same pair;
+the developer submits verification again. Unsuccessful records remain in
+`FEATURES.md` with their reason and partial-work context. The former
+unstructured format is not supported.

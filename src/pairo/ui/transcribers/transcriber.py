@@ -14,6 +14,7 @@ from textual.widget import Widget
 from ..models import TranscriptEntry, TranscriptMetadata
 from ..pairo_event_piper import PairoEvent
 from ..session_repository import SessionNotFoundError, SessionRepository
+from pairo.core.events import EventPipeline
 from ..transcript_events import TranscriptEntryAdded, TranscriptEntryDeleted, TranscriptEntryUpdated
 from .routed_transcript_entry import RoutedTranscriptEntry
 from .transcript_render_context import TranscriptRenderContext
@@ -30,7 +31,7 @@ class TranscriptionRequested(Message):
 
 class TranscriptMutations:
     """A transcriber-local commit-then-notify boundary."""
-    def __init__(self, repository: SessionRepository, pipeline: object) -> None:
+    def __init__(self, repository: SessionRepository, pipeline: EventPipeline) -> None:
         self._repository = repository
         self._pipeline = pipeline
 
@@ -39,16 +40,16 @@ class TranscriptMutations:
             await self._repository.add_entry(routed.agent_id, routed.session_name, routed.entry)
         except SessionNotFoundError:
             return False
-        cast(object, self._pipeline).push(TranscriptEntryAdded(agent_id=routed.agent_id, session_name=routed.session_name, entry=routed.entry))  # type: ignore[attr-defined]
+        self._pipeline.push(TranscriptEntryAdded(agent_id=routed.agent_id, session_name=routed.session_name, entry=routed.entry))
         return True
 
     async def update(self, routed: RoutedTranscriptEntry[MetadataT]) -> None:
         await self._repository.update_entry(routed.agent_id, routed.session_name, routed.entry)
-        cast(object, self._pipeline).push(TranscriptEntryUpdated(agent_id=routed.agent_id, session_name=routed.session_name, entry=routed.entry))  # type: ignore[attr-defined]
+        self._pipeline.push(TranscriptEntryUpdated(agent_id=routed.agent_id, session_name=routed.session_name, entry=routed.entry))
 
     async def delete(self, agent_id: UUID, session_name: str, entry_id: UUID) -> None:
         await self._repository.delete_entry(agent_id, session_name, entry_id)
-        cast(object, self._pipeline).push(TranscriptEntryDeleted(agent_id=agent_id, session_name=session_name, entry_id=entry_id))  # type: ignore[attr-defined]
+        self._pipeline.push(TranscriptEntryDeleted(agent_id=agent_id, session_name=session_name, entry_id=entry_id))
 
 
 class Transcriber(MessagePump, Generic[EventT, MetadataT]):
@@ -142,7 +143,7 @@ class TranscriberRegistry:
         if transcriber.transcript_type in self._transcript_transcribers: raise ValueError(f"Multiple transcribers registered for transcript type '{transcriber.transcript_type}'.")
         self._transcript_transcribers[transcriber.transcript_type] = transcriber
 
-    async def start(self, repository: SessionRepository, pipeline: object, parent: MessagePump) -> None:
+    async def start(self, repository: SessionRepository, pipeline: EventPipeline, parent: MessagePump) -> None:
         if self._started: return
         mutations = TranscriptMutations(repository, pipeline)
         self._mutation_publisher = mutations

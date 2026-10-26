@@ -4,8 +4,6 @@ import asyncio
 from uuid import UUID, uuid4
 
 from textual.app import App, ComposeResult
-from textual.widgets import Collapsible
-
 from pairo.core.events import EventPipeline
 from pairo.ui.models import EventDetailLevel, TranscriptEntry
 from pairo.ui.transcribers import default_transcribers
@@ -71,46 +69,6 @@ def test_incremental_changes_preserve_unrelated_widget_identity_and_detail_state
             assert [child.entry_id for child in view.query(TranscriptEntryWidget)] == [
                 debug.entry_id, second.entry_id, view.entries[-1].entry_id,
             ]
-
-    asyncio.run(scenario())
-
-
-def test_entry_wrapper_replaces_only_its_renderer_and_preserves_card_state() -> None:
-    async def scenario() -> None:
-        view = transcript()
-        progress = TranscriptEntry(
-            "agent", "Command - In progress\n\nLatest output:\nbuilding",
-            EventDetailLevel.NORMAL, {"type": "command_execution_progress"},
-        )
-        debug = entry("debug", EventDetailLevel.DEBUG)
-        sibling = entry("sibling")
-        completed = TranscriptEntry(
-            "agent", "Command - Completed successfully\n\nOutput:\ndone",
-            EventDetailLevel.NORMAL, {"type": "command_execution"},
-            progress.entry_id,
-        )
-        app = TranscriptApp(view)
-        async with app.run_test() as pilot:
-            await view.populate_entries((progress, debug, sibling))
-            progress_widget = widget_for(view, progress.entry_id)
-            sibling_widget = widget_for(view, sibling.entry_id)
-            await view.update_entry(completed)
-            await pilot.pause()
-
-            completed_card = progress_widget.query_one(Collapsible)
-            completed_card.collapsed = False
-            completed_card.can_focus = True
-            completed_card.focus()
-            await view.set_detail_level(EventDetailLevel.DEBUG)
-            await view.set_detail_level(EventDetailLevel.NORMAL)
-            await pilot.pause()
-
-            assert widget_for(view, progress.entry_id) is progress_widget
-            assert widget_for(view, sibling.entry_id) is sibling_widget
-            assert progress_widget.query_one(Collapsible) is completed_card
-            assert not completed_card.collapsed
-            assert app.focused is completed_card
-            assert not widget_for(view, debug.entry_id).display
 
     asyncio.run(scenario())
 

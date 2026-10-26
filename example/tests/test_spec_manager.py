@@ -493,13 +493,11 @@ def test_rejection_result_replaces_corrections_and_allows_resubmission(
     asyncio.run(scenario())
 
 
-def test_rejection_result_survives_busy_and_failed_worker_notification(
+def test_rejection_result_precedes_blocked_notification_and_survives_failures(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
-        manager, agents, director, worker, verifier = setup_manager(
-            tmp_path, handoff_timeout=0.01
-        )
+        manager, agents, director, worker, verifier = setup_manager(tmp_path)
         await tool(manager, "create_task")("Busy", "Do it", CRITERIA, context(director))
         await tool(manager, "assign_task")("pair-1", "Busy", context(director))
         verifying = asyncio.create_task(
@@ -507,14 +505,17 @@ def test_rejection_result_survives_busy_and_failed_worker_notification(
         )
         await asyncio.sleep(0)
         worker.state = AgentStatus.GENERATING
-        rejection = await tool(manager, "reject_task")(
-            [VerificationCorrection(
-                id="C7", criterion_ids=["AC1"], message="Handle busy delivery."
-            )],
-            context(verifier),
+        rejection = asyncio.create_task(
+            tool(manager, "reject_task")(
+                [VerificationCorrection(
+                    id="C7", criterion_ids=["AC1"], message="Handle busy delivery."
+                )],
+                context(verifier),
+            )
         )
-        assert "Handoff notification failed" in rejection
-        assert await verifying == (
+        await asyncio.sleep(0.01)
+        assert not rejection.done()
+        assert await asyncio.wait_for(asyncio.shield(verifying), timeout=0.1) == (
             "Task 'Busy' was rejected by verifier. Required corrections:\n"
             "- C7 (AC1): Handle busy delivery."
         )
@@ -526,6 +527,82 @@ def test_rejection_result_survives_busy_and_failed_worker_notification(
             tmp_path, agents, director, [WorkerVerifierPair("pair-1", worker, verifier)]
         )
         assert reloaded._store.tasks()["Busy"].status == "working"
+        await manager.close()
+        assert "Handoff notification failed" in await rejection
+        worker.state = AgentStatus.IDLE
+        assert "map exactly once to every open correction" in await tool(
+            reloaded, "verify_task"
+        )(verification_evidence(), context(worker))
+        replacement = asyncio.create_task(
+            tool(reloaded, "verify_task")(
+                verification_evidence([
+                    CorrectionResolution(
+                        correction_id="C7", resolution="Handled the blocked delivery."
+                    )
+                ]),
+                context(worker),
+            )
+        )
+        await asyncio.sleep(0)
+        await tool(reloaded, "reject_task")(
+            [VerificationCorrection(
+                id="C10", criterion_ids=["AC1"], message="Verify the reload path."
+            )],
+            context(verifier),
+        )
+        assert "- C10 (AC1): Verify the reload path." in await replacement
+        reloaded_again = SpecManager(
+            tmp_path, agents, director, [WorkerVerifierPair("pair-1", worker, verifier)]
+        )
+        assert "map exactly once to every open correction" in await tool(
+            reloaded_again, "verify_task"
+        )(
+            verification_evidence([
+                CorrectionResolution(
+                    correction_id="C7", resolution="Stale correction should be rejected."
+                )
+            ]),
+            context(worker),
+        )
+        resumed = asyncio.create_task(
+            tool(reloaded_again, "verify_task")(
+                verification_evidence([
+                    CorrectionResolution(
+                        correction_id="C10", resolution="Verified the reload path."
+                    )
+                ]),
+                context(worker),
+            )
+        )
+        await asyncio.sleep(0)
+        assert "Accepted" in await tool(reloaded_again, "accept_task")(context(verifier))
+        assert await resumed == "Task accepted."
+
+        timeout_folder = tmp_path / "timeout"
+        timeout_folder.mkdir()
+        timed_out, _, timeout_director, timeout_worker, timeout_verifier = setup_manager(
+            timeout_folder, handoff_timeout=0.01
+        )
+        await tool(timed_out, "create_task")(
+            "Timeout", "Do it", CRITERIA, context(timeout_director)
+        )
+        await tool(timed_out, "assign_task")(
+            "pair-1", "Timeout", context(timeout_director)
+        )
+        timeout_verification = asyncio.create_task(
+            tool(timed_out, "verify_task")(verification_evidence(), context(timeout_worker))
+        )
+        await asyncio.sleep(0)
+        timeout_worker.state = AgentStatus.GENERATING
+        timeout_rejection = await tool(timed_out, "reject_task")(
+            [VerificationCorrection(
+                id="C9", criterion_ids=["AC1"], message="Handle notification timeout."
+            )],
+            context(timeout_verifier),
+        )
+        assert "Handoff notification failed" in timeout_rejection
+        assert "- C9 (AC1): Handle notification timeout." in await timeout_verification
+        assert timed_out._store.tasks()["Timeout"].status == "working"
 
         failure_folder = tmp_path / "failure"
         failure_folder.mkdir()
@@ -557,6 +634,107 @@ def test_rejection_result_survives_busy_and_failed_worker_notification(
         assert failed._assignments["pair-1"].outstanding_corrections[0].id == "C8"
 
     asyncio.run(scenario())
+
+
+def test_reloaded_rejection_can_be_constructed_outside_an_event_loop(
+    tmp_path: Path,
+) -> None:
+    director = AgentStub(tmp_path, "director")
+    worker = AgentStub(tmp_path, "worker")
+    verifier = AgentStub(tmp_path, "verifier")
+    agents = {
+        agent.configuration().id: agent for agent in (director, worker, verifier)
+    }
+    pair = WorkerVerifierPair("pair-1", worker, verifier)
+
+    async def seed_rejection() -> None:
+        manager = install_spec_manager(tmp_path, agents, director, [pair])
+        await tool(manager, "create_task")("Reload", "Do it", CRITERIA, context(director))
+        await tool(manager, "assign_task")("pair-1", "Reload", context(director))
+        waiting = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
+        await asyncio.sleep(0)
+        await tool(manager, "reject_task")(
+            [VerificationCorrection(
+                id="C11", criterion_ids=["AC1"], message="Persist this correction."
+            )],
+            context(verifier),
+        )
+        assert "- C11 (AC1): Persist this correction." in await waiting
+
+    asyncio.run(seed_rejection())
+    restored = SpecManager(tmp_path, agents, director, [pair])
+
+    async def resume_rejection() -> None:
+        assert "map exactly once to every open correction" in await tool(
+            restored, "verify_task"
+        )(verification_evidence(), context(worker))
+        waiting = asyncio.create_task(
+            tool(restored, "verify_task")(
+                verification_evidence([
+                    CorrectionResolution(
+                        correction_id="C11", resolution="Persisted it across reload."
+                    )
+                ]),
+                context(worker),
+            )
+        )
+        await asyncio.sleep(0)
+        assert "Accepted" in await tool(restored, "accept_task")(context(verifier))
+        assert await waiting == "Task accepted."
+
+    asyncio.run(resume_rejection())
+
+
+def test_reloaded_verification_recovers_to_the_owned_worker_pair(tmp_path: Path) -> None:
+    director = AgentStub(tmp_path, "director")
+    worker = AgentStub(tmp_path, "worker")
+    verifier = AgentStub(tmp_path, "verifier")
+    agents = {
+        agent.configuration().id: agent for agent in (director, worker, verifier)
+    }
+    pair = WorkerVerifierPair("pair-1", worker, verifier)
+
+    async def seed_verification() -> None:
+        manager = install_spec_manager(tmp_path, agents, director, [pair])
+        await tool(manager, "create_task")("Review", "Do it", CRITERIA, context(director))
+        await tool(manager, "assign_task")("pair-1", "Review", context(director))
+        waiting = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
+        await asyncio.sleep(0)
+        assert manager._store.tasks()["Review"].status == "verifying"
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+
+    asyncio.run(seed_verification())
+    restored = SpecManager(tmp_path, agents, director, [pair])
+
+    async def resume_recovered_work() -> None:
+        workers = await tool(restored, "list_workers")(context(director))
+        assert workers == [{
+            "pair_id": "pair-1",
+            "worker": {
+                "id": str(worker.configuration().id),
+                "name": "worker",
+            },
+            "verifier": {
+                "id": str(verifier.configuration().id),
+                "name": "verifier",
+            },
+            "status": "working",
+            "task": "Review",
+        }]
+        waiting = asyncio.create_task(
+            tool(restored, "verify_task")(verification_evidence(), context(worker))
+        )
+        await asyncio.sleep(0)
+        assert "Accepted" in await tool(restored, "accept_task")(context(verifier))
+        assert await waiting == "Task accepted."
+
+    asyncio.run(resume_recovered_work())
 
 
 def test_legacy_feature_content_is_rejected(tmp_path: Path) -> None:

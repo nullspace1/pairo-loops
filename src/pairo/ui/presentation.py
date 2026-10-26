@@ -212,46 +212,6 @@ def describe_fields(
     return _DEFAULT_FORMATTER.describe_fields(payload, preferred_fields=preferred_fields)
 
 
-@dataclass(frozen=True, slots=True)
-class ActivityPresentation:
-    """Readable title and details for one completed SDK item."""
-
-    title: str
-    lines: tuple[str, ...]
-
-    @property
-    def text(self) -> str:
-        return "\n\n".join((self.title, "\n".join(self.lines)))
-
-
-class CompletedActivityPresenter:
-    """Present completed technical activity without leaking wire-format JSON."""
-
-    _TITLES = {
-        "commandExecution": "Command completed",
-        "fileChange": "File change completed",
-        "mcpToolCall": "MCP tool call completed",
-        "webSearch": "Web search completed",
-    }
-    _PREFERRED_FIELDS = {
-        "commandExecution": ("command", "cwd", "status", "exitCode", "aggregatedOutput", "output"),
-        "fileChange": ("path", "changes", "status", "result"),
-        "mcpToolCall": ("server", "serverName", "tool", "name", "arguments", "status", "result"),
-        "webSearch": ("query", "queries", "status", "result"),
-    }
-
-    def __init__(self, formatter: PresentationFormatter | None = None) -> None:
-        self._formatter = formatter or PresentationFormatter()
-
-    def present(self, item: Mapping[str, Any]) -> ActivityPresentation:
-        item_type = str(item.get("type", "activity"))
-        title = self._TITLES.get(item_type, f"{self._formatter.field_names.present(item_type)} completed")
-        lines = self._formatter.describe_fields(item, preferred_fields=self._PREFERRED_FIELDS.get(item_type, ()))
-        if not lines:
-            lines = ("No additional details were provided.",)
-        return ActivityPresentation(title, lines)
-
-
 class PermissionRequestPresenter:
     """Explain approval requests in the terms a person needs to decide."""
 

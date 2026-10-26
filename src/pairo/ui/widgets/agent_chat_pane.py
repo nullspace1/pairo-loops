@@ -191,9 +191,6 @@ class AgentChatPane(Vertical):
         if selector.value != detail_level.value:
             selector.value = detail_level.value
 
-    async def refresh_sidebar(self) -> None:
-        await self.sidebar.refresh_data()
-
     async def _apply_or_queue(
         self, session_name: str, mutation: _PendingTranscriptMutation
     ) -> None:

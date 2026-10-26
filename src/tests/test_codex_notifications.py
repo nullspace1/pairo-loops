@@ -7,6 +7,15 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from pydantic import BaseModel
+from openai_codex.generated.v2_all import (
+    CommandExecutionOutputDeltaNotification,
+    CommandExecutionStatus,
+    CommandExecutionThreadItem,
+    ItemStartedNotification,
+    McpToolCallProgressNotification,
+    McpToolCallStatus,
+    McpToolCallThreadItem,
+)
 
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import AgentStatus
@@ -181,17 +190,36 @@ def test_dropped_progress_never_reaches_the_general_pipeline(tmp_path: Path) -> 
         agent = make_agent(tmp_path, pipeline, client)
         observed: list[BaseModel] = []
         subscription = pipeline.subscribe(BaseModel, lambda event, _subscription: observed.append(event))
-        calls = 0
+        original_translate = agent._translate_notification
 
-        async def translate(_identifier, _notification):
-            nonlocal calls
-            calls += 1
-            return None if calls == 1 else ClientResponseCompleted(message="done")
+        async def translate(identifier, notification):
+            if getattr(notification, "kind", None) == "terminal":
+                return ClientResponseCompleted(message="done")
+            return await original_translate(identifier, notification)
 
         agent._translate_notification = translate
         await agent.new_session("Conversation 1")
         await agent.send_message("hello")
-        await client.notifications.put(SimpleNamespace(kind="partial"))
+        command = CommandExecutionThreadItem(
+            id="command-1", type="commandExecution", command="pytest", cwd="C:/work",
+            status=CommandExecutionStatus.in_progress, commandActions=[], exitCode=None,
+        )
+        mcp = McpToolCallThreadItem(
+            id="call-1", type="mcpToolCall", server="tools", tool="inspect",
+            arguments={}, status=McpToolCallStatus.in_progress,
+        )
+        await client.notifications.put(SimpleNamespace(payload=ItemStartedNotification(
+            item=command, startedAtMs=0, threadId="thread-1", turnId="turn-1"
+        )))
+        await client.notifications.put(SimpleNamespace(payload=CommandExecutionOutputDeltaNotification(
+            delta="partial", itemId="command-1", threadId="thread-1", turnId="turn-1"
+        )))
+        await client.notifications.put(SimpleNamespace(payload=ItemStartedNotification(
+            item=mcp, startedAtMs=0, threadId="thread-1", turnId="turn-1"
+        )))
+        await client.notifications.put(SimpleNamespace(payload=McpToolCallProgressNotification(
+            itemId="call-1", message="partial", threadId="thread-1", turnId="turn-1"
+        )))
         await client.notifications.put(SimpleNamespace(kind="terminal"))
         while agent.status() is AgentStatus.GENERATING:
             await asyncio.sleep(0)

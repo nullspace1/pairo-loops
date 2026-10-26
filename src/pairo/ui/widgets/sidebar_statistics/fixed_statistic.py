@@ -1,36 +1,10 @@
-"""Callback-backed sidebar statistics."""
-
+"""Callback-backed static sidebar statistic."""
 from __future__ import annotations
-
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from uuid import UUID
-
-from pairo.core.agent import SessionIdentifier
-from pairo.core.clients import Agent
-from pairo.core.events import EventPipeline
-
-from .statistic import SidebarStatisticContext, StatisticValue
-
-
-@dataclass(frozen=True)
-class FixedStatistic:
-    """A named sidebar value supplied by one asynchronous callback."""
-
-    key: str
-    label: str
-    value: Callable[[SidebarStatisticContext], StatisticValue]
-
-    def setup(
-        self,
-        event_pipeline: EventPipeline,
-        agents: Mapping[UUID, Agent[SessionIdentifier]],
-    ) -> None:
-        """Satisfy the provider lifecycle; fixed values need no resources."""
-
-    def teardown(self) -> None:
-        """Satisfy the provider lifecycle; fixed values own no resources."""
-
-    async def statistic(self, context: SidebarStatisticContext) -> object:
-        return await self.value(context)
-
+from collections.abc import Callable, Awaitable
+from .statistic import SidebarStatistic, SidebarStatisticCategory, SidebarStatisticContext
+class FixedStatistic(SidebarStatistic):
+    def __init__(self, key: str, label: str, value: Callable[[SidebarStatisticContext], Awaitable[object]], category: SidebarStatisticCategory = SidebarStatisticCategory.AGENT) -> None:
+        super().__init__(key, label, category)
+        self._value = value
+    async def compute(self, context: SidebarStatisticContext) -> object:
+        return await self._value(context)

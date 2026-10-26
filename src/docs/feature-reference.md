@@ -56,10 +56,24 @@ Command execution and MCP tool calls publish only their completed snapshots.
 Each completion creates one durable sourced, expandable transcript entry, even
 when the provider sent no earlier activity notification. Live command output
 and MCP progress never enter the general event pipeline, repository, or
-Textual message queue. Command output is capped before routing; Codex agents
-use a 64 KiB default and preserve deterministic head and tail excerpts with a
-marker that states the omitted character count. The `CodexAgent` constructor's
-`command_output_limit` parameter configures that cap.
+Textual message queue. Provider terminal events retain their complete original
+output. The command transcript transcriber caps its durable UI output with a
+64 KiB default, preserving deterministic head and tail excerpts with a marker
+that states the omitted character count. Configure the default registry at the
+UI boundary:
+
+```python
+from pairo.ui.transcribers import default_transcribers
+
+transcribers = default_transcribers(command_output_limit=16 * 1024)
+```
+
+Custom registries can instead register
+`CommandExecutionTranscriber(command_output_limit=16 * 1024)`. Values below
+`CommandExecutionTranscriber.MINIMUM_COMMAND_OUTPUT_LIMIT` raise `ValueError`.
+This floor guarantees that every truncated result fits within the configured
+cap while retaining at least one character from the head, one from the tail,
+and the omitted-character-count marker.
 
 Textual applies an explicit ingress policy. It admits lifecycle, navigation,
 error, interruption, token, transcript, and registered transcriber event
@@ -294,6 +308,56 @@ Use `use_session_repository`, `use_transcribers`, and
 repository only when it created that repository. The caller remains
 responsible for closing a supplied repository; `run_agents` performs that
 cleanup when it is the caller.
+
+## Sidebar statistics migration
+
+Custom sidebar fields are now Textual message pumps rather than polling
+providers. Replace an implementation of `SidebarStatisticProvider` with a
+`SidebarStatistic` subclass, pass its stable key, label, and
+`SidebarStatisticCategory` to `super().__init__`, and implement
+`async compute(context)`. Do not subscribe to `EventPipeline` or implement the
+old `statistic(context)` method. Textual connects and tears down each statistic
+and supplies a `SidebarStatisticContext` containing the exact agent, active
+session, and persisted session metadata.
+
+For a callback-backed value, use `FixedStatistic` instead of writing a
+subclass:
+
+```python
+from pairo.ui import UserInterfaceConfiguration
+from pairo.ui.widgets.sidebar_statistics import (
+    FixedStatistic,
+    SidebarStatisticContext,
+    SidebarStatistics,
+)
+
+
+async def agent_workspace(context: SidebarStatisticContext) -> str:
+    return str(context.agent.configuration().workspace)
+
+
+statistics = SidebarStatistics(
+    agent_information=(
+        FixedStatistic("workspace", "Workspace", agent_workspace),
+    ),
+    current_session=(),
+)
+configuration = UserInterfaceConfiguration().use_sidebar_statistics(statistics)
+```
+
+`use_sidebar_statistics` replaces the complete default collection. Put fields
+in `agent_information` or `current_session` in display order, use
+`SidebarStatisticCategory.SESSION` for session `FixedStatistic` values, and
+keep keys unique within each category. A computed value of `None` is omitted.
+When one configured collection serves multiple agents, the UI copies it so each
+sidebar owns independent message pumps and event state.
+
+For an event-driven field, add typed `@on_pairo(...)` handlers to the
+`SidebarStatistic` subclass. A relevant handler updates the statistic's owned
+state and awaits `refresh()`; the base class recomputes with the active context
+and posts the correctly scoped agent or session save message. Do not manually
+post `SaveAgentStatistic` or `SaveSessionStatistic`, and do not recreate the
+removed 250 ms polling loop.
 
 ## Constraints
 

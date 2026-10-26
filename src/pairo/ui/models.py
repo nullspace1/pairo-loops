@@ -34,13 +34,6 @@ class NetworkTranscriptMetadata(TypedDict):
     type: Literal["network"]
 
 
-class ActivityTranscriptMetadata(TypedDict):
-    """Metadata for a completed provider activity."""
-
-    type: Literal["activity"]
-    activity_type: str
-
-
 class CommandExecutionTranscriptMetadata(TypedDict):
     type: Literal["command_execution"]
 
@@ -106,7 +99,7 @@ class HistoricalTranscriptMetadata(TypedDict):
 
 TranscriptMetadata: TypeAlias = (
     MessageTranscriptMetadata | ErrorTranscriptMetadata | NetworkTranscriptMetadata
-    | ActivityTranscriptMetadata | CommandExecutionTranscriptMetadata
+    | CommandExecutionTranscriptMetadata
     | McpToolCallTranscriptMetadata | PermissionRequestTranscriptMetadata
     | PermissionResponseTranscriptMetadata | SystemTranscriptMetadata
     | TokenUsageTranscriptMetadata | SessionTableTranscriptMetadata

@@ -1,51 +1,91 @@
-"""Types for asynchronously rendered sidebar statistics."""
-
+"""Textual message-pump sidebar statistic primitives."""
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
-from typing import Protocol, TypeAlias
-from uuid import UUID
+from enum import StrEnum
+
+from textual.app import App
+from textual.message import Message
+from textual.message_pump import MessagePump
 
 from pairo.core.agent import SessionIdentifier
-from pairo.core.clients import Agent
-from pairo.core.events import EventPipeline
-
-from ...models import SessionMetadata
+from pairo.core.clients import ActiveSession, Agent
+from pairo.ui.models import SessionMetadata
 
 
-StatisticValue: TypeAlias = Awaitable[object]
+class SidebarStatisticCategory(StrEnum):
+    AGENT = "agent"
+    SESSION = "session"
 
 
 @dataclass(frozen=True)
 class SidebarStatisticContext:
-    """The current sidebar state made available to statistic providers."""
-
+    """Typed snapshot used to compute one sidebar value."""
     agent: Agent[SessionIdentifier]
-    event_pipeline: EventPipeline
-    session_name: str | None
+    active_session: ActiveSession[SessionIdentifier] | None
     session: SessionMetadata | None
-
-
-class SidebarStatisticProvider(Protocol):
-    """A named value that can be rendered in one sidebar category."""
-
     @property
-    def key(self) -> str: ...
+    def session_name(self) -> str | None:
+        return None if self.active_session is None else self.active_session.name
 
-    @property
-    def label(self) -> str: ...
 
-    def setup(
-        self,
-        event_pipeline: EventPipeline,
-        agents: Mapping[UUID, Agent[SessionIdentifier]],
-    ) -> None:
-        """Connect the statistic to the current application resources."""
+class SaveAgentStatistic(Message, bubble=False):
+    def __init__(self, key: str, value: object, agent: Agent[SessionIdentifier]) -> None:
+        self.key, self.value, self.agent = key, value, agent
+        super().__init__()
 
-    def teardown(self) -> None:
-        """Release resources acquired during setup."""
 
-    async def statistic(self, context: SidebarStatisticContext) -> object:
-        """Return this field's current value."""
+class SaveSessionStatistic(Message, bubble=False):
+    def __init__(self, key: str, value: object, agent: Agent[SessionIdentifier], session: ActiveSession[SessionIdentifier]) -> None:
+        self.key, self.value, self.agent, self.session = key, value, agent, session
+        super().__init__()
+
+
+class SidebarStatistic(MessagePump):
+    """A connected Textual owner for one asynchronous sidebar field."""
+    def __init__(self, key: str, label: str, category: SidebarStatisticCategory) -> None:
+        super().__init__()
+        self.key = key
+        self.label = label
+        self.category = category
+        self._statistic_context: SidebarStatisticContext | None = None
+        self._connected = False
+
+    async def setup(self, app: App[None], context: SidebarStatisticContext) -> None:
+        """Connect once to Textual; event ingress remains application-owned."""
+        if self._connected:
+            if self._statistic_context is not None and self._statistic_context.agent is context.agent:
+                return
+            raise RuntimeError("Sidebar statistic is already connected.")
+        self._parent = app
+        self._connected = True
+        self._start_messages()
+        await self.activate(context)
+
+    async def activate(self, context: SidebarStatisticContext) -> None:
+        self._statistic_context = context
+        await self.refresh()
+
+    async def teardown(self) -> None:
+        if not self._connected:
+            return
+        self._connected = False
+        await self._close_messages()
+
+    async def compute(self, context: SidebarStatisticContext) -> object:
+        """Compute the current value from the strongly typed context."""
+        raise NotImplementedError
+
+    async def refresh(self) -> None:
+        context = self._statistic_context
+        if context is None or not self._connected:
+            return
+        value = await self.compute(context)
+        if self.category is SidebarStatisticCategory.AGENT:
+            self.app.post_message(SaveAgentStatistic(self.key, value, context.agent))
+        elif context.active_session is not None:
+            self.app.post_message(SaveSessionStatistic(self.key, value, context.agent, context.active_session))
+
+
+__all__ = ["SaveAgentStatistic", "SaveSessionStatistic", "SidebarStatistic", "SidebarStatisticCategory", "SidebarStatisticContext"]
 

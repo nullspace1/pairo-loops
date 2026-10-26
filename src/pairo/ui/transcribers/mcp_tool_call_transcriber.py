@@ -9,7 +9,7 @@ from textual.widget import Widget
 from textual.widgets import Collapsible, Static
 
 from ..models import EventDetailLevel, McpToolCallTranscriptMetadata, TranscriptEntry
-from .routed_transcript_entry import ActivityIdentity, RoutedTranscriptEntry
+from .routed_transcript_entry import RoutedTranscriptEntry
 from .text_transcript import SourcedTranscript
 from .transcriber import Transcriber
 from .transcript_render_context import TranscriptRenderContext
@@ -41,15 +41,12 @@ class McpToolCallTranscriber(
         )
         entry = TranscriptEntry(
             "agent",
-            f"MCP {event.server} / {event.tool} â€” {label}\n\n{details}",
+            f"MCP {event.server} / {event.tool} — {label}\n\n{details}",
             EventDetailLevel.NORMAL,
             cast(McpToolCallTranscriptMetadata, {"type": self.transcript_type}),
             uuid4(),
         )
-        identity = ActivityIdentity(
-            event.agent_id, event.session_name, "mcp_tool_call", event.activity_id
-        )
-        return RoutedTranscriptEntry(event.agent_id, event.session_name, entry, identity)
+        return RoutedTranscriptEntry(event.agent_id, event.session_name, entry)
 
     def render(
         self,

@@ -229,6 +229,8 @@ class _Task(BaseModel):
     description: str
     acceptance_criteria: list[AcceptanceCriterion]
     status: TaskStatus
+    assigned_pair_id: str | None = None
+    outstanding_corrections: tuple[VerificationCorrection, ...] = ()
     unsuccessful_work: UnsuccessfulWorkReport | None = None
 
     @model_validator(mode="after")
@@ -244,7 +246,7 @@ class _Task(BaseModel):
 @dataclass(slots=True)
 class _Assignment:
     task_name: str
-    completion: asyncio.Future[UnsuccessfulWorkReport | None]
+    completion: asyncio.Future[UnsuccessfulWorkReport | None] | None
     status: PairStatus = "working"
     review_result: asyncio.Future[str | None] | None = None
     evidence: VerificationEvidence | None = None
@@ -481,11 +483,40 @@ class SpecManager(MCPHttpWrapper):
         self._verifier_pairs = {pair.verifier.configuration().id: pair for pair in pairs}
         self._assignments: dict[str, _Assignment] = {}
         self._store = _FeatureStore(root)
+        self._restore_assignments()
         self._history = _FeatureHistoryStore(root)
         self._verification_timeout = verification_timeout
         self._delivery = _IdleSafeDelivery(handoff_timeout, handoff_poll_interval)
         self._lock = asyncio.Lock()
         super().__init__(port=port)
+
+    def _restore_assignments(self) -> None:
+        """Rebuild durable working ownership after a manager restart."""
+        for task in self._store.tasks().values():
+            if task.status not in {"working", "verifying"} or task.assigned_pair_id is None:
+                continue
+            if task.status == "verifying":
+                # Review evidence and its waiter are process-local.  Recover a
+                # restart during review to actionable worker work instead of
+                # leaving a verifier-only state with no live review request.
+                task = task.model_copy(update={"status": "working"})
+                self._store.replace(task)
+            pair_id = task.assigned_pair_id
+            if pair_id not in self._pairs or pair_id in self._assignments:
+                raise ValueError(f"Task '{task.name}' has an invalid assigned pair.")
+            self._assignments[pair_id] = _Assignment(
+                task.name,
+                None,
+                outstanding_corrections=task.outstanding_corrections,
+            )
+
+    def _completion_for(
+        self, assignment: _Assignment
+    ) -> asyncio.Future[UnsuccessfulWorkReport | None]:
+        """Create a restored assignment's waiter in its caller's running loop."""
+        if assignment.completion is None:
+            assignment.completion = asyncio.get_running_loop().create_future()
+        return assignment.completion
 
     @classmethod
     def _validate_documenter_registration(
@@ -752,7 +783,15 @@ class SpecManager(MCPHttpWrapper):
                 await pair.verifier.new_session(
                     self._session_name("verify", pair_id, task.name)
                 )
-                self._store.set_status(task.name, "working")
+                self._store.replace(
+                    task.model_copy(
+                        update={
+                            "status": "working",
+                            "assigned_pair_id": pair_id,
+                            "outstanding_corrections": (),
+                        }
+                    )
+                )
             except Exception as error:
                 return f"Could not assign task '{task.name}': {error}"
             assignment = _Assignment(
@@ -770,7 +809,15 @@ class SpecManager(MCPHttpWrapper):
             async with self._lock:
                 if self._assignments.get(pair_id) is assignment:
                     del self._assignments[pair_id]
-                    self._store.set_status(task.name, "pending")
+                    self._store.replace(
+                        task.model_copy(
+                            update={
+                                "status": "pending",
+                                "assigned_pair_id": None,
+                                "outstanding_corrections": (),
+                            }
+                        )
+                    )
             return f"Could not assign task '{task.name}': {error}"
         return f"Assigned task '{task.name}' to pair '{pair_id}'."
 
@@ -794,7 +841,7 @@ class SpecManager(MCPHttpWrapper):
             )
             if assignment is None:
                 return f"Task '{task_name}' is not assigned."
-            completion = assignment.completion
+            completion = self._completion_for(assignment)
         result = await asyncio.shield(completion)
         return (
             f"Accepted task '{task_name}'."
@@ -824,7 +871,7 @@ class SpecManager(MCPHttpWrapper):
             )
             if assignment is None:
                 return {"task_name": task_name, "status": task.status}
-            completion = assignment.completion
+            completion = self._completion_for(assignment)
         try:
             await asyncio.wait_for(
                 asyncio.shield(completion), timeout=timeout_seconds
@@ -958,6 +1005,7 @@ class SpecManager(MCPHttpWrapper):
         accepted: bool,
         corrections: tuple[VerificationCorrection, ...] = (),
     ) -> str:
+        correction_result: str | None = None
         async with self._lock:
             assignment = self._assignments.get(pair.pair_id)
             if assignment is None or assignment.status != "verifying":
@@ -970,9 +1018,14 @@ class SpecManager(MCPHttpWrapper):
             if correction_error is not None:
                 return correction_error
             try:
-                task = self._store.set_status(
-                    task_name, "accepted" if accepted else "working"
+                task = self._store.tasks()[task_name].model_copy(
+                    update={
+                        "status": "accepted" if accepted else "working",
+                        "assigned_pair_id": None if accepted else pair.pair_id,
+                        "outstanding_corrections": () if accepted else corrections,
+                    }
                 )
+                self._store.replace(task)
                 if accepted:
                     assert assignment.evidence is not None
                     self._history.append(
@@ -986,18 +1039,20 @@ class SpecManager(MCPHttpWrapper):
                 return f"Could not record verification decision: {error}"
             if accepted:
                 del self._assignments[pair.pair_id]
-                if not assignment.completion.done():
+                if assignment.completion is not None and not assignment.completion.done():
                     assignment.completion.set_result(None)
             else:
                 assignment.status = "working"
                 assignment.review_result = None
                 assignment.evidence = None
+                correction_result = self._correction_message(task_name, pair, corrections)
+                # The worker's tool request is the authoritative rejection
+                # channel.  Persist and publish it before the best-effort
+                # idle-safe notification, which can wait, fail, or be stopped
+                # during shutdown.
+                if future is not None and not future.done():
+                    future.set_result(correction_result)
         outcome = f"Accepted task '{task_name}'." if accepted else f"Rejected task '{task_name}'."
-        correction_result = (
-            self._correction_message(task_name, pair, corrections)
-            if not accepted
-            else None
-        )
         recipient = self._documenter if accepted else pair.worker
         if recipient is not None:
             message = (
@@ -1011,7 +1066,7 @@ class SpecManager(MCPHttpWrapper):
                 await self._delivery.deliver(recipient, message, source)
             except (Exception, asyncio.CancelledError) as error:
                 outcome += f" Handoff notification failed: {error}"
-        if future is not None and not future.done():
+        if accepted and future is not None and not future.done():
             future.set_result(correction_result)
         return outcome
 
@@ -1043,13 +1098,18 @@ class SpecManager(MCPHttpWrapper):
             try:
                 task = self._store.tasks()[assignment.task_name]
                 failed_task = task.model_copy(
-                    update={"status": "unsuccessful", "unsuccessful_work": report}
+                    update={
+                        "status": "unsuccessful",
+                        "assigned_pair_id": None,
+                        "outstanding_corrections": (),
+                        "unsuccessful_work": report,
+                    }
                 )
                 self._store.replace(failed_task)
             except Exception as error:
                 return f"Could not record unsuccessful work: {error}"
             del self._assignments[pair.pair_id]
-            if not assignment.completion.done():
+            if assignment.completion is not None and not assignment.completion.done():
                 assignment.completion.set_result(report)
             message = self._unsuccessful_work_message(failed_task, pair, report)
         outcome = f"Ended task '{failed_task.name}' unsuccessfully."
@@ -1094,7 +1154,8 @@ class SpecManager(MCPHttpWrapper):
         """Cancel every outstanding director or worker wait for an assignment."""
         async with self._lock:
             for assignment in self._assignments.values():
-                self._cancel_waiter(assignment.completion)
+                if assignment.completion is not None:
+                    self._cancel_waiter(assignment.completion)
                 if assignment.review_result is not None:
                     self._cancel_waiter(assignment.review_result)
 
