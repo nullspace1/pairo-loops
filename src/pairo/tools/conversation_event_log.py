@@ -8,16 +8,13 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Protocol, TextIO, cast
-from uuid import UUID
 
 from pydantic import BaseModel
 
 from ..core.events.agent_events import (
-    AgentActivityCompleted,
-    AgentActivityProgress,
-    ActivityFamily,
     AgentTextDelta,
-    AgentUnsupportedActivity,
+    AgentRecognizedProviderNoOp,
+    AgentUnknownProviderEvent,
 )
 from ..core.events.event_pipeline import EventPipeline, Subscription
 
@@ -40,75 +37,95 @@ class FullFidelityEventLogPolicy:
         return ()
 
 
-class CoalescingEventLogPolicy:
-    """Keep only the latest progress update for each routed activity."""
+class RecognizedProviderNoOpSummary(BaseModel):
+    """Cumulative diagnostic count for one known non-UI provider category."""
+
+    category: str
+    occurrence_count: int
+
+
+class UnknownProviderEventSummary(BaseModel):
+    """Cumulative diagnostic count for one unknown provider description."""
+
+    description: str
+    occurrence_count: int
+
+
+class _CumulativeCategoryCounter:
+    """Retain one representative and report a category only after it changes."""
 
     def __init__(self) -> None:
-        self._progress: dict[tuple[UUID, str, ActivityFamily, str], AgentActivityProgress] = {}
-        self._handlers: dict[
-            type[BaseModel], Callable[[BaseModel], tuple[BaseModel, ...]]
-        ] = {
-            AgentActivityProgress: self._buffer_progress,
-            AgentActivityCompleted: self._complete_activity,
-        }
+        self._occurrences: dict[str, int] = {}
+        self._reported_occurrences: dict[str, int] = {}
 
-    def accept(self, event: BaseModel) -> tuple[BaseModel, ...]:
-        handler = next((handler for event_type, handler in self._handlers.items()
-                        if isinstance(event, event_type)), self._pass_through)
-        return handler(event)
+    def observe(self, category: str) -> bool:
+        next_count = self._occurrences.get(category, 0) + 1
+        self._occurrences[category] = next_count
+        return next_count == 1
 
-    def drain(self) -> tuple[BaseModel, ...]:
-        pending = tuple(self._progress.values())
-        self._progress.clear()
-        return pending
-
-    def _buffer_progress(self, event: BaseModel) -> tuple[BaseModel, ...]:
-        progress = cast(AgentActivityProgress, event)
-        self._progress[self._key(progress)] = progress
-        return ()
-
-    def _complete_activity(self, event: BaseModel) -> tuple[BaseModel, ...]:
-        completed = cast(AgentActivityCompleted, event)
-        progress = self._progress.pop(self._key(completed), None)
-        matching = () if progress is None else (progress,)
-        return (*matching, completed)
-
-    def _pass_through(self, event: BaseModel) -> tuple[BaseModel, ...]:
-        return (event,)
-
-    def _key(
-        self, event: AgentActivityProgress | AgentActivityCompleted
-    ) -> tuple[UUID, str, ActivityFamily, str]:
-        return (
-            event.agent_id,
-            event.session_name,
-            event.activity_family,
-            event.activity_id,
+    def changed_counts(self) -> tuple[tuple[str, int], ...]:
+        changed = tuple(
+            (category, count)
+            for category, count in self._occurrences.items()
+            if self._reported_occurrences.get(category) != count
         )
+        self._reported_occurrences.update(dict(changed))
+        return changed
 
 
-class DiagnosticEventLogPolicy(CoalescingEventLogPolicy):
+class DiagnosticEventLogPolicy:
     """Keep lifecycle evidence while omitting redundant high-volume events."""
 
     def __init__(self) -> None:
-        super().__init__()
-        self._unsupported_descriptions: set[str] = set()
-        self._handlers.update(
-            {
-                AgentTextDelta: self._discard_text_delta,
-                AgentUnsupportedActivity: self._sample_unsupported,
-            }
+        self._recognized_no_op_counts = _CumulativeCategoryCounter()
+        self._unknown_provider_counts = _CumulativeCategoryCounter()
+        self._handlers: dict[type[BaseModel], Callable[[BaseModel], tuple[BaseModel, ...]]] = {
+            AgentTextDelta: self._discard_text_delta,
+            AgentRecognizedProviderNoOp: self._sample_recognized_no_op,
+            AgentUnknownProviderEvent: self._sample_unknown_provider_event,
+        }
+
+    def accept(self, event: BaseModel) -> tuple[BaseModel, ...]:
+        handler = next(
+            (handler for event_type, handler in self._handlers.items() if isinstance(event, event_type)),
+            self._pass_through,
         )
+        return handler(event)
+
+    def drain(self) -> tuple[BaseModel, ...]:
+        return (*self._recognized_no_op_summaries(), *self._unknown_provider_summaries())
 
     def _discard_text_delta(self, _event: BaseModel) -> tuple[BaseModel, ...]:
         return ()
 
-    def _sample_unsupported(self, event: BaseModel) -> tuple[BaseModel, ...]:
-        unsupported = cast(AgentUnsupportedActivity, event)
-        if unsupported.description in self._unsupported_descriptions:
-            return ()
-        self._unsupported_descriptions.add(unsupported.description)
-        return (unsupported,)
+    def _pass_through(self, event: BaseModel) -> tuple[BaseModel, ...]:
+        return (event,)
+
+    def _sample_recognized_no_op(self, event: BaseModel) -> tuple[BaseModel, ...]:
+        no_op = cast(AgentRecognizedProviderNoOp, event)
+        return (no_op,) if self._recognized_no_op_counts.observe(no_op.category) else ()
+
+    def _sample_unknown_provider_event(
+        self, event: BaseModel
+    ) -> tuple[BaseModel, ...]:
+        unknown = cast(AgentUnknownProviderEvent, event)
+        return (unknown,) if self._unknown_provider_counts.observe(unknown.description) else ()
+
+    def _recognized_no_op_summaries(self) -> tuple[RecognizedProviderNoOpSummary, ...]:
+        return tuple(
+            RecognizedProviderNoOpSummary(
+                category=category, occurrence_count=count
+            )
+            for category, count in self._recognized_no_op_counts.changed_counts()
+        )
+
+    def _unknown_provider_summaries(self) -> tuple[UnknownProviderEventSummary, ...]:
+        return tuple(
+            UnknownProviderEventSummary(
+                description=description, occurrence_count=count
+            )
+            for description, count in self._unknown_provider_counts.changed_counts()
+        )
 
 
 class ConversationEventLog:
@@ -191,9 +208,10 @@ class ConversationEventLog:
 
 
 __all__ = [
-    "CoalescingEventLogPolicy",
     "ConversationEventLog",
     "ConversationEventLogPolicy",
     "DiagnosticEventLogPolicy",
     "FullFidelityEventLogPolicy",
+    "RecognizedProviderNoOpSummary",
+    "UnknownProviderEventSummary",
 ]

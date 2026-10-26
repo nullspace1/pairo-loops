@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
+from pairo.core.events import EventPipeline
+
 if TYPE_CHECKING:
-    from ..commands import AgentCommandController, CommandOutcome
+    from ..session_repository import SessionRepository
 
 
 class SlashCommand(ABC):
@@ -16,10 +21,12 @@ class SlashCommand(ABC):
     @abstractmethod
     async def invoke(
         self,
-        controller: AgentCommandController,
-        agent_id: UUID,
+        event_pipeline: EventPipeline,
+        agent: Agent[SessionIdentifier],
+        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        session_repository: SessionRepository,
         argument: str,
-    ) -> CommandOutcome:
-        """Execute with the owning controller and parsed argument."""
+    ) -> None:
+        """Execute with the complete UI command context and parsed argument."""
 
 

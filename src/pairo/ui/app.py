@@ -14,16 +14,18 @@ from textual.widgets import Footer, Header, TabbedContent, TabPane
 from pairo.core.agent import SessionIdentifier
 from pairo.core.clients import Agent
 from pairo.core.events import (
-    AgentActivityCompleted,
-    AgentActivityProgress,
     AgentError,
+    AgentResponseCompleted,
     AgentResponseInterrupted,
+    AgentTokenUsageUpdated,
     EventPipeline,
+    SessionCompacted,
     SessionCreated,
     SessionDeleted,
+    SessionUpdated,
 )
 
-from .pairo_event_piper import PairoEvent, TextualEventPiper, on_pairo
+from .pairo_event_piper import PairoEvent, TextualEventPiper, TextualIngressPolicy, on_pairo
 from .chat_commands import (
     AgentSelectionCommand,
     CompactCommand,
@@ -43,7 +45,8 @@ from .models import (
     TranscriptEntry,
     TranscriptMetadata,
 )
-from .session_repository import SessionRepository
+from .navigation_events import AgentSwitchRequested, SessionSwitchRequested
+from .session_repository import SessionNotFoundError, SessionRepository
 from .sqlite_session_repository import SqliteSessionRepository
 from .transcript_events import (
     TranscriptEntryAdded,
@@ -146,7 +149,28 @@ class AgentChatApp(App[None]):
         self._transcribers = transcribers
         self._detail_level = EventDetailLevel.NORMAL
         self._sidebar_statistics = dict(sidebar_statistics)
-        self._piper = TextualEventPiper(event_pipeline, self.post_message)
+        self._piper = TextualEventPiper(
+            event_pipeline,
+            self.post_message,
+            TextualIngressPolicy(
+                (
+                    SessionCreated,
+                    SessionUpdated,
+                    SessionCompacted,
+                    SessionDeleted,
+                    AgentError,
+                    AgentResponseCompleted,
+                    AgentResponseInterrupted,
+                    AgentTokenUsageUpdated,
+                    TranscriptEntryAdded,
+                    TranscriptEntryUpdated,
+                    TranscriptEntryDeleted,
+                    AgentSwitchRequested,
+                    SessionSwitchRequested,
+                    *self._transcribers.event_types,
+                )
+            ),
+        )
         self._subscriptions: list[object] = []
         for statistics in self._unique_sidebar_statistics():
             statistics.setup(self._event_pipeline, agents_by_id)
@@ -254,13 +278,6 @@ class AgentChatApp(App[None]):
 
     @on_pairo(SessionCreated)
     async def receive_session_created(self, event: SessionCreated) -> None:
-        await self._receive_session_created(event)
-
-    async def _receive_session_created(
-        self,
-        event: SessionCreated,
-        _subscription: object | None = None,
-    ) -> None:
         agent = self._agents.get(event.agent_id)
         if agent is None:
             return
@@ -280,16 +297,13 @@ class AgentChatApp(App[None]):
 
     @on_pairo(SessionDeleted)
     async def receive_session_deleted(self, event: SessionDeleted) -> None:
-        await self._receive_session_deleted(event)
-
-    async def _receive_session_deleted(
-        self,
-        event: SessionDeleted,
-        _subscription: object | None = None,
-    ) -> None:
         pane = self.chats.get(event.agent_id)
         if pane is not None:
-            await pane.select_session(event.selected_session_name)
+            try:
+                await pane.select_session(event.selected_session_name)
+            except (NoMatches, SessionNotFoundError):
+                # Deletion events can arrive after teardown or a later deletion.
+                return
 
     @on_pairo(TranscriptEntryAdded)
     async def _receive_transcript_entry_added(
@@ -302,6 +316,35 @@ class AgentChatApp(App[None]):
                 await pane.add_entry(event.session_name, event.entry)
             except NoMatches:
                 # Event delivery can race with application teardown.
+                return
+
+    @on_pairo(AgentSwitchRequested)
+    async def receive_agent_switch_requested(
+        self,
+        event: AgentSwitchRequested,
+    ) -> None:
+        if event.agent_id not in self.chats:
+            return
+        try:
+            self.select_agent(event.agent_id)
+        except NoMatches:
+            # Event delivery can race with application teardown.
+            return
+
+    @on_pairo(SessionSwitchRequested)
+    async def receive_session_switch_requested(
+        self,
+        event: SessionSwitchRequested,
+    ) -> None:
+        pane = self.chats.get(event.agent_id)
+        if pane is not None:
+            try:
+                await self.session_repository.get_session(
+                    event.agent_id, event.session_name
+                )
+                await pane.select_session(event.session_name)
+            except (NoMatches, SessionNotFoundError):
+                # A stale navigation request can arrive after deletion or teardown.
                 return
 
     @on_pairo(TranscriptEntryUpdated)
@@ -337,7 +380,7 @@ class AgentChatApp(App[None]):
         if pane is None:
             return
         try:
-            outcome = await self._controller.execute(pane.agent_id, message.value)
+            await self._controller.execute(pane.agent_id, message.value)
         except (KeyError, RuntimeError, ValueError) as error:
             await self._append_to_current(
                 pane,
@@ -347,12 +390,6 @@ class AgentChatApp(App[None]):
             )
             return
         message.editor.clear()
-        if outcome.session_name is not None and outcome.session_name != pane.session_name:
-            await pane.select_session(outcome.session_name)
-        if outcome.entry is not None:
-            await self._append_to_current(pane, outcome.entry)
-        if outcome.selected_agent is not None:
-            self.select_agent(outcome.selected_agent)
 
     @on(AgentChatPane.DetailLevelChanged)
     async def change_detail_level(self, message: AgentChatPane.DetailLevelChanged) -> None:

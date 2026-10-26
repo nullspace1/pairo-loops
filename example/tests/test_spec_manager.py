@@ -198,7 +198,10 @@ def test_assignment_creates_and_reuses_the_verifier_session(tmp_path: Path) -> N
             )],
             context(verifier),
         )
-        assert await waiting == "1 correction(s) required."
+        assert await waiting == (
+            "Task 'Login' was rejected by verifier. Required corrections:\n"
+            "- C1 (AC1): Missing failure test"
+        )
         assert '"status": "working"' in (tmp_path / "FEATURES.md").read_text()
 
         waiting = asyncio.create_task(
@@ -417,6 +420,141 @@ def test_resubmission_requires_every_outstanding_correction(tmp_path: Path) -> N
 
         assert "map exactly once to every open correction" in result
         assert len(verifier.messages) == 1
+
+    asyncio.run(scenario())
+
+
+def test_rejection_result_replaces_corrections_and_allows_resubmission(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        manager, _, director, worker, verifier = setup_manager(tmp_path)
+        await tool(manager, "create_task")("Task", "Do it", CRITERIA, context(director))
+        await tool(manager, "assign_task")("pair-1", "Task", context(director))
+
+        first_verification = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
+        await asyncio.sleep(0)
+        first_corrections = [
+            VerificationCorrection(
+                id="C1", criterion_ids=["AC1"], message="Add direct coverage."
+            ),
+            VerificationCorrection(
+                id="C2", criterion_ids=["AC1"], message="Document the risk."
+            ),
+        ]
+        await tool(manager, "reject_task")(first_corrections, context(verifier))
+        assert await first_verification == (
+            "Task 'Task' was rejected by verifier. Required corrections:\n"
+            "- C1 (AC1): Add direct coverage.\n"
+            "- C2 (AC1): Document the risk."
+        )
+
+        second_verification = asyncio.create_task(
+            tool(manager, "verify_task")(
+                verification_evidence([
+                    CorrectionResolution(
+                        correction_id="C1", resolution="Added direct coverage."
+                    ),
+                    CorrectionResolution(
+                        correction_id="C2", resolution="Documented the risk."
+                    ),
+                ]),
+                context(worker),
+            )
+        )
+        await asyncio.sleep(0)
+        await tool(manager, "reject_task")(
+            [VerificationCorrection(
+                id="C3", criterion_ids=["AC1"], message="Cover the retry path."
+            )],
+            context(verifier),
+        )
+        assert await second_verification == (
+            "Task 'Task' was rejected by verifier. Required corrections:\n"
+            "- C3 (AC1): Cover the retry path."
+        )
+
+        final_verification = asyncio.create_task(
+            tool(manager, "verify_task")(
+                verification_evidence([
+                    CorrectionResolution(
+                        correction_id="C3", resolution="Covered the retry path."
+                    )
+                ]),
+                context(worker),
+            )
+        )
+        await asyncio.sleep(0)
+        assert "Accepted" in await tool(manager, "accept_task")(context(verifier))
+        assert await final_verification == "Task accepted."
+
+    asyncio.run(scenario())
+
+
+def test_rejection_result_survives_busy_and_failed_worker_notification(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        manager, agents, director, worker, verifier = setup_manager(
+            tmp_path, handoff_timeout=0.01
+        )
+        await tool(manager, "create_task")("Busy", "Do it", CRITERIA, context(director))
+        await tool(manager, "assign_task")("pair-1", "Busy", context(director))
+        verifying = asyncio.create_task(
+            tool(manager, "verify_task")(verification_evidence(), context(worker))
+        )
+        await asyncio.sleep(0)
+        worker.state = AgentStatus.GENERATING
+        rejection = await tool(manager, "reject_task")(
+            [VerificationCorrection(
+                id="C7", criterion_ids=["AC1"], message="Handle busy delivery."
+            )],
+            context(verifier),
+        )
+        assert "Handoff notification failed" in rejection
+        assert await verifying == (
+            "Task 'Busy' was rejected by verifier. Required corrections:\n"
+            "- C7 (AC1): Handle busy delivery."
+        )
+        assert manager._assignments["pair-1"].status == "working"
+        assert (tmp_path / "FEATURES.md").read_text(encoding="utf-8").count(
+            '"status": "working"'
+        ) == 1
+        reloaded = SpecManager(
+            tmp_path, agents, director, [WorkerVerifierPair("pair-1", worker, verifier)]
+        )
+        assert reloaded._store.tasks()["Busy"].status == "working"
+
+        failure_folder = tmp_path / "failure"
+        failure_folder.mkdir()
+        failed, _, failed_director, failed_worker, failed_verifier = setup_manager(
+            failure_folder
+        )
+        await tool(failed, "create_task")(
+            "Failure", "Do it", CRITERIA, context(failed_director)
+        )
+        await tool(failed, "assign_task")("pair-1", "Failure", context(failed_director))
+        failed_verification = asyncio.create_task(
+            tool(failed, "verify_task")(verification_evidence(), context(failed_worker))
+        )
+        await asyncio.sleep(0)
+        with patch.object(
+            failed_worker, "send_message", side_effect=RuntimeError("transport failed")
+        ):
+            rejection = await tool(failed, "reject_task")(
+                [VerificationCorrection(
+                    id="C8", criterion_ids=["AC1"], message="Handle send failure."
+                )],
+                context(failed_verifier),
+            )
+        assert "Handoff notification failed" in rejection
+        assert await failed_verification == (
+            "Task 'Failure' was rejected by verifier. Required corrections:\n"
+            "- C8 (AC1): Handle send failure."
+        )
+        assert failed._assignments["pair-1"].outstanding_corrections[0].id == "C8"
 
     asyncio.run(scenario())
 
@@ -649,7 +787,7 @@ def test_unsuccessful_work_resolves_waiters_and_rejects_verifying_work(tmp_path:
             [VerificationCorrection(id="C1", criterion_ids=["AC1"], message="Fix it")],
             context(verifier),
         )
-        assert "correction(s) required" in await verifying
+        assert "- C1 (AC1): Fix it" in await verifying
 
     asyncio.run(scenario())
 
@@ -721,7 +859,7 @@ def test_idle_safe_delivery_delays_every_handoff_and_times_out(tmp_path: Path) -
         assert len(worker.messages) == 1
         worker.state = AgentStatus.IDLE
         assert "Rejected" in await rejection
-        assert "correction(s) required" in await verification
+        assert "- C1 (AC1): Fix it" in await verification
 
         timeout_folder = tmp_path / "timeout"
         timeout_folder.mkdir()

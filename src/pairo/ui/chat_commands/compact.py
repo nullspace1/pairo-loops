@@ -2,41 +2,30 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
 from uuid import UUID
 
-from ..commands import CommandOutcome
-from ..models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
-from .base import SlashCommand
+from pairo.core.agent import SessionIdentifier
+from pairo.core.clients import Agent
+from pairo.core.events import EventPipeline
 
-if TYPE_CHECKING:
-    from ..commands import AgentCommandController
+from ..models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
+from ..session_repository import SessionRepository
+from ..transcript_events import TranscriptEntryAdded
+from .base import SlashCommand
 
 
 class CompactCommand(SlashCommand):
     name = "/compact"
 
-    async def invoke(
-        self,
-        controller: AgentCommandController,
-        agent_id: UUID,
-        argument: str,
-    ) -> CommandOutcome:
+    async def invoke(self, event_pipeline: EventPipeline, agent: Agent[SessionIdentifier], agents: Mapping[UUID, Agent[SessionIdentifier]], session_repository: SessionRepository, argument: str) -> None:
         if argument:
             raise ValueError("Usage: /compact")
-        agent = controller.agent(agent_id)
         active = agent.current_session()
         if active is None:
             raise RuntimeError("The selected agent has no active session.")
         await agent.compact()
-        session_name = active.name
-        return CommandOutcome(
-            TranscriptEntry[SystemTranscriptMetadata](
-                "system",
-                f"Requested compaction for session {session_name}.",
-                EventDetailLevel.NORMAL,
-                {"type": "system"},
-            ),
-            session_name=session_name,
-        )
-
+        entry = TranscriptEntry[SystemTranscriptMetadata]("system", f"Requested compaction for session {active.name}.", EventDetailLevel.NORMAL, {"type": "system"})
+        agent_id = agent.configuration().id
+        await session_repository.add_entry(agent_id, active.name, entry)
+        event_pipeline.push(TranscriptEntryAdded(agent_id=agent_id, session_name=active.name, entry=entry))

@@ -1,7 +1,5 @@
 """Default event/transcript transcribers."""
 
-from pairo.core.events import AgentCommandExecutionCompleted, AgentMcpToolCallCompleted
-
 from .agent_error_transcriber import AgentErrorTranscriber
 from .command_execution_transcriber import CommandExecutionTranscriber
 from .mcp_tool_call_transcriber import McpToolCallTranscriber
@@ -21,18 +19,8 @@ def default_transcribers() -> TranscriberRegistry:
     registry.register(NetworkMessageSentTranscriber())
     registry.register(PermissionRequestTranscriber())
     registry.register_durable(SessionTableTranscriber())
-    command_execution = CommandExecutionTranscriber()
-    registry.register(command_execution)
-    registry.register_completed_renderer(
-        command_execution.completed_transcript_type, command_execution
-    )
-    registry.register_observed_event(AgentCommandExecutionCompleted)
-    mcp_tool_call = McpToolCallTranscriber()
-    registry.register(mcp_tool_call)
-    registry.register_completed_renderer(
-        mcp_tool_call.completed_transcript_type, mcp_tool_call
-    )
-    registry.register_observed_event(AgentMcpToolCallCompleted)
+    registry.register(CommandExecutionTranscriber())
+    registry.register(McpToolCallTranscriber())
     registry.register(TokenUsageUpdatedTranscriber())
     return registry
 

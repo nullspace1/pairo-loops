@@ -20,6 +20,7 @@ McpToolCallCompletionStatus: TypeAlias = Literal[
     "inProgress", "completed", "failed"
 ]
 ActivityFamily: TypeAlias = Literal["command_execution", "mcp_tool_call"]
+RecognizedProviderNoOpCategory: TypeAlias = Literal["file_change_progress"]
 
 
 class ClientEvent(BaseModel, ABC):
@@ -102,22 +103,36 @@ class ClientActivityStarted(ClientEvent):
         )
 
 
-class ClientActivityProgress(ClientEvent, ABC):
-    """Common subscription type for typed activity progress events."""
-
-
 class ClientActivityCompleted(ClientEvent, ABC):
     """Common subscription type for typed completed activity events."""
 
 
-class ClientUnsupportedActivity(ClientEvent):
-    """A provider activity deliberately kept out of supported UI families."""
+class ClientRecognizedProviderNoOp(ClientEvent):
+    """A known provider notification that deliberately has no UI renderer."""
 
-    kind: Literal["unsupported_activity"] = "unsupported_activity"
-    description: str = "Unsupported provider activity"
+    kind: Literal["recognized_provider_no_op"] = "recognized_provider_no_op"
+    category: RecognizedProviderNoOpCategory
 
-    def to_routed_event(self, agent_id: UUID, session_name: str) -> AgentUnsupportedActivity:
-        return AgentUnsupportedActivity(agent_id=agent_id, session_name=session_name, description=self.description)
+    def to_routed_event(
+        self, agent_id: UUID, session_name: str
+    ) -> AgentRecognizedProviderNoOp:
+        return AgentRecognizedProviderNoOp(
+            agent_id=agent_id, session_name=session_name, category=self.category
+        )
+
+
+class ClientUnknownProviderEvent(ClientEvent):
+    """A provider notification for which Pairo has no translation contract."""
+
+    kind: Literal["unknown_provider_event"] = "unknown_provider_event"
+    description: str
+
+    def to_routed_event(
+        self, agent_id: UUID, session_name: str
+    ) -> AgentUnknownProviderEvent:
+        return AgentUnknownProviderEvent(
+            agent_id=agent_id, session_name=session_name, description=self.description
+        )
 
 
 class ClientResponseCompleted(ClientEvent):
@@ -206,46 +221,27 @@ class AgentActivityStarted(RoutedAgentEvent):
     activity: JsonObject
 
 
-class AgentActivityProgress(RoutedAgentEvent, ABC):
-    """Common subscription type for typed routed activity progress events."""
-
-    @property
-    @abstractmethod
-    def activity_family(self) -> ActivityFamily:
-        """Stable provider-neutral identity used to correlate this activity."""
-
-
 class AgentActivityCompleted(RoutedAgentEvent, ABC):
     """Common subscription type for typed routed completed activity events."""
 
+    activity_id: str
+
     @property
     @abstractmethod
     def activity_family(self) -> ActivityFamily:
         """Stable provider-neutral identity used to correlate this activity."""
 
 
-class AgentUnsupportedActivity(RoutedAgentEvent):
-    """Routed unsupported provider activity; intentionally has no transcript renderer."""
+class AgentRecognizedProviderNoOp(RoutedAgentEvent):
+    """Known non-UI provider evidence retained for diagnostic logging."""
+
+    category: RecognizedProviderNoOpCategory
+
+
+class AgentUnknownProviderEvent(RoutedAgentEvent):
+    """Unknown provider evidence retained separately from known no-ops."""
 
     description: str
-
-
-class ClientCommandExecutionProgress(ClientActivityProgress):
-    kind: Literal["command_execution_progress"] = "command_execution_progress"
-    activity_id: str
-    output_delta: str
-
-    def to_routed_event(self, agent_id: UUID, session_name: str) -> AgentCommandExecutionProgress:
-        return AgentCommandExecutionProgress(agent_id=agent_id, session_name=session_name, activity_id=self.activity_id, output_delta=self.output_delta)
-
-
-class ClientMcpToolCallProgress(ClientActivityProgress):
-    kind: Literal["mcp_tool_call_progress"] = "mcp_tool_call_progress"
-    activity_id: str
-    message: str
-
-    def to_routed_event(self, agent_id: UUID, session_name: str) -> AgentMcpToolCallProgress:
-        return AgentMcpToolCallProgress(agent_id=agent_id, session_name=session_name, activity_id=self.activity_id, message=self.message)
 
 
 class ClientCommandExecutionCompleted(ClientActivityCompleted):
@@ -273,24 +269,6 @@ class ClientMcpToolCallCompleted(ClientActivityCompleted):
 
     def to_routed_event(self, agent_id: UUID, session_name: str) -> AgentMcpToolCallCompleted:
         return AgentMcpToolCallCompleted(agent_id=agent_id, session_name=session_name, activity_id=self.activity_id, server=self.server, tool=self.tool, arguments=self.arguments, status=self.status, result=self.result, error=self.error)
-
-
-class AgentCommandExecutionProgress(AgentActivityProgress):
-    activity_id: str
-    output_delta: str
-
-    @property
-    def activity_family(self) -> Literal["command_execution"]:
-        return "command_execution"
-
-
-class AgentMcpToolCallProgress(AgentActivityProgress):
-    activity_id: str
-    message: str
-
-    @property
-    def activity_family(self) -> Literal["mcp_tool_call"]:
-        return "mcp_tool_call"
 
 
 class AgentCommandExecutionCompleted(AgentActivityCompleted):
@@ -378,22 +356,20 @@ class AgentError(BaseModel):
 
 
 __all__ = [
-    "AgentActivityCompleted", "AgentActivityProgress", "AgentActivityStarted",
+    "AgentActivityCompleted", "AgentActivityStarted",
     "CommandExecutionCompletionStatus", "McpToolCallCompletionStatus",
-    "AgentCommandExecutionCompleted", "AgentCommandExecutionProgress",
-    "AgentMcpToolCallCompleted", "AgentMcpToolCallProgress",
+    "AgentCommandExecutionCompleted", "AgentMcpToolCallCompleted",
     "AgentError", "AgentPlanDelta", "AgentReasoningDelta", "AgentResponseCompleted",
     "AgentResponseInterrupted", "AgentTextDelta", "AgentTokenUsageUpdated",
-    "ClientActivityCompleted", "ClientActivityProgress",
-    "ClientCommandExecutionCompleted", "ClientCommandExecutionProgress",
-    "ClientMcpToolCallCompleted", "ClientMcpToolCallProgress",
-    "ClientUnsupportedActivity",
+    "ClientActivityCompleted",
+    "ClientCommandExecutionCompleted", "ClientMcpToolCallCompleted",
+    "ClientRecognizedProviderNoOp", "ClientUnknownProviderEvent",
     "ClientActivityStarted", "ClientEvent", "ClientPlanDelta",
-    "ActivityFamily",
+    "ActivityFamily", "RecognizedProviderNoOpCategory",
     "ClientReasoningDelta", "ClientResponseCompleted",
     "ClientResponseInterrupted", "ClientTextDelta", "ClientTokenUsageUpdated",
     "RoutedAgentEvent",
-    "AgentUnsupportedActivity",
+    "AgentRecognizedProviderNoOp", "AgentUnknownProviderEvent",
     "SessionCompacted", "SessionCreated", "SessionDeleted", "SessionUpdated",
     "TokenUsage",
 ]

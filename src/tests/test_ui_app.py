@@ -10,7 +10,7 @@ from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import AgentStatus, FakeAgent
 from pairo.core.events import (
     AgentCommandExecutionCompleted,
-    AgentCommandExecutionProgress,
+    AgentMcpToolCallCompleted,
     EventPipeline,
     MessageSent,
     SessionCreated,
@@ -24,11 +24,12 @@ from pairo.ui.transcribers import default_transcribers
 from pairo.ui.widgets.sidebar_statistics import default_sidebar_statistics
 from pairo.ui.models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
 from pairo.ui import SlashCommand
-from pairo.ui.commands import CommandOutcome
+from pairo.ui.navigation_events import AgentSwitchRequested, SessionSwitchRequested
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
+from pairo.ui.transcript_events import TranscriptEntryAdded
 from pairo.ui.widgets.agent_sidebar import AgentSidebar
 from pairo.ui.widgets.chat_editor import ChatEditor
-from textual.widgets import Button, DataTable
+from textual.widgets import Button, DataTable, TabbedContent
 
 
 def make_agent(
@@ -83,6 +84,104 @@ def test_app_initializes_from_active_agent_and_repository(tmp_path: Path) -> Non
             assert stored.identifier == active.identifier.model_dump(mode="json")
 
         await agent.close()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_app_applies_ui_navigation_events_from_the_pipeline(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        first = make_agent(tmp_path, pipeline, name="first")
+        second = make_agent(tmp_path, pipeline, name="second")
+        first_id = first.configuration().id
+        second_id = second.configuration().id
+        first_session = await first.new_session("Conversation 1")
+        await repository.save_session(
+            first_id,
+            first_session.name,
+            first_session.identifier.model_dump(mode="json"),
+        )
+        active_first_session = await first.new_session("Current")
+        await repository.save_session(
+            first_id,
+            active_first_session.name,
+            active_first_session.identifier.model_dump(mode="json"),
+        )
+        second_session = await second.new_session("Review")
+        await repository.save_session(
+            second_id,
+            second_session.name,
+            second_session.identifier.model_dump(mode="json"),
+        )
+        app = configured_app(
+            {first_id: first, second_id: second}, pipeline, repository
+        )
+
+        async with app.run_test() as pilot:
+            pipeline.push(AgentSwitchRequested(agent_id=second_id))
+            await pilot.pause()
+            tabs = app.query_one("#agent-tabs", TabbedContent)
+            assert tabs.active == "agent-chat-1"
+            assert app.screen.focused is app.chats[second_id].input
+
+            pipeline.push(
+                SessionSwitchRequested(
+                    agent_id=first_id,
+                    session_name=first_session.name,
+                )
+            )
+            await pilot.pause()
+            assert app.chats[first_id].session_name == first_session.name
+
+            app.select_agent(first_id)
+            editor = app.chats[first_id].input
+            editor.text = f"/session switch {first_session.name}"
+            await pilot.press("ctrl+enter")
+            for _ in range(3):
+                await pilot.pause()
+            assert any(
+                entry.content == f"Switched to session {first_session.name}."
+                for entry in app.chats[first_id].transcript.entries
+            )
+
+            editor.text = f"/agent {second_id}"
+            await pilot.press("ctrl+enter")
+            for _ in range(3):
+                await pilot.pause()
+            assert any(
+                entry.content == f"Selected agent second ({second_id})."
+                for entry in app.chats[first_id].transcript.entries
+            )
+            assert tabs.active == "agent-chat-1"
+            assert app.screen.focused is app.chats[second_id].input
+
+            app.select_agent(first_id)
+            editor = app.chats[first_id].input
+            editor.text = f"/delete {first_session.name}"
+            await pilot.press("ctrl+enter")
+            for _ in range(3):
+                await pilot.pause()
+            assert app.chats[first_id].session_name == active_first_session.name
+            assert [
+                session.session_name
+                for session in await repository.sessions_for(first_id)
+            ] == [active_first_session.name]
+            assert any(
+                entry.content
+                == f"Deleted session {first_session.name}. Current session: {active_first_session.name}."
+                for entry in app.chats[first_id].transcript.entries
+            )
+
+            pipeline.push(SessionSwitchRequested(agent_id=first_id, session_name="gone"))
+            pipeline.push(AgentSwitchRequested(agent_id=uuid4()))
+            await pilot.pause()
+            assert app.chats[first_id].session_name == active_first_session.name
+            assert tabs.active == "agent-chat-0"
+
+        await first.close()
+        await second.close()
         await repository.close()
 
     asyncio.run(scenario())
@@ -384,57 +483,42 @@ def test_app_closes_with_thousands_of_messages_while_all_agents_are_idle(
     asyncio.run(scenario())
 
 
-def test_mounted_transcript_correlates_only_its_live_activity_card(
+def test_mounted_transcript_adds_completed_command_without_live_card(
     tmp_path: Path,
 ) -> None:
-    """A real Textual mount owns activity matching rather than a global ID map."""
     async def scenario() -> None:
         pipeline = EventPipeline()
         repository = SqliteSessionRepository()
         agent = make_agent(tmp_path, pipeline)
         active = await agent.new_session("Conversation 1")
         agent_id = agent.configuration().id
-        await repository.save_session(
-            agent_id, active.name, active.identifier.model_dump(mode="json")
-        )
+        await repository.save_session(agent_id, active.name, active.identifier.model_dump(mode="json"))
         app = configured_app({agent_id: agent}, pipeline, repository)
 
         async with app.run_test() as pilot:
-            pipeline.push(AgentCommandExecutionProgress(
-                agent_id=agent_id, session_name=active.name, activity_id="same",
-                output_delta="building",
-            ))
-            for _ in range(3):
-                await pilot.pause()
-            transcript = app.chats[agent_id].transcript
-            assert [entry.content for entry in transcript.entries] == [
-                "Command — In progress\n\nLatest output:\nbuilding"
-            ]
-
             pipeline.push(AgentCommandExecutionCompleted(
                 agent_id=agent_id, session_name=active.name, activity_id="same",
                 command="make", status="completed", output="done",
             ))
             for _ in range(3):
                 await pilot.pause()
+            transcript = app.chats[agent_id].transcript
             assert len(transcript.entries) == 1
-            assert "Command — Completed successfully" in transcript.entries[0].content
+            assert "Completed successfully" in transcript.entries[0].content
             assert "Output:\ndone" in transcript.entries[0].content
-
-            pipeline.push(AgentCommandExecutionProgress(
-                agent_id=agent_id, session_name="other", activity_id="same",
-                output_delta="must not render",
+            pipeline.push(AgentMcpToolCallCompleted(
+                agent_id=agent_id, session_name=active.name, activity_id="call",
+                server="tools", tool="inspect", arguments={}, status="completed",
             ))
             for _ in range(3):
                 await pilot.pause()
-            assert len(transcript.entries) == 1
+            assert len(transcript.entries) == 2
+            assert transcript.entries[1].metadata["type"] == "mcp_tool_call"
 
         await agent.close()
         await repository.close()
 
     asyncio.run(scenario())
-
-
 def test_app_persists_externally_created_session_before_selecting_it(
     tmp_path: Path,
 ) -> None:
@@ -451,7 +535,7 @@ def test_app_persists_externally_created_session_before_selecting_it(
         )
         app = configured_app({agent_id: agent}, pipeline, repository)
 
-        async with app.run_test():
+        async with app.run_test() as pilot:
             external = await agent.new_session("External")
             event = SessionCreated(
                 agent_id=agent_id,
@@ -459,7 +543,8 @@ def test_app_persists_externally_created_session_before_selecting_it(
                 identifier=external.identifier.model_dump(mode="json"),
             )
 
-            await app._receive_session_created(event, None)  # type: ignore[arg-type]
+            pipeline.push(event)
+            await pilot.pause()
 
             stored = await repository.get_session(agent_id, external.name)
             assert stored.identifier == external.identifier.model_dump(mode="json")
@@ -474,11 +559,16 @@ def test_app_persists_externally_created_session_before_selecting_it(
 class ExternalCommand(SlashCommand):
     name = "/external"
 
-    async def invoke(self, controller, agent_id, argument):
-        return CommandOutcome(
-            TranscriptEntry[SystemTranscriptMetadata](
-                "system", f"external:{argument}", EventDetailLevel.NORMAL, {"type": "system"}
-            )
+    async def invoke(self, event_pipeline, agent, agents, session_repository, argument) -> None:
+        active = agent.current_session()
+        assert active is not None
+        entry = TranscriptEntry[SystemTranscriptMetadata](
+            "system", f"external:{argument}", EventDetailLevel.NORMAL, {"type": "system"}
+        )
+        agent_id = agent.configuration().id
+        await session_repository.add_entry(agent_id, active.name, entry)
+        event_pipeline.push(
+            TranscriptEntryAdded(agent_id=agent_id, session_name=active.name, entry=entry)
         )
 
 

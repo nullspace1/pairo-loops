@@ -172,3 +172,38 @@ def test_close_closes_transport_before_waiting_for_blocked_read(tmp_path: Path) 
         assert agent.status() is AgentStatus.INACTIVE
 
     asyncio.run(scenario())
+
+
+def test_dropped_progress_never_reaches_the_general_pipeline(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        client = NotificationClient()
+        agent = make_agent(tmp_path, pipeline, client)
+        observed: list[BaseModel] = []
+        subscription = pipeline.subscribe(BaseModel, lambda event, _subscription: observed.append(event))
+        calls = 0
+
+        async def translate(_identifier, _notification):
+            nonlocal calls
+            calls += 1
+            return None if calls == 1 else ClientResponseCompleted(message="done")
+
+        agent._translate_notification = translate
+        await agent.new_session("Conversation 1")
+        await agent.send_message("hello")
+        await client.notifications.put(SimpleNamespace(kind="partial"))
+        await client.notifications.put(SimpleNamespace(kind="terminal"))
+        while agent.status() is AgentStatus.GENERATING:
+            await asyncio.sleep(0)
+        while len(observed) < 4:
+            await asyncio.sleep(0)
+        assert [type(event) for event in observed] == [
+            SessionCreated,
+            MessageSent,
+            AgentResponseCompleted,
+            MessageSent,
+        ]
+        pipeline.unsubscribe(subscription)
+        await agent.close()
+
+    asyncio.run(scenario())

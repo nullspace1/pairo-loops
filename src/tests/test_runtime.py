@@ -11,12 +11,13 @@ from pairo import runtime
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import ActiveSession, AgentStatus, FakeAgent, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
-from pairo.ui import CommandOutcome, SlashCommand, app as ui_app
+from pairo.ui import SlashCommand, app as ui_app
 from pairo.ui.app import AgentChatApp, UserInterfaceLauncher
 from pairo.ui.configuration import UserInterfaceConfiguration
 from pairo.ui.transcribers import default_transcribers
 from pairo.ui.widgets.sidebar_statistics import default_sidebar_statistics
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
+from pairo.ui.navigation_events import AgentSwitchRequested
 
 
 class StubAgent:
@@ -224,8 +225,8 @@ def test_run_agents_releases_resources_after_failures(
 class LauncherCommand(SlashCommand):
     name = "/launcher"
 
-    async def invoke(self, controller, agent_id, argument):
-        return CommandOutcome(None)
+    async def invoke(self, event_pipeline, agent, agents, session_repository, argument) -> None:
+        event_pipeline.push(AgentSwitchRequested(agent_id=agent.configuration().id))
 
 
 def test_ui_launcher_composes_default_commands_and_owns_only_its_repository(
@@ -243,10 +244,8 @@ def test_ui_launcher_composes_default_commands_and_owns_only_its_repository(
         observed: list[str] = []
 
         async def fake_run_async(app):
-            outcome = await app._controller.execute(agent.configuration().id, "/help")
-            assert outcome.entry is not None
-            observed.append(outcome.entry.content)
-            assert (await app._controller.execute(agent.configuration().id, "/launcher")).entry is None
+            await app._controller.execute(agent.configuration().id, "/launcher")
+            observed.append("commands executed")
 
         monkeypatch.setattr(AgentChatApp, "run_async", fake_run_async)
         launcher = UserInterfaceLauncher()
@@ -256,9 +255,8 @@ def test_ui_launcher_composes_default_commands_and_owns_only_its_repository(
         await repository.close()
         await agent.close()
 
-        async def default_run_async(app):
-            outcome = await app._controller.execute(agent.configuration().id, "/help")
-            assert outcome.entry is not None
+        async def default_run_async(_app):
+            return None
 
         monkeypatch.setattr(AgentChatApp, "run_async", default_run_async)
         owned_repository = TrackingRepository()

@@ -695,7 +695,10 @@ class SpecManager(MCPHttpWrapper):
 
         @mcp.tool("reject_task", "Reject the active task with structured corrections.")
         async def reject_task(
-            corrections: list[VerificationCorrection], ctx: Context
+            corrections: Annotated[
+                list[VerificationCorrection], Field(min_length=1, max_length=100)
+            ],
+            ctx: Context,
         ) -> str:
             verifier_id = self._agent_id(ctx)
             pair = self._verifier_pairs.get(verifier_id) if verifier_id else None
@@ -932,6 +935,8 @@ class SpecManager(MCPHttpWrapper):
             return None if not corrections else "Acceptance cannot include corrections."
         if not corrections:
             return "A rejection must contain at least one correction."
+        if len(corrections) > 100:
+            return "A rejection can contain at most 100 corrections."
         correction_ids = [correction.id for correction in corrections]
         if len(correction_ids) != len(set(correction_ids)):
             return "Correction IDs must be unique."
@@ -988,22 +993,26 @@ class SpecManager(MCPHttpWrapper):
                 assignment.review_result = None
                 assignment.evidence = None
         outcome = f"Accepted task '{task_name}'." if accepted else f"Rejected task '{task_name}'."
+        correction_result = (
+            self._correction_message(task_name, pair, corrections)
+            if not accepted
+            else None
+        )
         recipient = self._documenter if accepted else pair.worker
         if recipient is not None:
             message = (
                 f"Feature history updated: {self._history.path}"
                 if accepted
-                else self._correction_message(task_name, pair, corrections)
+                else correction_result
             )
+            assert message is not None
             source = "spec_manager" if accepted else pair.verifier.configuration().name
             try:
                 await self._delivery.deliver(recipient, message, source)
             except (Exception, asyncio.CancelledError) as error:
                 outcome += f" Handoff notification failed: {error}"
         if future is not None and not future.done():
-            future.set_result(
-                None if accepted else f"{len(corrections)} correction(s) required."
-            )
+            future.set_result(correction_result)
         return outcome
 
     def _correction_message(

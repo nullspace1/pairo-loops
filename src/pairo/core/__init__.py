@@ -26,7 +26,6 @@ from .mcp.mcp_permissions import MCPPermissions, MCPToolApprovalMode
 from .mcp.servers import HttpMCPServer, StdioMCPServer
 from .events import (
     AgentEventListeners,
-    CoalescingEventLogPolicy,
     ConversationEventLog,
     ConversationEventLogPolicy,
     DiagnosticEventLogPolicy,
@@ -58,7 +57,6 @@ __all__ = [
     "CommandExecutionApprovalRequest",
     "CodexAgent",
     "CodexSessionIdentifier",
-    "CoalescingEventLogPolicy",
     "ConversationEventLog",
     "ConversationEventLogPolicy",
     "DiagnosticEventLogPolicy",

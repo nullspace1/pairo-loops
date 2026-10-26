@@ -12,7 +12,6 @@ from pairo.core.clients.client import Agent
 
 from .agent_events import (
     AgentActivityCompleted,
-    AgentActivityProgress,
     AgentActivityStarted,
     AgentError,
     AgentPlanDelta,
@@ -141,8 +140,9 @@ class AgentEventListeners:
         self._agent_plan_delta = _EventObserverRegistration(pipeline, AgentPlanDelta)
         self._agent_reasoning_delta = _EventObserverRegistration(pipeline, AgentReasoningDelta)
         self._agent_activity_started = _EventObserverRegistration(pipeline, AgentActivityStarted)
-        self._agent_activity_progress = _EventObserverRegistration(pipeline, AgentActivityProgress)
-        self._agent_activity_completed = _EventObserverRegistration(pipeline, AgentActivityCompleted)
+        self._agent_activity_completed = _EventObserverRegistration(
+            pipeline, cast(type[AgentActivityCompleted], AgentActivityCompleted)
+        )
         self._agent_response_completed = _EventObserverRegistration(pipeline, AgentResponseCompleted)
         self._agent_response_interrupted = _EventObserverRegistration(pipeline, AgentResponseInterrupted)
         self._agent_token_usage_updated = _EventObserverRegistration(pipeline, AgentTokenUsageUpdated)
@@ -189,13 +189,6 @@ class AgentEventListeners:
         agent: Agent[SessionIdentifier] | None = None,
     ) -> Subscription[AgentActivityStarted]:
         return self._agent_activity_started.register(observer, agent)
-
-    def on_agent_activity_progress(
-        self,
-        observer: EventObserver[AgentActivityProgress],
-        agent: Agent[SessionIdentifier] | None = None,
-    ) -> Subscription[AgentActivityProgress]:
-        return self._agent_activity_progress.register(observer, agent)
 
     def on_agent_activity_completed(
         self,

@@ -1,4 +1,4 @@
-﻿"""Focused contracts for the asynchronous Codex agent adapter."""
+"""Focused contracts for the asynchronous Codex agent adapter."""
 
 import asyncio
 from pathlib import Path
@@ -8,8 +8,11 @@ from uuid import uuid4
 import pytest
 from openai_codex.generated.v2_all import (
     ContextCompactedNotification,
+    CommandExecutionOutputDeltaNotification,
     CommandExecutionStatus,
     CommandExecutionThreadItem,
+    FileChangeOutputDeltaNotification,
+    McpToolCallProgressNotification,
     McpToolCallResult,
     McpToolCallError,
     McpToolCallStatus,
@@ -36,6 +39,8 @@ from pairo.core.events import (
     ClientMcpToolCallCompleted,
     ClientCommandExecutionCompleted,
     ClientTokenUsageUpdated,
+    ClientRecognizedProviderNoOp,
+    ClientUnknownProviderEvent,
     EventPipeline,
     MessageSent,
     SessionCompacted,
@@ -467,6 +472,93 @@ def test_token_usage_notification_is_provider_neutral(tmp_path: Path) -> None:
         assert isinstance(event, ClientTokenUsageUpdated)
         assert event.last.total_tokens == 100
         assert event.total.total_tokens == 500
+        await agent.close()
+
+    asyncio.run(scenario())
+
+
+def test_non_ui_and_unknown_codex_notifications_have_distinct_contracts(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        agent = CodexAgent(configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient())
+        identifier = CodexSessionIdentifier(thread_id="thread-1")
+        known_event = await agent._translate_notification(
+            identifier,
+            SimpleNamespace(payload=FileChangeOutputDeltaNotification(
+                delta="changed", itemId="item-1", threadId="thread-1", turnId="turn-1"
+            )),
+        )
+        unknown_event = await agent._translate_notification(
+            identifier, SimpleNamespace(payload=SimpleNamespace())
+        )
+
+        assert isinstance(known_event, ClientRecognizedProviderNoOp)
+        assert known_event.category == "file_change_progress"
+        assert isinstance(unknown_event, ClientUnknownProviderEvent)
+        assert unknown_event.description == "Unknown Codex notification: SimpleNamespace"
+        await agent.close()
+
+    asyncio.run(scenario())
+
+
+def test_codex_drops_command_and_mcp_progress_at_provider_boundary(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        agent = CodexAgent(configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient())
+        identifier = CodexSessionIdentifier(thread_id="thread-1")
+        command = await agent._translate_notification(
+            identifier,
+            SimpleNamespace(payload=CommandExecutionOutputDeltaNotification(
+                delta="partial", itemId="command-1", threadId="thread-1", turnId="turn-1"
+            )),
+        )
+        mcp = await agent._translate_notification(
+            identifier,
+            SimpleNamespace(payload=McpToolCallProgressNotification(
+                itemId="call-1", message="partial", threadId="thread-1", turnId="turn-1"
+            )),
+        )
+        assert command is None
+        assert mcp is None
+        await agent.close()
+
+    asyncio.run(scenario())
+
+
+def test_codex_caps_terminal_command_output_with_head_tail_and_count(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        agent = CodexAgent(
+            configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient(), command_output_limit=64
+        )
+        output = "H" * 40 + "discard" * 20 + "T" * 40
+        event = agent._completed_activity(CommandExecutionThreadItem(
+            id="command-1", type="commandExecution", command="pytest", cwd="C:/work",
+            status=CommandExecutionStatus.completed, commandActions=[], exitCode=0,
+            aggregatedOutput=output,
+        ))
+        assert isinstance(event, ClientCommandExecutionCompleted)
+        assert event.output is not None
+        assert len(event.output) <= 64
+        assert event.output.startswith("H")
+        assert event.output.endswith("T")
+        assert "characters omitted" in event.output
+        await agent.close()
+
+    asyncio.run(scenario())
+
+def test_codex_default_command_output_limit_is_64_kib(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        agent = CodexAgent(configuration(tmp_path), EventPipeline(), FakeAsyncCodexClient())
+        output = "H" * (CodexAgent.DEFAULT_COMMAND_OUTPUT_LIMIT + 100) + "T"
+        event = agent._completed_activity(CommandExecutionThreadItem(
+            id="command-1", type="commandExecution", command="pytest", cwd="C:/work",
+            status=CommandExecutionStatus.completed, commandActions=[], exitCode=0,
+            aggregatedOutput=output,
+        ))
+        assert isinstance(event, ClientCommandExecutionCompleted)
+        assert event.output is not None
+        assert len(event.output) <= 64 * 1024
+        assert event.output.endswith("T")
         await agent.close()
 
     asyncio.run(scenario())

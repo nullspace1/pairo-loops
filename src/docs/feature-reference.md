@@ -50,22 +50,21 @@ deltas, usage, activities, interruption, and errors are delivered as events.
 remains active until the provider confirms `thread/compacted`; messages are
 rejected before publication while that state is active.
 
-## Live activity transcript lifecycle
+## Terminal activity transcript lifecycle
 
-Command-execution and MCP-tool progress events render concise sourced cards.
-The UI derives an opaque entry key from the routed agent, session, activity
-family, and provider activity ID; that provider ID is neither displayed nor
-stored in transcript metadata. Repeated progress atomically replaces the same
-durable entry (command cards retain only their latest delta). The corresponding
-completion replaces it with the existing expandable completed card, while a
-completion without earlier progress atomically creates that card.
-An interruption atomically converts pending cards for its exact agent/session
-to `Interrupted`; an agent error first records its error transcript and then
-converts those cards to `Stopped after error`. The terminal cards retain their
-opaque entry keys, ordering, family, and latest progress detail.
-See [Typed activity events](typed-activity-events.md#live-transcript-lifecycle)
-for the lifecycle and presentation details.
+Command execution and MCP tool calls publish only their completed snapshots.
+Each completion creates one durable sourced, expandable transcript entry, even
+when the provider sent no earlier activity notification. Live command output
+and MCP progress never enter the general event pipeline, repository, or
+Textual message queue. Command output is capped before routing; Codex agents
+use a 64 KiB default and preserve deterministic head and tail excerpts with a
+marker that states the omitted character count. The `CodexAgent` constructor's
+`command_output_limit` parameter configures that cap.
 
+Textual applies an explicit ingress policy. It admits lifecycle, navigation,
+error, interruption, token, transcript, and registered transcriber event
+types; text, plan, reasoning, activity-start, provider no-op, and unknown
+partial notifications are rejected.
 Session identifiers contain durable provider identity only. A Codex turn ID is
 kept internally and may change after steering without changing the persisted
 thread identifier.
@@ -136,11 +135,29 @@ enumerating event classes. Each line has `timestamp` (ISO-8601 UTC),
 `event_type` (the concrete class name), and `payload`
 (`event.model_dump(mode="json")`). The logger is independent of transcript
 persistence and never publishes logging events. The default
-`FullFidelityEventLogPolicy` writes every event. `CoalescingEventLogPolicy`
-keeps only the latest activity-progress snapshot for each agent, session,
-typed activity family, and provider activity ID. A completion flushes only its
-matching pending snapshot; log flush/close drains all remaining snapshots. The
-example harness uses this lower-noise mode.
+FullFidelityEventLogPolicy writes every event.
+
+Choose DiagnosticEventLogPolicy when the log should retain terminal lifecycle
+evidence without text deltas. Terminal command and MCP completion entries are
+already the only built-in activity events.
+
+```python
+from pairo import ConversationEventLog, DiagnosticEventLogPolicy
+
+event_log = ConversationEventLog(
+    pipeline,
+    output_path,
+    DiagnosticEventLogPolicy(),
+)
+```
+
+Known provider notifications that deliberately have no UI representation and
+genuinely unknown provider notifications remain separate in the diagnostic
+log. The policy keeps the first `AgentRecognizedProviderNoOp` for each category
+and the first `AgentUnknownProviderEvent` for each description. On `flush()` or
+`close()`, it also writes cumulative `RecognizedProviderNoOpSummary` and
+`UnknownProviderEventSummary` records only when the corresponding count has
+changed. Repeated drains therefore do not duplicate an unchanged summary.
 
 Await `flush()` when readers need all already queued records visible and
 durably flushed. Await `close()` during shutdown: it drains already queued
@@ -203,12 +220,17 @@ the pipeline.
 
 Use `UserInterfaceConfiguration` to add a slash command without modifying
 Pairo. A command supplies its slash-prefixed `name` and implements the async
-`invoke(controller, agent_id, argument)` method. The text after the command
-name is passed as `argument` without leading or trailing whitespace.
+`invoke(event_pipeline, agent, agents, session_repository, argument)` method.
+Each invocation receives the UI event pipeline, the configured agent that owned
+the submitted command, the complete configured UUID-to-agent mapping, and the
+session repository. A command can use only the context it needs. The text after
+the command name is passed as `argument` without leading or trailing
+whitespace.
 
 ```python
+from pairo.ui.transcript_events import TranscriptEntryAdded
+
 from pairo.ui import (
-    CommandOutcome,
     EventDetailLevel,
     SlashCommand,
     TranscriptEntry,
@@ -220,20 +242,39 @@ from pairo.ui import (
 class EchoCommand(SlashCommand):
     name = "/echo"
 
-    async def invoke(self, controller, agent_id, argument):
-        return CommandOutcome(
-            TranscriptEntry(
-                "system",
-                argument or "Usage: /echo MESSAGE",
-                EventDetailLevel.NORMAL,
-                {"type": "system"},
-            )
+    async def invoke(
+        self,
+        event_pipeline,
+        agent,
+        agents,
+        session_repository,
+        argument,
+    ):
+        active = agent.current_session()
+        if active is None:
+            raise RuntimeError("The selected agent has no active session.")
+        entry = TranscriptEntry(
+            "system",
+            argument or "Usage: /echo MESSAGE",
+            EventDetailLevel.NORMAL,
+            {"type": "system"},
+        )
+        agent_id = agent.configuration().id
+        await session_repository.add_entry(agent_id, active.name, entry)
+        event_pipeline.push(
+            TranscriptEntryAdded(agent_id=agent_id, session_name=active.name, entry=entry)
         )
 
 
 configuration = UserInterfaceConfiguration().add_command(EchoCommand())
 await run_ui(agents, pipeline, configuration)
 ```
+
+Commands return `None`. Command-produced transcript entries must be persisted
+through `session_repository` before the command pushes `TranscriptEntryAdded`
+through `event_pipeline`; a persistence failure must not publish the success
+event. Commands directly push navigation and other events using the supplied
+pipeline.
 
 By default, `run_ui` puts added commands after the standard `/agent`,
 `/session`, `/sessions`, `/compact`, `/delete`, `/interrupt`, `/image`, and

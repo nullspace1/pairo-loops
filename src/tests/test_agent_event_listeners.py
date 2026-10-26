@@ -9,9 +9,9 @@ from pydantic import BaseModel
 
 from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.events import (
-    AgentActivityCompleted, AgentActivityProgress, AgentActivityStarted, AgentError,
-    AgentCommandExecutionCompleted, AgentCommandExecutionProgress,
-    AgentMcpToolCallCompleted, AgentMcpToolCallProgress,
+    AgentActivityCompleted, AgentActivityStarted, AgentError,
+    AgentCommandExecutionCompleted,
+    AgentMcpToolCallCompleted,
     AgentPlanDelta, AgentReasoningDelta, AgentResponseCompleted,
     AgentResponseInterrupted, AgentTextDelta, AgentTokenUsageUpdated,
     AgentEventListeners, EventPipeline, ImageSent, MessageSent, NetworkMessageSent,
@@ -64,8 +64,6 @@ def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_
             AgentPlanDelta(agent_id=agent.id, session_name="s", text="plan"),
             AgentReasoningDelta(agent_id=agent.id, session_name="s", text="reason"),
             AgentActivityStarted(agent_id=agent.id, session_name="s", activity={}),
-            AgentCommandExecutionProgress(agent_id=agent.id, session_name="s", activity_id="command", output_delta="progress"),
-            AgentMcpToolCallProgress(agent_id=agent.id, session_name="s", activity_id="tool", message="progress"),
             AgentCommandExecutionCompleted(agent_id=agent.id, session_name="s", activity_id="command", command="echo", status="completed"),
             AgentMcpToolCallCompleted(agent_id=agent.id, session_name="s", activity_id="tool", server="tools", tool="inspect", arguments={}, status="completed"),
             AgentResponseCompleted(agent_id=agent.id, session_name="s", message="done"),
@@ -86,7 +84,6 @@ def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_
         listeners.on_agent_plan_delta(observed.append, agent); listeners.on_agent_plan_delta(observed.append)
         listeners.on_agent_reasoning_delta(observed.append, agent); listeners.on_agent_reasoning_delta(observed.append)
         listeners.on_agent_activity_started(observed.append, agent); listeners.on_agent_activity_started(observed.append)
-        listeners.on_agent_activity_progress(observed.append, agent); listeners.on_agent_activity_progress(observed.append)
         listeners.on_agent_activity_completed(observed.append, agent); listeners.on_agent_activity_completed(observed.append)
         listeners.on_agent_response_completed(observed.append, agent); listeners.on_agent_response_completed(observed.append)
         listeners.on_agent_response_interrupted(observed.append, agent); listeners.on_agent_response_interrupted(observed.append)
@@ -102,7 +99,7 @@ def test_every_listener_method_supports_typed_observers_and_optional_agents(tmp_
 
         for event in events:
             pipeline.push(event)
-        while len(observed) < 42:
+        while len(observed) < 38:
             await asyncio.sleep(0)
         for event in events:
             expected_deliveries = 4 if isinstance(event, SessionCreated) else 2

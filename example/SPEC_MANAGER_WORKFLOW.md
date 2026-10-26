@@ -53,6 +53,7 @@ sequenceDiagram
             SpecManager-->>Verifier: Deliver evidence when IDLE
             alt Corrections required
                 Verifier->>SpecManager: reject_task(corrections)
+                SpecManager-->>Developer: Return complete corrections from verify_task
                 SpecManager-->>Developer: Deliver corrections when IDLE
             else Component accepted
                 Verifier->>SpecManager: accept_task
@@ -67,8 +68,9 @@ The planner creates tasks only after the user approves the complete plan. Each
 task has stable acceptance-criterion IDs such as `AC1` and `AC2`. The developer
 implements only the assigned component, runs focused verification, and calls
 `verify_task`. The verifier either accepts it or returns all structured
-corrections. The planner assigns the next component only after acceptance; a
-final integration component owns the full-suite checks.
+corrections in the waiting `verify_task` result; the idle-safe correction
+notification is supplemental. The planner assigns the next component only
+after acceptance; a final integration component owns the full-suite checks.
 
 `verify_task` evidence includes an implementation summary, changed files, one
 evidence record per acceptance criterion, summarized test runs, correction

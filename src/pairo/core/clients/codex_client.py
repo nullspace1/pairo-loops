@@ -53,17 +53,16 @@ from pairo.core.events import (
     AgentError,
     ClientActivityStarted,
     ClientCommandExecutionCompleted,
-    ClientCommandExecutionProgress,
     ClientEvent,
     ClientPlanDelta,
     ClientMcpToolCallCompleted,
-    ClientMcpToolCallProgress,
     ClientReasoningDelta,
     ClientResponseCompleted,
     ClientResponseInterrupted,
     ClientTextDelta,
     ClientTokenUsageUpdated,
-    ClientUnsupportedActivity,
+    ClientRecognizedProviderNoOp,
+    ClientUnknownProviderEvent,
     CommandExecutionCompletionStatus,
     EventPipeline,
     MessageSent,
@@ -106,17 +105,44 @@ class _PermissionContext:
     requester: PermissionRequester | None
 
 
+class _CommandOutputLimiter:
+    """Bound terminal command output without hiding either end of the result."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+
+    def limit(self, output: str | None) -> str | None:
+        if output is None or len(output) <= self._limit:
+            return output
+        omitted = len(output)
+        while True:
+            marker = f"\n… [{omitted} characters omitted] …\n"
+            available = self._limit - len(marker)
+            if available < 2:
+                return output[: self._limit]
+            head_size = available // 2
+            tail_size = available - head_size
+            omitted = len(output) - head_size - tail_size
+            next_marker = f"\n… [{omitted} characters omitted] …\n"
+            if next_marker == marker:
+                return output[:head_size] + marker + output[-tail_size:]
+
+
 class CodexAgent:
     """Own one configured Codex agent and its currently active conversation."""
 
     _COMPACTION_TIMEOUT_SECONDS = 30.0
+    DEFAULT_COMMAND_OUTPUT_LIMIT = 64 * 1024
 
     def __init__(
         self,
         configuration: AgentConfiguration,
         event_pipeline: EventPipeline,
         client: AsyncCodexClient | None = None,
+        command_output_limit: int = DEFAULT_COMMAND_OUTPUT_LIMIT,
     ) -> None:
+        if command_output_limit < 1:
+            raise ValueError("command_output_limit must be positive.")
         self._configuration = configuration
         self._pipeline = event_pipeline
         self._permission_pipeline = SynchronousEventPipeline(event_pipeline)
@@ -132,6 +158,7 @@ class CodexAgent:
         self._closed = False
         self._permission_lock = Lock()
         self._permission_context: _PermissionContext | None = None
+        self._command_output_limiter = _CommandOutputLimiter(command_output_limit)
 
     def configuration(self) -> AgentConfiguration:
         return self._configuration
@@ -377,6 +404,8 @@ class CodexAgent:
                     if self._closed or self._active_session != active:
                         return
                 event = await self._translate_notification(active.identifier, notification)
+                if event is None:
+                    continue
                 terminal = isinstance(
                     event,
                     (ClientResponseCompleted, ClientResponseInterrupted),
@@ -417,7 +446,7 @@ class CodexAgent:
         self,
         identifier: CodexSessionIdentifier,
         notification: Notification,
-    ) -> ClientEvent:
+    ) -> ClientEvent | None:
         payload = notification.payload
         if isinstance(payload, AgentMessageDeltaNotification):
             return ClientTextDelta(text=str(payload.delta))
@@ -438,27 +467,20 @@ class CodexAgent:
             return ClientActivityStarted(activity=self._dump(payload.item))
         if isinstance(payload, ItemCompletedNotification):
             return self._completed_activity(payload.item)
-        if isinstance(
-            payload,
-            CommandExecutionOutputDeltaNotification,
-        ):
-            return ClientCommandExecutionProgress(
-                activity_id=payload.item_id, output_delta=payload.delta
-            )
+        if isinstance(payload, CommandExecutionOutputDeltaNotification):
+            return None
         if isinstance(payload, McpToolCallProgressNotification):
-            return ClientMcpToolCallProgress(
-                activity_id=payload.item_id, message=payload.message
-            )
+            return None
         if isinstance(payload, FileChangeOutputDeltaNotification):
-            return ClientUnsupportedActivity(description="Unsupported file-change progress")
+            return ClientRecognizedProviderNoOp(category="file_change_progress")
         if isinstance(payload, TurnCompletedNotification):
             if payload.turn.status is TurnStatus.interrupted:
                 return ClientResponseInterrupted()
             return ClientResponseCompleted(
                 message=await self._read_final_response(identifier.thread_id)
             )
-        return ClientUnsupportedActivity(
-            description=f"Unsupported Codex notification: {type(payload).__name__}"
+        return ClientUnknownProviderEvent(
+            description=f"Unknown Codex notification: {type(payload).__name__}"
         )
 
     def _completed_activity(self, item: object) -> ClientEvent:
@@ -471,7 +493,7 @@ class CodexAgent:
                 cwd=str(root.cwd) if root.cwd is not None else None,
                 status=cast(CommandExecutionCompletionStatus, root.status.value),
                 exit_code=root.exit_code,
-                output=root.aggregated_output,
+                output=self._command_output_limiter.limit(root.aggregated_output),
             )
         if isinstance(root, McpToolCallThreadItem):
             error = None if root.error is None else root.error.message
@@ -486,8 +508,8 @@ class CodexAgent:
                 ),
                 error=error,
             )
-        return ClientUnsupportedActivity(
-            description=f"Unsupported completed Codex activity: {type(root).__name__}"
+        return ClientUnknownProviderEvent(
+            description=f"Unknown completed Codex activity: {type(root).__name__}"
         )
 
     async def _read_final_response(self, thread_id: str) -> str:

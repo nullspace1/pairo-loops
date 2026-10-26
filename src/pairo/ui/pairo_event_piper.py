@@ -25,6 +25,16 @@ class PairoEvent(Message, bubble=False):
         super().__init__()
 
 
+class TextualIngressPolicy:
+    """Select pipeline events that are meaningful to the mounted Textual UI."""
+
+    def __init__(self, event_types: tuple[type[BaseModel], ...]) -> None:
+        self._event_types = event_types
+
+    def accepts(self, event: BaseModel) -> bool:
+        return isinstance(event, self._event_types)
+
+
 def on_pairo(
     event_type: type[EventT],
     selector: str | None = None,
@@ -56,9 +66,15 @@ def on_pairo(
 class TextualEventPiper:
     """Own the one pipeline subscription used to enter a Textual application."""
 
-    def __init__(self, pipeline: EventPipeline, post: Callable[[PairoEvent], bool]) -> None:
+    def __init__(
+        self,
+        pipeline: EventPipeline,
+        post: Callable[[PairoEvent], bool],
+        policy: TextualIngressPolicy,
+    ) -> None:
         self._pipeline = pipeline
         self._post = post
+        self._policy = policy
         self._subscription: Subscription[BaseModel] | None = None
         self._closed = False
 
@@ -73,8 +89,8 @@ class TextualEventPiper:
         self._closed = True
 
     def _receive(self, event: BaseModel, _subscription: Subscription[BaseModel]) -> None:
-        if not self._closed:
+        if not self._closed and self._policy.accepts(event):
             self._post(PairoEvent(event))
 
 
-__all__ = ["PairoEvent", "TextualEventPiper", "on_pairo"]
+__all__ = ["PairoEvent", "TextualEventPiper", "TextualIngressPolicy", "on_pairo"]

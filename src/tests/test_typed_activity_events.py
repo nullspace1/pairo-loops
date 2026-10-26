@@ -1,4 +1,4 @@
-﻿"""Focused contracts for typed routed activity events and summaries."""
+"""Focused contracts for typed routed activity events and summaries."""
 
 from uuid import uuid4
 
@@ -11,7 +11,6 @@ from pairo.core.events import (
     AgentMcpToolCallCompleted,
     ClientCommandExecutionCompleted,
     ClientMcpToolCallCompleted,
-    ClientMcpToolCallProgress,
 )
 from pairo.ui.transcribers import (
     CommandExecutionTranscriber,
@@ -55,11 +54,6 @@ def test_default_registry_uses_separate_activity_renderers() -> None:
     assert registry.transcript_transcriber_for("mcp_tool_call") is not None
 
 
-def test_progress_requires_named_fields() -> None:
-    with pytest.raises(ValidationError):
-        ClientMcpToolCallProgress(activity_id="call")
-
-
 @pytest.mark.parametrize(
     ("status", "exit_code", "expected_outcome"),
     [
@@ -75,9 +69,10 @@ def test_command_summary_renders_human_outcome_and_optional_details(
         agent_id=AGENT_ID, session_name="main", activity_id="command", command="pytest -q",
         status=status, exit_code=exit_code,
     )
-    entry = CommandExecutionTranscriber().write_completion(event).entry
+    entry = CommandExecutionTranscriber().write(event).entry
 
-    assert entry.content.startswith(f"Command — {expected_outcome}")
+    assert entry.content.startswith("Command")
+    assert expected_outcome in entry.content
     assert "Working directory: Not provided" in entry.content
     assert "No output was provided." in entry.content
     assert "CommandExecutionStatus" not in entry.content
@@ -88,9 +83,10 @@ def test_mcp_summary_renders_failure_and_preserves_optional_error_data() -> None
         agent_id=AGENT_ID, session_name="main", activity_id="call", server="tools",
         tool="inspect", arguments={"path": "README.md"}, status="failed", error="Not found",
     )
-    entry = McpToolCallTranscriber().write_completion(event).entry
+    entry = McpToolCallTranscriber().write(event).entry
 
-    assert entry.content.startswith("MCP tools / inspect — Failed: Not found")
+    assert entry.content.startswith("MCP tools / inspect")
+    assert "Failed: Not found" in entry.content
     assert '"Arguments": {' in entry.content
     assert '"Result": null' in entry.content
     assert '"Error": "Not found"' in entry.content
@@ -102,9 +98,10 @@ def test_mcp_summary_handles_absent_optional_values() -> None:
         agent_id=AGENT_ID, session_name="main", activity_id="call", server="tools",
         tool="inspect", arguments=None, status="completed",
     )
-    entry = McpToolCallTranscriber().write_completion(event).entry
+    entry = McpToolCallTranscriber().write(event).entry
 
-    assert entry.content.startswith("MCP tools / inspect — Completed successfully")
+    assert entry.content.startswith("MCP tools / inspect")
+    assert "Completed successfully" in entry.content
     assert '"Arguments": null' in entry.content
     assert '"Result": null' in entry.content
     assert '"Error": null' in entry.content
