@@ -55,6 +55,8 @@ sequenceDiagram
                 Verifier->>SpecManager: reject_task(corrections)
                 SpecManager-->>Developer: Return complete corrections from verify_task
                 SpecManager-->>Developer: Best-effort correction notice when IDLE
+                Developer->>SpecManager: Resubmit corrected evidence
+                SpecManager-->>Verifier: Send correction delta in the existing task session
             else Component accepted
                 Verifier->>SpecManager: accept_task
                 opt No planned components remain open
@@ -112,7 +114,10 @@ recipient is idle before delivery is attempted. Delivery has bounded timeout
 and shutdown behavior. A failed assignment is returned to pending rather than
 silently remaining active; the correction notice is supplemental, so its
 failure does not roll back the persisted rejection or the corrections already
-returned by `verify_task`.
+returned by `verify_task`. Worker and verifier sessions are created once per
+assigned component and reused for all correction cycles. A resubmission sends
+only the outstanding corrections and the latest evidence relevant to corrected
+criteria, while retaining test runs and correction resolutions for review.
 
 Records live under the `folder` passed to `install_spec_manager`. The current
 example passes `Path("./tmp")`, so tasks are stored in `tmp/FEATURES.md` as

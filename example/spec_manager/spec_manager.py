@@ -914,10 +914,11 @@ class SpecManager(MCPHttpWrapper):
             assignment.status = "verifying"
             assignment.review_result = future
             assignment.evidence = evidence
+            outstanding_corrections = assignment.outstanding_corrections
         try:
             await self._delivery.deliver(
                 pair.verifier,
-                self._verifier_message(task, evidence),
+                self._verifier_message(task, evidence, outstanding_corrections),
                 pair.worker.configuration().name,
             )
         except (Exception, asyncio.CancelledError) as error:
@@ -1281,7 +1282,38 @@ class SpecManager(MCPHttpWrapper):
         self,
         task: _Task,
         evidence: VerificationEvidence,
+        corrections: tuple[VerificationCorrection, ...],
     ) -> str:
+        if corrections:
+            corrected_criterion_ids = {
+                criterion_id
+                for correction in corrections
+                for criterion_id in correction.criterion_ids
+            }
+            correction_evidence = evidence.model_copy(
+                update={
+                    "acceptance_evidence": [
+                        item
+                        for item in evidence.acceptance_evidence
+                        if item.criterion_id in corrected_criterion_ids
+                    ]
+                }
+            )
+            correction_details = "\n".join(
+                f"- {item.id} ({', '.join(item.criterion_ids)}): {item.message}"
+                for item in corrections
+            )
+            return (
+                f"Reverify task '{task.name}' in the existing task session. The task "
+                "description, acceptance criteria, prior evidence, and prior review remain "
+                "in context; do not rediscover them.\n"
+                f"Outstanding corrections:\n{correction_details}\n"
+                "Latest worker correction handoff (acceptance evidence is limited to the "
+                "corrected criteria):\n"
+                f"{correction_evidence.model_dump_json(indent=2)}\n"
+                "Verify each correction resolution and material regressions, then call "
+                "spec_manager.accept_task or reject_task once."
+            )
         criteria = "\n".join(
             f"- {criterion.id}: {criterion.description}"
             for criterion in task.acceptance_criteria

@@ -216,6 +216,12 @@ def test_assignment_creates_and_reuses_the_verifier_session(tmp_path: Path) -> N
         )
         await asyncio.sleep(0)
         assert verifier.created[-1] == verifier_session
+        correction_message = verifier.messages[-1][0]
+        assert correction_message.startswith("Reverify task 'Login'")
+        assert "Description: Add login" not in correction_message
+        assert "Acceptance criteria:" not in correction_message
+        assert "C1 (AC1): Missing failure test" in correction_message
+        assert "Added the missing failure test." in correction_message
         assert "Accepted" in await tool(manager, "accept_task")(context(verifier))
         assert await waiting == "Task accepted."
         assert '"status": "accepted"' in (tmp_path / "FEATURES.md").read_text()
