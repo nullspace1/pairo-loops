@@ -1,12 +1,12 @@
 """Agent configuration mutation and validation tests."""
 
+import hashlib
 from pathlib import Path
-from uuid import UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
 
-from pairo.core.agent.agent import AGENT_ID_NAMESPACE
 from pairo.core.agent import (
     AgentConfiguration,
     ApprovalMode,
@@ -39,13 +39,13 @@ def make_agent(tmp_path: Path, **changes) -> AgentConfiguration:
 
 def test_agent_defaults_identity_and_collection_isolation(tmp_path: Path) -> None:
     first = make_agent(tmp_path)
-    equivalent = make_agent(tmp_path)
+    equivalent = make_agent(tmp_path, name="agent")
     second = make_agent(tmp_path, model="other")
     differently_named = make_agent(tmp_path, name="other agent")
 
     assert isinstance(first.id, UUID)
     assert first.id == equivalent.id
-    assert first.id == uuid5(AGENT_ID_NAMESPACE, "agent")
+    assert first.id == UUID(hashlib.md5("agent".encode("utf-8")).hexdigest())
     assert first.id == second.id
     assert first.id != differently_named.id
     assert first.name == "agent"
@@ -76,8 +76,15 @@ def test_agent_preserves_explicit_identity(tmp_path: Path) -> None:
     assert agent.id == supplied_id
 
 
+def test_agent_identity_uses_utf8_normalized_name(tmp_path: Path) -> None:
+    agent = make_agent(tmp_path, name="  café  ")
+
+    assert agent.name == "café"
+    assert agent.id == UUID(hashlib.md5("café".encode("utf-8")).hexdigest())
+
+
 def test_agent_name_is_required_to_derive_its_id(tmp_path: Path) -> None:
-    with pytest.raises(ValidationError, match="name"):
+    with pytest.raises(KeyError, match="name"):
         AgentConfiguration(
             sandbox=SandboxPermission.READ_ONLY,
             workspace=tmp_path,

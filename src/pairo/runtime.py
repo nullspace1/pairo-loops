@@ -92,9 +92,9 @@ class RuntimeLauncher:
             if latest is not None:
                 await agent.activate_session(latest.session_name, latest.identifier)
                 return None
-            return await agent.new_session(fallback_session_name)
         except Exception:
-            return await agent.new_session(fallback_session_name)
+            pass
+        return await agent.new_session(fallback_session_name)
 
     async def _close_resources(self) -> None:
         try:

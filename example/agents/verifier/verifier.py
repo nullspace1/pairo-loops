@@ -28,7 +28,7 @@ def get_verifier(pipeline, repository):
         approval_mode=ApprovalMode.USER,
         permission_requester=TextualPermissionRequester(pipeline, repository),
         workspace=temp,
-        model="gpt-5.6-terra",
+        model="gpt-6.1-terra",
         base_instructions=(agent_directory / "verifier.md").read_text(encoding="utf-8"),
         reasoning_effort=ReasoningEffort.MEDIUM,
         web_search=WebSearchMode.DISABLED,

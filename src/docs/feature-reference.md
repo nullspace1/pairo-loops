@@ -29,6 +29,13 @@ These utilities extend the core runtime without changing its ownership model.
 
 ## Agent contract
 
+`AgentConfiguration` strips leading and trailing whitespace from the name.
+Unless an explicit UUID `id` is supplied, it derives the ID from the MD5
+digest of the normalized name encoded as UTF-8, interpreted as a UUID. Equal
+normalized names therefore produce the same default ID, regardless of other
+configuration fields. Supply distinct explicit IDs when agents with the same
+name need distinct identities.
+
 Inspection is synchronous:
 
 - `configuration() -> AgentConfiguration`

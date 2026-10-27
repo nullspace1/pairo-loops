@@ -25,6 +25,31 @@ def test_on_pairo_filters_inheritance_and_async_handlers() -> None:
             assert app.received == ["matched", "async:matched"]
     asyncio.run(scenario())
 
+def test_stacked_handlers_deliver_each_matching_event_once() -> None:
+    class StackedApp(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.received: list[str] = []
+
+        @on_pairo(First)
+        @on_pairo(Second)
+        @on_pairo(Other)
+        def receive(self, event: First | Other) -> None:
+            self.received.append(event.value)
+
+    class Unrelated(BaseModel):
+        value: str
+
+    async def scenario() -> None:
+        app = StackedApp()
+        async with app.run_test() as pilot:
+            for event in (First(value="first"), Second(value="second"),
+                          Other(value="other"), Unrelated(value="ignored")):
+                app.post_message(PairoEvent(event))
+            await pilot.pause()
+            assert app.received == ["first", "second", "other"]
+    asyncio.run(scenario())
+
 def test_on_pairo_accepts_textual_compatible_selector_arguments_without_model_selector_data() -> None:
     class SelectorApp(App[None]):
         @on_pairo(First, "#unused", control="#also-unused")

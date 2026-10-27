@@ -152,7 +152,7 @@ def test_delayed_selected_history_replays_mutations_only_in_selected_session(tmp
         delayed = DelayedRepository(repository, "")
         pane = AgentChatPane(
             agent, {agent_id: agent}, delayed, pipeline, default_transcribers(),
-            EventDetailLevel.NORMAL, sidebar_fields=((), ()),
+            EventDetailLevel.NORMAL, sidebar_statistics=(),
         )
         async with PaneApp(pane).run_test() as pilot:
             for _ in range(5):

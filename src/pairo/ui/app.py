@@ -66,6 +66,7 @@ from .widgets.chat_editor import ChatEditor
 from .widgets.sidebar_statistics import (
     SidebarStatistic,
     UpdateAgentStatistic,
+    UpdateSessionStatistic,
     create_default_sidebar_statistics,
 )
 
@@ -269,31 +270,23 @@ class AgentChatApp(App[None]):
             self._transcribers.event_transcriber_for(event).request(event)
 
 
-    @on_pairo(MessageSent)
-    async def receive_message_state(self, event: MessageSent) -> None:
-        agent = self._agents.get(event.agent_id)
-        if agent is None:
-            return
-        state = "idle" if event.source == agent.configuration().name else "generating"
-        self._post_agent_state(event.agent_id, state)
-
-    @on_pairo(AgentResponseCompleted)
-    async def receive_completed_state(self, event: AgentResponseCompleted) -> None:
-        self._post_agent_state(event.agent_id, "idle")
-
-    @on_pairo(AgentResponseInterrupted)
-    async def receive_interrupted_state(
-        self, event: AgentResponseInterrupted
-    ) -> None:
-        self._post_agent_state(event.agent_id, "idle")
-
-    @on_pairo(AgentError)
-    async def receive_error_state(self, event: AgentError) -> None:
-        self._post_agent_state(event.agent_id, "idle")
-    def _post_agent_state(self, agent_id: UUID, value: str) -> None:
-        pane = self.chats.get(agent_id)
+    @on(UpdateAgentStatistic)
+    def route_agent_statistic(self, message: UpdateAgentStatistic) -> None:
+        pane = self.chats.get(message.agent_id)
         if pane is not None:
-            pane.sidebar.post_message(UpdateAgentStatistic("state", value, agent_id))
+            pane.sidebar.post_message(
+                UpdateAgentStatistic(message.key, message.value, message.agent_id)
+            )
+
+    @on(UpdateSessionStatistic)
+    def route_session_statistic(self, message: UpdateSessionStatistic) -> None:
+        pane = self.chats.get(message.agent_id)
+        if pane is not None:
+            pane.sidebar.post_message(
+                UpdateSessionStatistic(
+                    message.key, message.value, message.agent_id, message.session_name
+                )
+            )
     @on_pairo(SessionCreated)
     async def receive_session_created(self, event: SessionCreated) -> None:
         agent = self._agents.get(event.agent_id)
@@ -320,8 +313,7 @@ class AgentChatApp(App[None]):
         if pane is not None:
             try:
                 await pane.select_session(event.selected_session_name)
-
-            except (NoMatches, SessionNotFoundError):
+            except (NoMatches):
                 # Deletion events can arrive after teardown or a later deletion.
                 return
 
@@ -335,7 +327,6 @@ class AgentChatApp(App[None]):
             try:
                 await pane.add_entry(event.session_name, event.entry)
             except NoMatches:
-                # Event delivery can race with application teardown.
                 return
 
     @on_pairo(AgentSwitchRequested)
@@ -359,13 +350,8 @@ class AgentChatApp(App[None]):
         pane = self.chats.get(event.agent_id)
         if pane is not None:
             try:
-                await self.session_repository.get_session(
-                    event.agent_id, event.session_name
-                )
                 await pane.select_session(event.session_name)
-
-            except (NoMatches, SessionNotFoundError):
-                # A stale navigation request can arrive after deletion or teardown.
+            except (NoMatches):
                 return
 
     @on_pairo(TranscriptEntryUpdated)

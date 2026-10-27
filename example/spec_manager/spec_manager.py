@@ -645,7 +645,8 @@ class SpecManager(MCPHttpWrapper):
 
         @mcp.tool(
             "list_tasks",
-            "List authoritative task summaries, optionally filtered by lifecycle status.",
+            "Director-only: list task summaries, optionally filtered by lifecycle status. "
+            "Workers and verifiers already receive their authoritative task in the assignment.",
         )
         async def list_tasks(
             ctx: Context,
@@ -661,7 +662,11 @@ class SpecManager(MCPHttpWrapper):
                     if status is None or task.status == status
                 ]
 
-        @mcp.tool("get_task", "Get one authoritative task with criteria and assignment state.")
+        @mcp.tool(
+            "get_task",
+            "Director-only: get one task with criteria and assignment state. Workers and "
+            "verifiers already receive these details in the assignment.",
+        )
         async def get_task(task_name: str, ctx: Context) -> JsonObject | str:
             error = self._require_role(ctx, "director")
             if error:

@@ -170,10 +170,14 @@ class AgentChatPane(Vertical):
 
     async def select_session(self, session_name: str) -> None:
         async with self._transition_lock:
+            try:
+                entries = await self._repository.entries_for(self.agent_id, session_name)
+            except SessionNotFoundError:
+                # Navigation may arrive after the target session was deleted.
+                return
             self.session_name = session_name
             self._session_generation += 1
             self._pending_mutations.clear()
-            entries = await self._repository.entries_for(self.agent_id, session_name)
             if not self.is_mounted or session_name != self.session_name:
                 return
             await self.transcript.switch_session(session_name, entries)

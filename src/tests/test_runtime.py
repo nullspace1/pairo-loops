@@ -381,8 +381,20 @@ def test_run_agents_does_not_persist_fallbacks_after_partial_startup_failure(
     async def scenario() -> None:
         calls: list[str] = []
         pipeline = EventPipeline()
-        successful = StubAgent(calls, tmp_path)
-        failing = StubAgent(calls, tmp_path, start_error=RuntimeError("startup failed"))
+        both_started = asyncio.Event()
+        started = 0
+
+        class ConcurrentAgent(StubAgent):
+            async def new_session(self, name: str):
+                nonlocal started
+                started += 1
+                if started == 2:
+                    both_started.set()
+                await asyncio.wait_for(both_started.wait(), timeout=1)
+                return await super().new_session(name)
+
+        successful = ConcurrentAgent(calls, tmp_path)
+        failing = ConcurrentAgent(calls, tmp_path, start_error=RuntimeError("startup failed"))
         repository = StubRepository(calls)
 
         async def fake_run_ui(*_args) -> None:
@@ -404,5 +416,57 @@ def test_run_agents_does_not_persist_fallbacks_after_partial_startup_failure(
         assert not any(call.startswith("save:") for call in calls)
         assert calls.count("close:agent") == 2
         assert calls[-1] == "close:repository"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure_stage", ["lookup", "activation"])
+@pytest.mark.parametrize("creation_fails", [False, True])
+def test_run_agents_falls_back_once_after_resume_failure(
+    monkeypatch, tmp_path: Path, failure_stage: str, creation_fails: bool
+) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+
+        class FailingRepository(StubRepository):
+            async def latest_session_for(self, agent_id):
+                if failure_stage == "lookup":
+                    raise RuntimeError("lookup failed")
+                return await super().latest_session_for(agent_id)
+
+        class FailingActivationAgent(StubAgent):
+            async def activate_session(self, name, identifier):
+                calls.append(f"activate:{name}")
+                raise RuntimeError("activation failed")
+
+        agent = FailingActivationAgent(
+            calls, tmp_path,
+            start_error=RuntimeError("creation failed") if creation_fails else None,
+        )
+        agent_id = agent.configuration().id
+        repository = FailingRepository(calls)
+        repository.latest_sessions[agent_id] = SessionMetadata(
+            agent_id=agent_id, session_name="Existing",
+            identifier={"provider": "fake", "session_id": "existing-id"},
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            last_message_at=None,
+            last_updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        async def fake_run_ui(*_args) -> None:
+            calls.append("ui")
+
+        monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
+        if creation_fails:
+            with pytest.raises(RuntimeError, match="creation failed"):
+                await run_agents({agent_id: agent}, EventPipeline(), repository)
+        else:
+            await run_agents({agent_id: agent}, EventPipeline(), repository)
+
+        assert calls.count("start:Conversation 1") == 1
+        assert ("activate:Existing" in calls) == (failure_stage == "activation")
+        assert ("save:Conversation 1" in calls) == (not creation_fails)
+        assert ("ui" in calls) == (not creation_fails)
+        assert calls[-2:] == ["close:agent", "close:repository"]
 
     asyncio.run(scenario())

@@ -143,7 +143,13 @@ def test_app_applies_ui_navigation_events_from_the_pipeline(tmp_path: Path) -> N
                     session_name=first_session.name,
                 )
             )
-            await pilot.pause()
+            # Event delivery includes asynchronous repository and widget work;
+            # a single pilot pause does not guarantee that work has completed.
+            async def wait_for_switch() -> None:
+                while app.chats[first_id].session_name != first_session.name:
+                    await pilot.pause()
+
+            await asyncio.wait_for(wait_for_switch(), timeout=3)
             assert app.chats[first_id].session_name == first_session.name
 
             app.select_agent(first_id)
@@ -172,8 +178,15 @@ def test_app_applies_ui_navigation_events_from_the_pipeline(tmp_path: Path) -> N
             editor = app.chats[first_id].input
             editor.text = f"/delete {first_session.name}"
             await pilot.press("ctrl+enter")
-            for _ in range(3):
-                await pilot.pause()
+            async def wait_for_deletion() -> None:
+                while not any(
+                    entry.content == f"Deleted session {first_session.name}. Current session: {active_first_session.name}."
+                    for entry in app.chats[first_id].transcript.entries
+                ):
+                    await pilot.pause()
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_deletion(), 3)
             assert app.chats[first_id].session_name == active_first_session.name
             assert [
                 session.session_name
@@ -185,14 +198,45 @@ def test_app_applies_ui_navigation_events_from_the_pipeline(tmp_path: Path) -> N
                 for entry in app.chats[first_id].transcript.entries
             )
 
+            pipeline.push(SessionSwitchRequested(agent_id=first_id, session_name=first_session.name))
             pipeline.push(SessionSwitchRequested(agent_id=first_id, session_name="gone"))
             pipeline.push(AgentSwitchRequested(agent_id=uuid4()))
             await pilot.pause()
             assert app.chats[first_id].session_name == active_first_session.name
+            assert app.chats[first_id].transcript.is_displaying_session(active_first_session.name)
             assert tabs.active == "agent-chat-0"
 
         await first.close()
         await second.close()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_session_navigation_does_not_suppress_unrelated_repository_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        session = await agent.new_session("Current")
+        agent_id = agent.configuration().id
+        await repository.save_session(agent_id, session.name, session.identifier.model_dump(mode="json"))
+        app = configured_app({agent_id: agent}, pipeline, repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+
+            async def fail_entries(*args: object) -> None:
+                raise RuntimeError("repository failure")
+
+            monkeypatch.setattr(repository, "entries_for", fail_entries)
+            with pytest.raises(RuntimeError, match="repository failure"):
+                await app.receive_session_switch_requested(
+                    SessionSwitchRequested(agent_id=agent_id, session_name="Other")
+                )
+            assert app.chats[agent_id].transcript.is_displaying_session(session.name)
+        await agent.close()
         await repository.close()
 
     asyncio.run(scenario())
@@ -738,6 +782,23 @@ def test_agent_state_statistic_updates_visible_sidebar_from_lifecycle_events(
 ) -> None:
     """The agent-state field changes without sidebar polling or navigation."""
     from pairo.core.events import AgentResponseCompleted, MessageSent
+    from pairo.ui.widgets.sidebar_statistics.default_sidebar_statistics import (
+        AgentStateStatistic, DefaultSidebarStatisticValues,
+    )
+
+    class TrackingState(AgentStateStatistic):
+        def __init__(self) -> None:
+            super().__init__(DefaultSidebarStatisticValues())
+            self.delivered: asyncio.Queue[str | None] = asyncio.Queue()
+
+        async def update_agent(self, agent_id: UUID, value: str | None) -> None:
+            await super().update_agent(agent_id, value)
+            self.delivered.put_nowait(value)
+
+    class ReadyApp(AgentChatApp):
+        async def on_mount(self) -> None:
+            await super().on_mount()
+            self.ready.set()
 
     async def scenario() -> None:
         pipeline = EventPipeline()
@@ -748,8 +809,18 @@ def test_agent_state_statistic_updates_visible_sidebar_from_lifecycle_events(
         await repository.save_session(
             agent_id, session.name, session.identifier.model_dump(mode="json")
         )
-        app = configured_app({agent_id: agent}, pipeline, repository)
+        state = TrackingState()
+        statistics = tuple(
+            state if item.key == "state" else item
+            for item in create_default_sidebar_statistics()
+        )
+        app = ReadyApp(
+            {agent_id: agent}, pipeline, repository,
+            transcribers=default_transcribers(), sidebar_statistics=statistics, commands=(),
+        )
+        app.ready = asyncio.Event()
         async with app.run_test() as pilot:
+            await asyncio.wait_for(app.ready.wait(), 3)
             sidebar = app.chats[agent_id].sidebar
 
             async def fields() -> tuple[tuple[str, str, str], ...]:
@@ -766,9 +837,16 @@ def test_agent_state_statistic_updates_visible_sidebar_from_lifecycle_events(
                     source="user",
                 )
             )
-            for _ in range(10):
-                if ("state", "State", "generating") in await fields():
-                    break
+            async def wait_for_value(value: str) -> None:
+                while await state.delivered.get() != value:
+                    pass
+
+            async def wait_for_field(value: str) -> None:
+                while ("state", "State", value) not in await fields():
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_for_value("generating"), 3)
+            await asyncio.wait_for(wait_for_field("generating"), 3)
             assert ("state", "State", "generating") in await fields()
 
             pipeline.push(
@@ -776,10 +854,119 @@ def test_agent_state_statistic_updates_visible_sidebar_from_lifecycle_events(
                     agent_id=agent_id, session_name=session.name, message="done"
                 )
             )
-            for _ in range(3):
-                await pilot.pause()
+            await asyncio.wait_for(wait_for_value("idle"), 3)
+            await asyncio.wait_for(wait_for_field("idle"), 3)
             assert ("state", "State", "idle") in await fields()
         await agent.close()
         await repository.close()
 
+    asyncio.run(scenario())
+
+
+def test_state_events_route_through_statistic_and_isolate_agents(tmp_path: Path) -> None:
+    from pairo.core.events import AgentError, AgentResponseCompleted, AgentResponseInterrupted, SessionUpdated
+    from pairo.ui.widgets.sidebar_statistics.default_sidebar_statistics import AgentStateStatistic, DefaultSidebarStatisticValues
+
+    class CountingState(AgentStateStatistic):
+        def __init__(self) -> None:
+            super().__init__(DefaultSidebarStatisticValues())
+            self.updates: list[tuple[UUID, str | None]] = []
+            self.completed = asyncio.Event()
+
+        async def update_agent(self, agent_id: UUID, value: str | None) -> None:
+            self.updates.append((agent_id, value))
+            await super().update_agent(agent_id, value)
+            self.completed.set()
+
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        first = make_agent(tmp_path, pipeline, name="first")
+        second = make_agent(tmp_path, pipeline, name="second")
+        first_id, second_id = first.configuration().id, second.configuration().id
+        await first.new_session("s")
+        await second.new_session("s")
+        state = CountingState()
+        app = AgentChatApp({first_id: first, second_id: second}, pipeline, repository,
+                           transcribers=default_transcribers(), sidebar_statistics=(state,), commands=())
+        async with app.run_test() as pilot:
+            sidebar = app.chats[first_id].sidebar
+            other = app.chats[second_id].sidebar
+            events = [
+                (MessageSent(agent_id=first_id, session_name="s", message="hi", source="user"), "generating"),
+                (MessageSent(agent_id=first_id, session_name="s", message="hi", source="first"), "idle"),
+                (MessageSent(agent_id=first_id, session_name="s", message="hi", source="second"), "generating"),
+                (AgentResponseCompleted(agent_id=first_id, session_name="s", message="done"), "idle"),
+                (MessageSent(agent_id=first_id, session_name="s", message="hi"), "generating"),
+                (AgentResponseInterrupted(agent_id=first_id, session_name="s"), "idle"),
+                (MessageSent(agent_id=first_id, session_name="s", message="hi"), "generating"),
+                (AgentError(agent_id=first_id, session_name="s", message="error"), "idle"),
+                (MessageSent(agent_id=first_id, session_name="s", message="hi"), "generating"),
+                (SessionCreated(agent_id=first_id, session_name="s", identifier={}), "idle"),
+                (MessageSent(agent_id=first_id, session_name="s", message="hi"), "generating"),
+                (SessionUpdated(agent_id=first_id, session_name="s", identifier={}), "idle"),
+            ]
+            for index, (event, expected) in enumerate(events, 1):
+                state.completed.clear()
+                pipeline.push(event)
+                await asyncio.wait_for(state.completed.wait(), 3)
+                for _ in range(3):
+                    await pilot.pause()
+                assert sidebar.agent_values["state"] == expected, (index, event, state.updates)
+                assert ("state", "State", expected) in sidebar.query_one(".sidebar-information")._fields
+                assert other.agent_values["state"] == "idle"
+                assert len(state.updates) == index
+            pipeline.push(MessageSent(agent_id=uuid4(), session_name="s", message="unknown"))
+            await pilot.pause()
+            assert len(state.updates) == len(events)
+            pipeline.push(AgentSwitchRequested(agent_id=second_id))
+            for _ in range(3):
+                await pilot.pause()
+            for event, expected in (
+                (MessageSent(agent_id=second_id, session_name="s", message="hi"), "generating"),
+                (AgentResponseCompleted(agent_id=second_id, session_name="s", message="done"), "idle"),
+            ):
+                state.completed.clear()
+                pipeline.push(event)
+                await asyncio.wait_for(state.completed.wait(), 3)
+                for _ in range(3):
+                    await pilot.pause()
+                assert ("state", "State", expected) in other.query_one(".sidebar-information")._fields
+                assert ("state", "State", "idle") in sidebar.query_one(".sidebar-information")._fields
+            assert len(state.updates) == len(events) + 2
+        await first.close(); await second.close(); await repository.close()
+    asyncio.run(scenario())
+
+
+def test_state_events_without_state_statistic_do_not_publish_updates(tmp_path: Path) -> None:
+    from pairo.core.events import AgentError, AgentResponseCompleted, AgentResponseInterrupted, SessionUpdated
+    from pairo.ui.widgets.sidebar_statistics import UpdateAgentStatistic
+    from textual import on
+
+    class ObservingApp(AgentChatApp):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.updates = []
+
+        @on(UpdateAgentStatistic)
+        def observe_update(self, message: UpdateAgentStatistic) -> None:
+            self.updates.append(message.key)
+
+    async def scenario() -> None:
+        pipeline = EventPipeline(); repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline); agent_id = agent.configuration().id
+        app = ObservingApp({agent_id: agent}, pipeline, repository,
+                           transcribers=default_transcribers(), sidebar_statistics=(), commands=())
+        async with app.run_test() as pilot:
+            for event in (MessageSent(agent_id=agent_id, session_name="s", message="hi"),
+                          AgentResponseCompleted(agent_id=agent_id, session_name="s", message="done"),
+                          AgentResponseInterrupted(agent_id=agent_id, session_name="s"),
+                          AgentError(agent_id=agent_id, session_name="s", message="error"),
+                          SessionCreated(agent_id=agent_id, session_name="s", identifier={}),
+                          SessionUpdated(agent_id=agent_id, session_name="s", identifier={})):
+                pipeline.push(event)
+            for _ in range(3): await pilot.pause()
+            assert "state" not in app.chats[agent_id].sidebar.agent_values
+            assert app.updates == []
+        await agent.close(); await repository.close()
     asyncio.run(scenario())

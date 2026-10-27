@@ -13,6 +13,8 @@ from textual.containers import Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Select, Static
 
+from pairo.ui.session_repository import SessionNotFoundError
+
 from .sidebar_field_group import SidebarFieldGroup
 from .sidebar_statistics import (
     SidebarStatistic,
@@ -83,13 +85,24 @@ class AgentSidebar(Vertical):
             self._session_name = session_name
         agent_values, session_values = await asyncio.gather(
             self._values_for(SidebarStatisticCategory.AGENT, session_name),
-            self._values_for(SidebarStatisticCategory.SESSION, session_name),
+            self._session_values_for_load(session_name, generation),
         )
         async with self._load_lock:
-            if generation != self._load_generation:
+            if generation != self._load_generation or session_values is None:
                 return
             self.agent_values = agent_values
             self.session_values = session_values
+
+    async def _session_values_for_load(
+        self, session_name: str | None, generation: int
+    ) -> dict[str, str] | None:
+        try:
+            return await self._values_for(SidebarStatisticCategory.SESSION, session_name)
+        except SessionNotFoundError:
+            async with self._load_lock:
+                if generation != self._load_generation:
+                    return None
+            raise
 
     async def _values_for(
         self, category: SidebarStatisticCategory, session_name: str | None

@@ -72,9 +72,6 @@ async def run_async() -> None:
         await event_log.close()
         await spec_manager.close()
 
-        
-        
-
 
 def run() -> None:
     asyncio.run(run_async())

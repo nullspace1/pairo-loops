@@ -44,19 +44,21 @@ class AgentStateStatistic(FixedStatistic):
 
     def __init__(self, values: "DefaultSidebarStatisticValues") -> None:
         super().__init__("state", "State", values.agent_state)
+        self._states: dict[UUID, str] = {}
+
+    async def value(self, agent_id: UUID, session_name: str | None) -> str | None:
+        value = await super().value(agent_id, session_name)
+        return self._states.get(agent_id, value)
+
+    async def update_agent(self, agent_id: UUID, value: str | None) -> None:
+        self.configured_agent(agent_id)
+        if value is None:
+            self._states.pop(agent_id, None)
+        else:
+            self._states[agent_id] = value
+        self.app.post_message(UpdateAgentStatistic(self.key, value, agent_id))
 
     @on_pairo(MessageSent)
-    async def receive_message(self, event: MessageSent) -> None:
-        agent = self._configured(event.agent_id)
-        if agent is None:
-            return
-        status = (
-            AgentStatus.IDLE
-            if event.source == agent.configuration().name
-            else AgentStatus.GENERATING
-        )
-        await self.update_agent(event.agent_id, status.value)
-
     @on_pairo(AgentResponseCompleted)
     @on_pairo(AgentResponseInterrupted)
     @on_pairo(AgentError)
@@ -64,14 +66,20 @@ class AgentStateStatistic(FixedStatistic):
     @on_pairo(SessionUpdated)
     async def receive_idle_event(
         self,
-        event: AgentResponseCompleted
+        event: MessageSent
+        | AgentResponseCompleted
         | AgentResponseInterrupted
         | AgentError
         | SessionCreated
         | SessionUpdated,
     ) -> None:
-        if self._configured(event.agent_id) is not None:
-            await self.update_agent(event.agent_id, AgentStatus.IDLE.value)
+        agent = self._configured(event.agent_id)
+        if agent is None:
+            return
+        status = AgentStatus.IDLE
+        if isinstance(event, MessageSent) and event.source != agent.configuration().name:
+            status = AgentStatus.GENERATING
+        await self.update_agent(event.agent_id, status.value)
 
     def _configured(self, agent_id: UUID) -> Agent[SessionIdentifier] | None:
         try:

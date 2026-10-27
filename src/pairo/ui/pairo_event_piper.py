@@ -40,24 +40,32 @@ def on_pairo(
     selector: str | None = None,
     **selectors: str,
 ) -> TypingCallable[[TypingCallable[P, R]], TypingCallable[P, R]]:
-    """Handle one concrete Pairo model from a :class:`PairoEvent`.
-
-    Pairo models intentionally carry no Textual selector data.  ``selector`` and
-    keyword selectors are accepted for API parity with ``textual.on`` but are
-    deliberately ignored; routing is solely by the concrete typed model.
-    """
+    """Route model events by type; Textual selectors are accepted but ignored."""
     del selector, selectors
 
     def decorate(handler: TypingCallable[P, R]) -> TypingCallable[P, R]:
+        event_types = cast(list[type[BaseModel]] | None, getattr(handler, "_pairo_event_types", None))
+        if event_types is not None:
+            event_types.append(event_type)
+            return handler
+
+        event_types = [event_type]
+
         @wraps(handler)
-        async def receive(self: object, message: PairoEvent) -> R | None:
-            if not isinstance(message.event, event_type):
-                return None
-            result = handler(self, message.event)  # type: ignore[call-arg, arg-type]
+        async def receive(self: object, message: PairoEvent | EventT) -> R | None:
+            if isinstance(message, PairoEvent):
+                if not isinstance(message.event, tuple(event_types)):
+                    return None
+                result = handler(self, message.event)  # type: ignore[call-arg, arg-type]
+            else:
+                if not isinstance(message, tuple(event_types)):
+                    return None
+                result = handler(self, message)  # type: ignore[call-arg, arg-type]
             if isawaitable(result):
                 return cast(R, await result)
             return result
 
+        setattr(receive, "_pairo_event_types", event_types)
         return cast(TypingCallable[P, R], on(PairoEvent)(receive))
 
     return decorate

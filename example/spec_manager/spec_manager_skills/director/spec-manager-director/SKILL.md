@@ -13,6 +13,12 @@ integration component for full-suite evidence. Create tasks with a unique name,
 clear description, and independently testable acceptance criteria named `AC1`,
 `AC2`, and so on. Assign only the next component after the prior component is
 accepted.
+Each component must leave every in-repository consumer compatible and its
+criteria satisfiable without work deferred to a later component. Do not split a
+contract or data-model change from required call-site or UI wiring unless a
+tested compatibility layer makes the earlier component complete; the final
+integration component is for cross-component checks, not deferred functional
+wiring.
 Before assignment, use `modify_task` to
 correct a pending task or `delete_task` to remove one that is no longer needed.
 Tasks can only be modified or deleted while pending; create a follow-up task

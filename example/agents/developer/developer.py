@@ -31,7 +31,7 @@ def get_developer(name, pipeline, repository):
         approval_mode=ApprovalMode.USER,
         permission_requester=TextualPermissionRequester(pipeline, repository),
         workspace=agent_directory.parents[2] / "src",
-        model="gpt-5.6-terra",
+        model="gpt-6.1-terra",
         skill_folders=(agent_directory / "skills",),
         base_instructions=instructions,
         reasoning_effort=ReasoningEffort.MEDIUM,
