@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from .chat_commands.base import SlashCommand
 from .session_repository import SessionRepository
 from .transcribers import TranscriberRegistry
-from .widgets.sidebar_statistics import SidebarStatistics
+from .widgets.sidebar_statistics import SidebarStatistic
 
 
 class UserInterfaceConfiguration:
@@ -23,12 +23,12 @@ class UserInterfaceConfiguration:
         session_repository: SessionRepository | None = None,
         *,
         transcribers: TranscriberRegistry | None = None,
-        sidebar_statistics: SidebarStatistics | None = None,
+        sidebar_statistics: Sequence[SidebarStatistic] | None = None,
         include_default_commands: bool = True,
     ) -> None:
         self._session_repository = session_repository
         self._transcribers = transcribers
-        self._sidebar_statistics = sidebar_statistics
+        self._sidebar_statistics = None if sidebar_statistics is None else tuple(sidebar_statistics)
         self._include_default_commands = include_default_commands
         self._commands: list[SlashCommand] = []
 
@@ -41,7 +41,7 @@ class UserInterfaceConfiguration:
         return self._transcribers
 
     @property
-    def sidebar_statistics(self) -> SidebarStatistics | None:
+    def sidebar_statistics(self) -> tuple[SidebarStatistic, ...] | None:
         return self._sidebar_statistics
 
     @property
@@ -70,9 +70,9 @@ class UserInterfaceConfiguration:
         return self
 
     def use_sidebar_statistics(
-        self, statistics: SidebarStatistics
+        self, statistics: Sequence[SidebarStatistic]
     ) -> UserInterfaceConfiguration:
-        self._sidebar_statistics = statistics
+        self._sidebar_statistics = tuple(statistics)
         return self
 
     def without_default_commands(self) -> UserInterfaceConfiguration:

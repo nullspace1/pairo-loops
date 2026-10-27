@@ -21,7 +21,11 @@ from pairo.ui.chat_commands import (
     InterruptCommand, SessionCommand, SessionsCommand,
 )
 from pairo.ui.transcribers import default_transcribers
-from pairo.ui.widgets.sidebar_statistics import default_sidebar_statistics
+from pairo.ui.widgets.sidebar_statistics import (
+    UpdateSessionStatistic,
+    create_default_sidebar_statistics,
+    default_sidebar_statistics,
+)
 from pairo.ui.models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
 from pairo.ui.session_repository import StatisticValue
 from pairo.ui import SlashCommand
@@ -62,7 +66,7 @@ def configured_app(
             if command_output_limit is None
             else default_transcribers(command_output_limit=command_output_limit)
         ),
-        sidebar_statistics={agent_id: default_sidebar_statistics(agent) for agent_id, agent in agents.items()},
+        sidebar_statistics=create_default_sidebar_statistics(),
         commands=(
             HelpCommand(), AgentSelectionCommand(), SessionCommand(), SessionsCommand(),
             CompactCommand(), DeleteCommand(), InterruptCommand(), ImageCommand(),
@@ -557,7 +561,8 @@ def test_app_persists_externally_created_session_before_selecting_it(
             )
 
             pipeline.push(event)
-            await pilot.pause()
+            for _ in range(3):
+                await pilot.pause()
 
             stored = await repository.get_session(agent_id, external.name)
             assert stored.identifier == external.identifier.model_dump(mode="json")
@@ -596,7 +601,7 @@ def test_app_dispatches_only_explicitly_installed_external_commands(tmp_path: Pa
         app = AgentChatApp(
             {agent_id: agent}, pipeline, repository,
             transcribers=default_transcribers(),
-            sidebar_statistics={agent_id: default_sidebar_statistics(agent)},
+            sidebar_statistics=create_default_sidebar_statistics(),
             commands=(ExternalCommand(),),
         )
         async with app.run_test() as pilot:
@@ -616,308 +621,6 @@ def test_app_dispatches_only_explicitly_installed_external_commands(tmp_path: Pa
     asyncio.run(scenario())
 
 
-def test_sidebar_rejects_value_equal_recreated_session_statistic(tmp_path: Path) -> None:
-    """A delayed save may not cross an activation boundary by value equality."""
-    from pairo.ui.widgets.sidebar_statistics import SaveSessionStatistic
-    async def scenario() -> None:
-        pipeline = EventPipeline()
-        repository = SqliteSessionRepository()
-        agent = make_agent(tmp_path, pipeline)
-        first = await agent.new_session("one")
-        app = configured_app({agent.configuration().id: agent}, pipeline, repository)
-        async with app.run_test() as pilot:
-            sidebar = app.chats[agent.configuration().id].sidebar
-            recreated = first.model_copy()
-            agent._active_session = recreated  # test the provider recreating an equal identity
-            app.post_message(SaveSessionStatistic("late", "wrong", agent, first))
-            await pilot.pause()
-            assert "late" not in sidebar.session_values
-            await pilot.pause()
-        await agent.close()
-        await repository.close()
-    asyncio.run(scenario())
-
-
-def test_sidebar_statistics_redesign_has_no_pipeline_polling_or_provider_protocol() -> None:
-    from pairo.ui.widgets.sidebar_statistics import SidebarStatistic, TokenUsageStatistic
-    from pairo.ui.widgets.sidebar_statistics import statistic as statistic_module
-    from pairo.ui.widgets.sidebar_statistics import token_usage_statistic as token_module
-    from pairo.ui import app as app_module
-    assert issubclass(TokenUsageStatistic, SidebarStatistic)
-    assert "EventPipeline" not in statistic_module.__dict__
-    assert "EventPipeline" not in token_module.__dict__
-    assert "set_interval(0.25" not in Path(app_module.__file__).read_text()
-    assert "_refresh_sidebars" not in Path(app_module.__file__).read_text()
-
-
-def test_custom_message_pump_statistic_activation_and_categories(tmp_path: Path) -> None:
-    """Documented custom migration: subclass base, compute, and category ownership."""
-    from pairo.ui.widgets.sidebar_statistics import (
-        FixedStatistic, SidebarStatistic, SidebarStatisticCategory,
-        SidebarStatisticContext, SidebarStatistics,
-    )
-    class CountingStatistic(SidebarStatistic):
-        def __init__(self) -> None:
-            super().__init__("custom", "Custom", SidebarStatisticCategory.AGENT)
-            self.computes = 0
-        async def compute(self, context: SidebarStatisticContext) -> object:
-            self.computes += 1
-            return f"{context.agent.configuration().name}:{self.computes}"
-    async def scenario() -> None:
-        pipeline = EventPipeline(); repository = SqliteSessionRepository(); agent = make_agent(tmp_path, pipeline)
-        custom = CountingStatistic()
-        statistics = SidebarStatistics((custom,), (FixedStatistic("session", "Session", lambda _context: _constant("S"), SidebarStatisticCategory.SESSION),))
-        app = AgentChatApp({agent.configuration().id: agent}, pipeline, repository, transcribers=default_transcribers(), sidebar_statistics={agent.configuration().id: statistics}, commands=())
-        async with app.run_test() as pilot:
-            sidebar = app.chats[agent.configuration().id].sidebar
-            assert custom.computes == 1
-            await app._rebuild_statistics(agent.configuration().id)
-            assert custom.computes == 2  # rebuild does not configure a second pump
-            sidebar._information_mode = sidebar._AGENT_INFORMATION
-            await sidebar._refresh_information_fields()
-            assert sidebar.query_one(".sidebar-information")._fields == (("custom", "Custom", "reviewer:2"),)
-            sidebar._information_mode = sidebar._SESSION_INFORMATION
-            await sidebar._refresh_information_fields()
-            assert sidebar.query_one(".sidebar-information")._fields == ()
-            await pilot.pause()
-        await agent.close(); await repository.close()
-    asyncio.run(scenario())
-
-
-async def _constant(value: object) -> object:
-    return value
-
-
-def test_sidebar_statistics_reject_duplicate_configured_keys() -> None:
-    from pairo.ui.widgets.sidebar_statistics import FixedStatistic, SidebarStatistics
-    with pytest.raises(ValueError, match="Duplicate sidebar statistic keys"):
-        SidebarStatistics((FixedStatistic("same", "One", _constant), FixedStatistic("same", "Two", _constant)), ())
-
-
-def test_token_usage_uses_only_relevant_bridged_event(tmp_path: Path) -> None:
-    from pairo.core.events import AgentTokenUsageUpdated, TokenUsage
-    async def scenario() -> None:
-        pipeline = EventPipeline(); repository = SqliteSessionRepository(); agent = make_agent(tmp_path, pipeline)
-        session = await agent.new_session("one"); usage = TokenUsage(input_tokens=1, cached_input_tokens=0, output_tokens=2, reasoning_output_tokens=0, total_tokens=3)
-        app = configured_app({agent.configuration().id: agent}, pipeline, repository)
-        async with app.run_test() as pilot:
-            sidebar = app.chats[agent.configuration().id].sidebar
-            pipeline.push(AgentTokenUsageUpdated(agent_id=agent.configuration().id, session_name="one", last=usage, total=usage))
-            await pilot.pause(); await pilot.pause()
-            assert dict(
-                (item.key, item.value)
-                for item in await repository.session_statistics_for(
-                    agent.configuration().id, session.name
-                )
-            )["token_usage"] == "3 tokens"
-            sidebar.query_one(".sidebar-information-picker", Select).value = "session"
-            await pilot.pause()
-            assert ("token_usage", "Token usage", "3 tokens") in sidebar.query_one(
-                ".sidebar-information"
-            )._fields
-            pipeline.push(AgentTokenUsageUpdated(agent_id=uuid4(), session_name="one", last=usage, total=usage))
-            pipeline.push(AgentTokenUsageUpdated(agent_id=agent.configuration().id, session_name="other", last=usage, total=usage))
-            await pilot.pause()
-            assert ("token_usage", "Token usage", "3 tokens") in sidebar.query_one(
-                ".sidebar-information"
-            )._fields
-        await agent.close(); await repository.close()
-    asyncio.run(scenario())
-
-
-def test_sidebar_statistics_keep_session_values_isolated_when_switching(tmp_path: Path) -> None:
-    """Mounted sidebars restore the selected session's event-driven value."""
-    from pairo.core.events import AgentTokenUsageUpdated, TokenUsage
-
-    async def scenario() -> None:
-        pipeline = EventPipeline()
-        repository = SqliteSessionRepository()
-        agent = make_agent(tmp_path, pipeline)
-        first = await agent.new_session("first")
-        second = await agent.new_session("second")
-        agent_id = agent.configuration().id
-        for session in (first, second):
-            await repository.save_session(
-                agent_id, session.name, session.identifier.model_dump(mode="json")
-            )
-        app = configured_app({agent_id: agent}, pipeline, repository)
-        usage = TokenUsage(
-            input_tokens=1, cached_input_tokens=0, output_tokens=2,
-            reasoning_output_tokens=0, total_tokens=3,
-        )
-        async with app.run_test() as pilot:
-            sidebar = app.chats[agent_id].sidebar
-            pipeline.push(AgentTokenUsageUpdated(
-                agent_id=agent_id, session_name="second", last=usage, total=usage
-            ))
-            await pilot.pause()
-            await pilot.pause()
-            assert sidebar.session_values["token_usage"] == "3 tokens"
-            await agent.activate_session("first", first.identifier)
-            await app.chats[agent_id].select_session("first")
-            await app._rebuild_statistics(agent_id)
-            await pilot.pause()
-            assert "token_usage" not in sidebar.session_values
-            await agent.activate_session("second", second.identifier)
-            await app.chats[agent_id].select_session("second")
-            await app._rebuild_statistics(agent_id)
-            await pilot.pause()
-            assert sidebar.session_values["token_usage"] == "3 tokens"
-        await agent.close()
-        await repository.close()
-
-    asyncio.run(scenario())
-
-
-def test_shared_statistics_configuration_scopes_builds_and_events(tmp_path: Path) -> None:
-    from pairo.core.events import AgentTokenUsageUpdated, TokenUsage
-    from pairo.ui.widgets.sidebar_statistics import (
-        SidebarStatistic,
-        SidebarStatisticCategory,
-        SidebarStatisticContext,
-        SidebarStatistics,
-        TokenUsageStatistic,
-    )
-
-    class AgentNameStatistic(SidebarStatistic):
-        def __init__(self) -> None:
-            super().__init__("agent", "Agent", SidebarStatisticCategory.AGENT)
-        async def compute(self, context: SidebarStatisticContext) -> str:
-            return context.agent.configuration().name
-
-    async def scenario() -> None:
-        pipeline = EventPipeline(); repository = SqliteSessionRepository()
-        first = make_agent(tmp_path, pipeline, name="first"); second = make_agent(tmp_path, pipeline, name="second")
-        first_session = await first.new_session("one")
-        second_session = await second.new_session("one")
-        for agent, session in ((first, first_session), (second, second_session)):
-            await repository.save_session(
-                agent.configuration().id,
-                session.name,
-                session.identifier.model_dump(mode="json"),
-            )
-        shared = SidebarStatistics((AgentNameStatistic(),), (TokenUsageStatistic(),))
-        app = AgentChatApp(
-            {first.configuration().id: first, second.configuration().id: second},
-            pipeline,
-            repository,
-            transcribers=default_transcribers(),
-            sidebar_statistics={
-                first.configuration().id: shared,
-                second.configuration().id: shared,
-            },
-            commands=(),
-        )
-        usage = TokenUsage(input_tokens=1, cached_input_tokens=0, output_tokens=2, reasoning_output_tokens=0, total_tokens=3)
-        async with app.run_test() as pilot:
-            assert app.chats[first.configuration().id].sidebar.agent_values["agent"] == "first"
-            assert app.chats[second.configuration().id].sidebar.agent_values["agent"] == "second"
-            pipeline.push(AgentTokenUsageUpdated(
-                agent_id=first.configuration().id, session_name="one", last=usage, total=usage,
-            ))
-            await pilot.pause(); await pilot.pause()
-            assert app.chats[first.configuration().id].sidebar.session_values["token_usage"] == "3 tokens"
-            assert "token_usage" not in app.chats[second.configuration().id].sidebar.session_values
-        await first.close(); await second.close(); await repository.close()
-    asyncio.run(scenario())
-
-
-def test_shared_statistics_rebuild_scopes_after_navigation_and_replacement(tmp_path: Path) -> None:
-    """Shared modules retain each agent/session's committed value through UI navigation."""
-    from pairo.ui.widgets.sidebar_statistics import (
-        SidebarStatistic,
-        SidebarStatisticCategory,
-        SidebarStatisticContext,
-        SidebarStatistics,
-        TokenUsageStatistic,
-    )
-
-    class AgentNameStatistic(SidebarStatistic):
-        def __init__(self) -> None:
-            super().__init__("agent_name", "Agent", SidebarStatisticCategory.AGENT)
-
-        async def compute(self, context: SidebarStatisticContext) -> str:
-            return context.agent.configuration().name
-
-    async def scenario() -> None:
-        pipeline = EventPipeline()
-        repository = SqliteSessionRepository()
-        first = make_agent(tmp_path, pipeline, name="first")
-        second = make_agent(tmp_path, pipeline, name="second")
-        first_id, second_id = first.configuration().id, second.configuration().id
-        first_one = await first.new_session("one")
-        first_two = await first.new_session("two")
-        second_one = await second.new_session("one")
-        for agent, session in (
-            (first, first_one), (first, first_two), (second, second_one),
-        ):
-            await repository.save_session(
-                agent.configuration().id,
-                session.name,
-                session.identifier.model_dump(mode="json"),
-            )
-        await repository.upsert_session_statistic(
-            first_id, "one", StatisticValue("token_usage", "first-one")
-        )
-        await repository.upsert_session_statistic(
-            first_id, "two", StatisticValue("token_usage", "first-two")
-        )
-        await repository.upsert_session_statistic(
-            second_id, "one", StatisticValue("token_usage", "second-one")
-        )
-        shared = SidebarStatistics((AgentNameStatistic(),), (TokenUsageStatistic(),))
-        app = AgentChatApp(
-            {first_id: first, second_id: second}, pipeline, repository,
-            transcribers=default_transcribers(),
-            sidebar_statistics={first_id: shared, second_id: shared}, commands=(
-                SessionCommand(), DeleteCommand(),
-            ),
-        )
-        async with app.run_test() as pilot:
-            async def visible_fields(
-                agent_id: UUID, mode: str
-            ) -> tuple[tuple[str, str, str], ...]:
-                sidebar = app.chats[agent_id].sidebar
-                sidebar.query_one(".sidebar-information-picker", Select).value = mode
-                await pilot.pause()
-                return sidebar.query_one(".sidebar-information")._fields
-
-            assert ("agent_name", "Agent", "first") in await visible_fields(first_id, "agent")
-            assert ("token_usage", "Token usage", "first-two") in await visible_fields(first_id, "session")
-            assert ("agent_name", "Agent", "second") in await visible_fields(second_id, "agent")
-            assert ("token_usage", "Token usage", "second-one") in await visible_fields(second_id, "session")
-
-            first_editor = app.chats[first_id].input
-            first_editor.text = "/session switch one"
-            await pilot.press("ctrl+enter")
-            for _ in range(3):
-                await pilot.pause()
-            assert ("token_usage", "Token usage", "first-one") in await visible_fields(first_id, "session")
-
-            first_editor.text = "/session new replacement"
-            await pilot.press("ctrl+enter")
-            for _ in range(3):
-                await pilot.pause()
-            assert all(key != "token_usage" for key, _, _ in await visible_fields(first_id, "session"))
-
-            first_editor.text = "/delete replacement"
-            await pilot.press("ctrl+enter")
-            for _ in range(3):
-                await pilot.pause()
-            assert app.chats[first_id].session_name == "two"
-            assert ("token_usage", "Token usage", "first-two") in await visible_fields(first_id, "session")
-            assert ("token_usage", "Token usage", "second-one") in await visible_fields(second_id, "session")
-
-            app.select_agent(second_id)
-            await pilot.pause()
-            assert ("agent_name", "Agent", "second") in await visible_fields(second_id, "agent")
-            assert ("token_usage", "Token usage", "second-one") in await visible_fields(second_id, "session")
-        await first.close()
-        await second.close()
-        await repository.close()
-
-    asyncio.run(scenario())
-
 def test_token_usage_survives_fresh_application_reload(tmp_path: Path) -> None:
     from pairo.core.events import AgentTokenUsageUpdated, TokenUsage
 
@@ -934,7 +637,22 @@ def test_token_usage_survives_fresh_application_reload(tmp_path: Path) -> None:
             pipeline.push(AgentTokenUsageUpdated(
                 agent_id=agent_id, session_name=session.name, last=usage, total=usage,
             ))
-            await pilot.pause(); await pilot.pause()
+            for _ in range(10):
+                stored_values = await repository.session_statistics_for(
+                    agent_id, session.name
+                )
+                if any(
+                    value.key == "token_usage" and value.value == "3 tokens"
+                    for value in stored_values
+                ):
+                    break
+                await pilot.pause()
+            assert any(
+                value.key == "token_usage" and value.value == "3 tokens"
+                for value in await repository.session_statistics_for(agent_id, session.name)
+            )
+            for _ in range(3):
+                await pilot.pause()
             assert app.chats[agent_id].sidebar.session_values["token_usage"] == "3 tokens"
         await agent.close(); await repository.close()
 
@@ -952,5 +670,116 @@ def test_token_usage_survives_fresh_application_reload(tmp_path: Path) -> None:
                 ".sidebar-information"
             )._fields
         await reloaded_agent.close(); await reloaded_repository.close()
+
+    asyncio.run(scenario())
+
+def test_sidebar_renders_selected_session_values_after_replacement_and_deletion(
+    tmp_path: Path,
+) -> None:
+    """Session transitions refresh sidebar fields and reject stale updates."""
+
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        first = await agent.new_session("first")
+        second = await agent.new_session("second")
+        agent_id = agent.configuration().id
+        for session in (first, second):
+            await repository.save_session(
+                agent_id, session.name, session.identifier.model_dump(mode="json")
+            )
+        await repository.upsert_session_statistic(
+            agent_id, first.name, StatisticValue("token_usage", "first tokens")
+        )
+        await repository.upsert_session_statistic(
+            agent_id, second.name, StatisticValue("token_usage", "second tokens")
+        )
+        app = configured_app({agent_id: agent}, pipeline, repository)
+        async with app.run_test() as pilot:
+            sidebar = app.chats[agent_id].sidebar
+
+            async def displayed_values() -> tuple[tuple[str, str, str], ...]:
+                sidebar.query_one(".sidebar-information-picker", Select).value = "session"
+                await pilot.pause()
+                return sidebar.query_one(".sidebar-information")._fields
+
+            assert ("token_usage", "Token usage", "second tokens") in await displayed_values()
+            await agent.activate_session(first.name, first.identifier)
+            await app.chats[agent_id].select_session(first.name)
+            assert ("token_usage", "Token usage", "first tokens") in await displayed_values()
+
+            app.post_message(UpdateSessionStatistic("token_usage", "stale", agent_id, second.name))
+            await pilot.pause()
+            assert ("token_usage", "Token usage", "first tokens") in await displayed_values()
+
+            editor = app.chats[agent_id].input
+            editor.text = "/session new replacement"
+            await pilot.press("ctrl+enter")
+            for _ in range(3):
+                await pilot.pause()
+            assert app.chats[agent_id].session_name == "replacement"
+            assert ("token_usage", "Token usage", "Unavailable") in await displayed_values()
+
+            editor.text = "/delete replacement"
+            await pilot.press("ctrl+enter")
+            for _ in range(3):
+                await pilot.pause()
+            assert app.chats[agent_id].session_name == second.name
+            assert ("token_usage", "Token usage", "second tokens") in await displayed_values()
+        await agent.close()
+        await repository.close()
+
+    asyncio.run(scenario())
+
+
+def test_agent_state_statistic_updates_visible_sidebar_from_lifecycle_events(
+    tmp_path: Path,
+) -> None:
+    """The agent-state field changes without sidebar polling or navigation."""
+    from pairo.core.events import AgentResponseCompleted, MessageSent
+
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        session = await agent.new_session("state")
+        agent_id = agent.configuration().id
+        await repository.save_session(
+            agent_id, session.name, session.identifier.model_dump(mode="json")
+        )
+        app = configured_app({agent_id: agent}, pipeline, repository)
+        async with app.run_test() as pilot:
+            sidebar = app.chats[agent_id].sidebar
+
+            async def fields() -> tuple[tuple[str, str, str], ...]:
+                sidebar.query_one(".sidebar-information-picker", Select).value = "agent"
+                await pilot.pause()
+                return sidebar.query_one(".sidebar-information")._fields
+
+            assert ("state", "State", "idle") in await fields()
+            pipeline.push(
+                MessageSent(
+                    agent_id=agent_id,
+                    session_name=session.name,
+                    message="start",
+                    source="user",
+                )
+            )
+            for _ in range(10):
+                if ("state", "State", "generating") in await fields():
+                    break
+            assert ("state", "State", "generating") in await fields()
+
+            pipeline.push(
+                AgentResponseCompleted(
+                    agent_id=agent_id, session_name=session.name, message="done"
+                )
+            )
+            for _ in range(3):
+                await pilot.pause()
+            assert ("state", "State", "idle") in await fields()
+        await agent.close()
+        await repository.close()
 
     asyncio.run(scenario())

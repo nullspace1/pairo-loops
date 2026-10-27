@@ -20,7 +20,7 @@ from ..transcribers import TranscriberRegistry
 from ..session_repository import SessionNotFoundError, SessionRepository
 from .agent_sidebar import AgentSidebar
 from .chat_editor import ChatEditor
-from .sidebar_statistics.statistics import SidebarFieldDefinition
+from .sidebar_statistics import SidebarStatistic
 from .transcript import Transcript
 
 
@@ -68,7 +68,7 @@ class AgentChatPane(Vertical):
         transcribers: TranscriberRegistry,
         detail_level: EventDetailLevel,
         *,
-        sidebar_fields: tuple[Sequence[SidebarFieldDefinition], Sequence[SidebarFieldDefinition]],
+        sidebar_statistics: Sequence[SidebarStatistic],
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -91,7 +91,7 @@ class AgentChatPane(Vertical):
         self._event_pipeline = event_pipeline
         self._transcribers = transcribers
         self._detail_level = detail_level
-        self._sidebar_fields = sidebar_fields
+        self._sidebar_statistics = tuple(sidebar_statistics)
         self._session_generation = 0
         self._pending_mutations: list[_PendingTranscriptMutation] = []
         self._transition_lock = asyncio.Lock()
@@ -120,8 +120,8 @@ class AgentChatPane(Vertical):
                         classes="detail-filter",
                     )
             yield AgentSidebar(
-                self._sidebar_fields[0],
-                self._sidebar_fields[1],
+                self.agent_id,
+                self._sidebar_statistics,
                 classes="agent-sidebar",
             )
 
@@ -179,6 +179,11 @@ class AgentChatPane(Vertical):
             await self.transcript.switch_session(session_name, entries)
             if self.is_mounted and session_name == self.session_name:
                 await self._apply_pending_mutations()
+                try:
+                    await self.sidebar.load(session_name)
+                except RuntimeError:
+                    if self.is_mounted:
+                        raise
 
     async def set_detail_level(self, detail_level: EventDetailLevel) -> None:
         self._detail_level = detail_level

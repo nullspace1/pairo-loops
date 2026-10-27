@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import hashlib
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -26,6 +27,7 @@ from pairo.core.agent.web_search_mode import WebSearchMode
 from pairo.core.mcp.servers import MCPServer
 from pairo.core.permissions.permission_requester import PermissionRequester
 
+UUID_NAMESPACE = UUID("00000000-0000-0000-0000-000000000000")
 
 class AgentConfiguration(BaseModel):
     """Agent identity and configuration.
@@ -42,8 +44,11 @@ class AgentConfiguration(BaseModel):
         strict=True,
     )
 
-    id: UUID = Field(default_factory=uuid4, frozen=True)
     name: str = Field(frozen=True)
+    id: UUID = Field(
+        default_factory=lambda data: UUID(hashlib.md5(data["name"].encode("utf-8")).hexdigest()),
+        frozen=True,
+    )
     description: str = ""
     sandbox: SandboxPermission
     workspace: Path

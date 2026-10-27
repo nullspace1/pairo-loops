@@ -19,6 +19,7 @@ from pairo.core.events import (
     AgentResponseInterrupted,
     AgentTokenUsageUpdated,
     EventPipeline,
+    MessageSent,
     SessionCompacted,
     SessionCreated,
     SessionDeleted,
@@ -63,8 +64,9 @@ from .widgets import (
 )
 from .widgets.chat_editor import ChatEditor
 from .widgets.sidebar_statistics import (
-    SaveAgentStatistic, SaveSessionStatistic, SidebarStatistic, SidebarStatistics,
-    default_sidebar_statistics,
+    SidebarStatistic,
+    UpdateAgentStatistic,
+    create_default_sidebar_statistics,
 )
 
 
@@ -125,7 +127,7 @@ class AgentChatApp(App[None]):
         session_repository: SessionRepository,
         *,
         transcribers: TranscriberRegistry,
-        sidebar_statistics: Mapping[UUID, SidebarStatistics],
+        sidebar_statistics: Sequence[SidebarStatistic],
         commands: Sequence[SlashCommand],
     ) -> None:
         super().__init__()
@@ -145,14 +147,13 @@ class AgentChatApp(App[None]):
             duplicates = ", ".join(sorted(duplicate_names))
             raise ValueError(f"Agent names must be unique; duplicated: {duplicates}.")
         agents_by_id = dict(agents)
-        self._validate_sidebar_statistics(agents_by_id, sidebar_statistics)
+        self._sidebar_statistics = tuple(sidebar_statistics)
         self._agents = agents_by_id
         self._event_pipeline = event_pipeline
         self.session_repository = session_repository
         self._transcribers = transcribers
         self._detail_level = EventDetailLevel.NORMAL
-        self._sidebar_statistics = dict(sidebar_statistics)
-        self._statistic_modules = self._configured_statistic_modules()
+        self._statistic_modules = self._sidebar_statistics
         self._piper = TextualEventPiper(
             event_pipeline,
             self.post_message,
@@ -166,6 +167,7 @@ class AgentChatApp(App[None]):
                     AgentResponseCompleted,
                     AgentResponseInterrupted,
                     AgentTokenUsageUpdated,
+                    MessageSent,
                     TranscriptEntryAdded,
                     TranscriptEntryUpdated,
                     TranscriptEntryDeleted,
@@ -195,7 +197,7 @@ class AgentChatApp(App[None]):
                 self._event_pipeline,
                 self._transcribers,
                 self._detail_level,
-                sidebar_fields=(self._sidebar_statistics[agent.configuration().id].agent_fields, self._sidebar_statistics[agent.configuration().id].session_fields),
+                sidebar_statistics=self._sidebar_statistics,
                 id=f"chat-content-{index}",
             )
             for index, agent in enumerate(agents_by_id.values())
@@ -214,7 +216,9 @@ class AgentChatApp(App[None]):
         await self._transcribers.start(self.session_repository, self._event_pipeline, self)
         await self._configure_statistics()
         await self._load_repository_sessions()
-        await self._rebuild_all_statistics()
+        for chat in self.chats.values():
+            await chat.sidebar.load(chat.session_name)
+
         self._statistics_ready = True
         self._piper.attach()
         self._subscriptions = [self._piper]
@@ -245,95 +249,11 @@ class AgentChatApp(App[None]):
         for statistic in self._statistic_modules:
             await statistic.teardown()
         await self._transcribers.shutdown()
-
-    def _validate_sidebar_statistics(
-        self,
-        agents: Mapping[UUID, Agent[SessionIdentifier]],
-        statistics: Mapping[UUID, SidebarStatistics],
-    ) -> None:
-        missing = sorted(set(agents).difference(statistics), key=str)
-        unexpected = sorted(set(statistics).difference(agents), key=str)
-        if missing or unexpected:
-            details: list[str] = []
-            if missing:
-                details.append("missing: " + ", ".join(str(agent_id) for agent_id in missing))
-            if unexpected:
-                details.append(
-                    "unexpected: " + ", ".join(str(agent_id) for agent_id in unexpected)
-                )
-            raise ValueError("Sidebar statistics must match configured agents (" + "; ".join(details) + ").")
-
-    def _configured_statistic_modules(self) -> tuple[SidebarStatistic, ...]:
-        """Return every configured module once, preserving configuration order."""
-        modules: list[SidebarStatistic] = []
-        seen: set[int] = set()
-        for statistics in self._sidebar_statistics.values():
-            for statistic in statistics.agent_information + statistics.current_session:
-                if id(statistic) not in seen:
-                    modules.append(statistic)
-                    seen.add(id(statistic))
-        return tuple(modules)
+        await self._delete_unused_sessions()
 
     async def _configure_statistics(self) -> None:
         for statistic in self._statistic_modules:
-            await statistic.configure(
-                self.session_repository,
-                self,
-                self._agents.values(),
-            )
-
-    async def _statistic_context(self, agent_id: UUID):
-        from .widgets.sidebar_statistics import SidebarStatisticContext
-        agent = self._agents[agent_id]
-        active = agent.current_session()
-        metadata = None
-        if active is not None:
-            try:
-                metadata = await self.session_repository.get_session(agent_id, active.name)
-            except SessionNotFoundError:
-                pass
-        return SidebarStatisticContext(agent, active, metadata)
-
-    async def _rebuild_statistics(self, agent_id: UUID) -> None:
-        context = await self._statistic_context(agent_id)
-        try:
-            await self._sidebar_statistics[agent_id].build(context)
-        except SessionNotFoundError:
-            # A queued tab/session rebuild can retain a context whose session
-            # was deleted before its statistic writes complete.  The deletion
-            # handler schedules the replacement scope, so leave this stale
-            # rebuild without publishing a cross-scope map.
-            return
-        agent_values = {item.key: item.value for item in await self.session_repository.agent_statistics_for(agent_id)}
-        session_values: dict[str, str] = {}
-        if context.active_session is not None:
-            session_values = {item.key: item.value for item in await self.session_repository.session_statistics_for(agent_id, context.active_session.name)}
-        pane = self.chats[agent_id]
-        if pane.is_mounted:
-            pane.sidebar.agent_values = agent_values
-            pane.sidebar.session_values = session_values
-
-    async def _rebuild_all_statistics(self) -> None:
-        for agent_id in self._agents:
-            await self._rebuild_statistics(agent_id)
-
-    @on(SaveAgentStatistic)
-    def save_agent_statistic(self, message: SaveAgentStatistic) -> None:
-        agent_id = message.agent.configuration().id
-        if self._agents.get(agent_id) is not message.agent:
-            return
-        pane = self.chats[agent_id]
-        if pane.is_mounted:
-            pane.sidebar.agent_values = {**pane.sidebar.agent_values, message.key: message.value}
-
-    @on(SaveSessionStatistic)
-    def save_session_statistic(self, message: SaveSessionStatistic) -> None:
-        agent_id = message.agent.configuration().id
-        if self._agents.get(agent_id) is not message.agent:
-            return
-        pane = self.chats[agent_id]
-        if pane.is_mounted and message.agent.current_session() is message.session:
-            pane.sidebar.session_values = {**pane.sidebar.session_values, message.key: message.value}
+            await statistic.configure(self.session_repository, self, self._agents.values())
 
     async def action_quit(self) -> None:
         self._stop_event_delivery()
@@ -349,6 +269,31 @@ class AgentChatApp(App[None]):
             self._transcribers.event_transcriber_for(event).request(event)
 
 
+    @on_pairo(MessageSent)
+    async def receive_message_state(self, event: MessageSent) -> None:
+        agent = self._agents.get(event.agent_id)
+        if agent is None:
+            return
+        state = "idle" if event.source == agent.configuration().name else "generating"
+        self._post_agent_state(event.agent_id, state)
+
+    @on_pairo(AgentResponseCompleted)
+    async def receive_completed_state(self, event: AgentResponseCompleted) -> None:
+        self._post_agent_state(event.agent_id, "idle")
+
+    @on_pairo(AgentResponseInterrupted)
+    async def receive_interrupted_state(
+        self, event: AgentResponseInterrupted
+    ) -> None:
+        self._post_agent_state(event.agent_id, "idle")
+
+    @on_pairo(AgentError)
+    async def receive_error_state(self, event: AgentError) -> None:
+        self._post_agent_state(event.agent_id, "idle")
+    def _post_agent_state(self, agent_id: UUID, value: str) -> None:
+        pane = self.chats.get(agent_id)
+        if pane is not None:
+            pane.sidebar.post_message(UpdateAgentStatistic("state", value, agent_id))
     @on_pairo(SessionCreated)
     async def receive_session_created(self, event: SessionCreated) -> None:
         agent = self._agents.get(event.agent_id)
@@ -365,7 +310,7 @@ class AgentChatApp(App[None]):
             if pane is not None:
                 try:
                     await pane.select_session(event.session_name)
-                    await self._rebuild_statistics(event.agent_id)
+
                 except NoMatches:
                     return
 
@@ -375,7 +320,7 @@ class AgentChatApp(App[None]):
         if pane is not None:
             try:
                 await pane.select_session(event.selected_session_name)
-                await self._rebuild_statistics(event.agent_id)
+
             except (NoMatches, SessionNotFoundError):
                 # Deletion events can arrive after teardown or a later deletion.
                 return
@@ -418,7 +363,7 @@ class AgentChatApp(App[None]):
                     event.agent_id, event.session_name
                 )
                 await pane.select_session(event.session_name)
-                await self._rebuild_statistics(event.agent_id)
+
             except (NoMatches, SessionNotFoundError):
                 # A stale navigation request can arrive after deletion or teardown.
                 return
@@ -480,7 +425,7 @@ class AgentChatApp(App[None]):
         tabs = self.query_one("#agent-tabs", TabbedContent)
         agent_id = next((configured_id for configured_id, pane_id in self._pane_ids.items() if pane_id == tabs.active), None)
         if agent_id is not None:
-            self.call_after_refresh(self._rebuild_statistics, agent_id)
+            self.call_after_refresh(self.chats[agent_id].sidebar.load, self.chats[agent_id].session_name)
 
     def select_agent(self, agent_id: UUID) -> None:
         tabs = self.query_one("#agent-tabs", TabbedContent)
@@ -513,6 +458,17 @@ class AgentChatApp(App[None]):
         self._piper.detach()
         self._subscriptions.clear()
 
+    async def _delete_unused_sessions(self):
+        for agent in self._agents.values():
+            sessions = await self.session_repository.sessions_for(agent.configuration().id)
+            for session in sessions:
+                session_data = await self.session_repository.get_session(
+                    agent.configuration().id, session.session_name)
+                if session_data.last_message_at is None:
+                    await self.session_repository.delete_session(
+                        agent.configuration().id, session.session_name
+                )
+
 class UserInterfaceLauncher:
     """Callable entry point for the default Textual interface."""
 
@@ -533,7 +489,7 @@ class UserInterfaceLauncher:
                 event_pipeline,
                 repository,
                 transcribers=(configured.transcribers or default_transcribers()),
-                sidebar_statistics=self._sidebar_statistics(agents, configured),
+                sidebar_statistics=self._sidebar_statistics(configured),
                 commands=self._commands(configured),
             ).run_async()
         finally:
@@ -561,19 +517,12 @@ class UserInterfaceLauncher:
         return defaults + tuple(configuration.commands)
 
     def _sidebar_statistics(
-        self,
-        agents: Mapping[UUID, Agent[SessionIdentifier]],
-        configuration: UserInterfaceConfiguration,
-    ) -> Mapping[UUID, SidebarStatistics]:
+        self, configuration: UserInterfaceConfiguration
+    ) -> tuple[SidebarStatistic, ...]:
         if configuration.sidebar_statistics is not None:
-            return {
-                agent_id: configuration.sidebar_statistics
-                for agent_id in agents
-            }
-        return {
-            agent_id: default_sidebar_statistics(agent)
-            for agent_id, agent in agents.items()
-        }
+            return configuration.sidebar_statistics
+        return create_default_sidebar_statistics()
+    
 
 
 run_ui = UserInterfaceLauncher()

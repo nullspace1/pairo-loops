@@ -136,3 +136,37 @@ def test_repository_async_context_manager_closes_connection() -> None:
             await repository.get_session(agent_id, "s")
 
     asyncio.run(scenario())
+
+
+def test_latest_session_lookup_selects_update_order_and_breaks_ties() -> None:
+    async def scenario() -> None:
+        clock = AdvancingClock()
+        repository = SqliteSessionRepository(clock=clock)
+        agent_id = uuid4()
+
+        assert await repository.latest_session_for(agent_id) is None
+
+        await repository.save_session(agent_id, "first", {"id": 1})
+        await repository.save_session(agent_id, "second", {"id": 2})
+        await repository.save_session(agent_id, "first", {"id": 3})
+
+        latest = await repository.latest_session_for(agent_id)
+        assert latest is not None
+        assert (latest.session_name, latest.identifier) == ("first", {"id": 3})
+        assert [item.session_name for item in await repository.sessions_for(agent_id)] == [
+            "first",
+            "second",
+        ]
+        await repository.close()
+
+        tied_clock = lambda: datetime(2026, 1, 1, tzinfo=timezone.utc)
+        tied_repository = SqliteSessionRepository(clock=tied_clock)
+        await tied_repository.save_session(agent_id, "earlier", {"id": 1})
+        await tied_repository.save_session(agent_id, "later", {"id": 2})
+
+        tied_latest = await tied_repository.latest_session_for(agent_id)
+        assert tied_latest is not None
+        assert tied_latest.session_name == "later"
+        await tied_repository.close()
+
+    asyncio.run(scenario())

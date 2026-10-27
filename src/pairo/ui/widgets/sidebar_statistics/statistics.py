@@ -1,64 +1,40 @@
-"""Collections of app-owned sidebar statistics."""
+"""Shared ordered sidebar-statistic definitions."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from collections.abc import Iterable, Sequence
-from textual.app import App
+from collections.abc import Sequence
 
-from pairo.core.agent import SessionIdentifier
-from pairo.core.clients import Agent
-from pairo.ui.session_repository import SessionRepository
-from .statistic import SidebarStatistic, SidebarStatisticContext
+from .statistic import SidebarFieldDefinition, SidebarStatistic, SidebarStatisticCategory
 
 
-@dataclass(frozen=True, slots=True)
-class SidebarFieldDefinition:
-    key: str
-    label: str
+class SidebarStatisticFields:
+    """Derive ordered sidebar fields from the shared statistic sequence."""
 
-
-@dataclass(frozen=True)
-class SidebarStatistics:
-    agent_information: tuple[SidebarStatistic, ...]
-    current_session: tuple[SidebarStatistic, ...]
-
-    def __post_init__(self) -> None:
-        all_statistics = self.agent_information + self.current_session
-        keys = [statistic.key for statistic in all_statistics]
+    def __init__(self, statistics: Sequence[SidebarStatistic]) -> None:
+        self._statistics = tuple(statistics)
+        keys = tuple(statistic.key for statistic in self._statistics)
         duplicates = sorted({key for key in keys if keys.count(key) > 1})
         if duplicates:
-            raise ValueError("Duplicate sidebar statistic keys (duplicate ownership): " + ", ".join(duplicates))
-        owners = [id(statistic) for statistic in all_statistics]
+            raise ValueError("Duplicate sidebar statistic keys: " + ", ".join(duplicates))
+        owners = tuple(id(statistic) for statistic in self._statistics)
         if len(owners) != len(set(owners)):
-            raise ValueError("A sidebar statistic may have only one owner.")
+            raise ValueError("A sidebar statistic may appear only once.")
 
     @property
     def agent_fields(self) -> tuple[SidebarFieldDefinition, ...]:
-        return tuple(SidebarFieldDefinition(item.key, item.label) for item in self.agent_information)
+        return self._fields(SidebarStatisticCategory.AGENT)
 
     @property
     def session_fields(self) -> tuple[SidebarFieldDefinition, ...]:
-        return tuple(SidebarFieldDefinition(item.key, item.label) for item in self.current_session)
+        return self._fields(SidebarStatisticCategory.SESSION)
 
-    async def configure(
-        self,
-        repository: SessionRepository,
-        app: App[None],
-        agents: Iterable[Agent[SessionIdentifier]],
-    ) -> None:
-        configured_agents = tuple(agents)
-        for statistic in self.agent_information + self.current_session:
-            await statistic.configure(repository, app, configured_agents)
+    def _fields(
+        self, category: SidebarStatisticCategory
+    ) -> tuple[SidebarFieldDefinition, ...]:
+        return tuple(
+            statistic.field
+            for statistic in self._statistics
+            if statistic.category is category
+        )
 
-    async def build(self, context: SidebarStatisticContext) -> None:
-        for statistic in self.agent_information + self.current_session:
-            await statistic.build(context)
 
-    async def teardown(self) -> None:
-        for statistic in self.agent_information + self.current_session:
-            await statistic.teardown()
-
-    def post(self, message: object) -> None:
-        for statistic in self.agent_information + self.current_session:
-            if hasattr(message, "_prevent"):
-                statistic.post_message(message)  # type: ignore[arg-type]
+__all__ = ["SidebarFieldDefinition", "SidebarStatisticFields"]

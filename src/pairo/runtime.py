@@ -47,8 +47,10 @@ class RuntimeLauncher:
         try:
             startup_results = await asyncio.gather(
                 *(
-                    agent.new_session(initial_session_name)
-                    for agent in self._agents.values()
+                    self._activate_or_create_session(
+                        agent_id, agent, initial_session_name
+                    )
+                    for agent_id, agent in self._agents.items()
                 ),
                 return_exceptions=True,
             )
@@ -63,6 +65,8 @@ class RuntimeLauncher:
             if startup_failure is not None:
                 raise startup_failure
             for agent_id, result in zip(self._agents, startup_results):
+                if result is None:
+                    continue
                 active = cast(ActiveSession[SessionIdentifier], result)
                 await self._session_repository.save_session(
                     agent_id,
@@ -76,6 +80,21 @@ class RuntimeLauncher:
             )
         finally:
             await self._close_resources()
+
+    async def _activate_or_create_session(
+        self,
+        agent_id: UUID,
+        agent: Agent[SessionIdentifier],
+        fallback_session_name: str,
+    ) -> ActiveSession[SessionIdentifier] | None:
+        try:
+            latest = await self._session_repository.latest_session_for(agent_id)
+            if latest is not None:
+                await agent.activate_session(latest.session_name, latest.identifier)
+                return None
+            return await agent.new_session(fallback_session_name)
+        except Exception:
+            return await agent.new_session(fallback_session_name)
 
     async def _close_resources(self) -> None:
         try:

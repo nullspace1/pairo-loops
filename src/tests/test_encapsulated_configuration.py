@@ -12,7 +12,6 @@ from pairo.core.mcp.servers import StdioMCPServer
 from pairo.mcp._agent_configuration import MCPServerAttacher
 from pairo.runtime import RuntimeLauncher
 from pairo.ui.widgets.sidebar_statistics.default_sidebar_statistics import (
-    DefaultSidebarStatisticsFactory,
     TimestampFormatter,
     default_sidebar_statistics,
     format_time,
@@ -47,6 +46,9 @@ class _Agent:
 class _Repository:
     def __init__(self, calls: list[str]) -> None:
         self.calls = calls
+
+    async def latest_session_for(self, _agent_id):
+        return None
 
     async def save_session(self, _agent_id, name, _identifier) -> None:
         self.calls.append(f"save:{name}")
@@ -106,36 +108,15 @@ def test_mcp_server_attacher_attaches_its_injected_server() -> None:
     assert agent.mcp_servers == (server,)
 
 
-def test_default_statistics_factory_and_formatters_keep_legacy_behavior() -> None:
-    agent = AgentConfiguration(
-        id=uuid4(),
-        name="developer",
-        model="test",
-        sandbox=SandboxPermission.READ_ONLY,
-        workspace=Path.cwd(),
-    )
+def test_default_statistics_are_shared_and_formatters_keep_behavior() -> None:
     timestamp = datetime(2026, 10, 15, 12, 30, 45, tzinfo=UTC)
-    runtime_agent = _Agent([], agent)
-    statistics = DefaultSidebarStatisticsFactory(runtime_agent).build()
 
-    assert [statistic.key for statistic in statistics.agent_information][-1] == (
-        "mcp_servers"
-    )
-    assert [statistic.key for statistic in statistics.current_session] == [
-        "session_name",
-        "created",
-        "last_message",
-        "last_update",
-        "token_usage",
+    assert [statistic.key for statistic in default_sidebar_statistics][-1] == "token_usage"
+    assert [statistic.key for statistic in default_sidebar_statistics if statistic.category.value == "session"] == [
+        "session_name", "created", "last_message", "last_update", "token_usage",
     ]
     local_timestamp = timestamp.astimezone()
     offset = local_timestamp.strftime("%z")
-    expected_timestamp = (
-        f"{local_timestamp:%Y-%m-%d %H:%M:%S} {offset[:3]}:{offset[3:]}"
-    )
+    expected_timestamp = f"{local_timestamp:%Y-%m-%d %H:%M:%S} {offset[:3]}:{offset[3:]}"
     assert TimestampFormatter().format(timestamp) == expected_timestamp
     assert format_time(timestamp) == TimestampFormatter().format(timestamp)
-    assert [
-        statistic.key
-        for statistic in default_sidebar_statistics(runtime_agent).agent_information
-    ] == [statistic.key for statistic in statistics.agent_information]

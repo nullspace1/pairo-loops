@@ -1,9 +1,9 @@
-"""Textual message-pump sidebar statistic primitives."""
+"""Scoped sidebar statistic primitives."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
-from collections.abc import Iterable
 from uuid import UUID
 
 from textual.app import App
@@ -11,9 +11,12 @@ from textual.message import Message
 from textual.message_pump import MessagePump
 
 from pairo.core.agent import SessionIdentifier
-from pairo.core.clients import ActiveSession, Agent
-from pairo.ui.models import SessionMetadata
-from pairo.ui.session_repository import SessionRepository, StatisticValue
+from pairo.core.clients import Agent
+from pairo.ui.session_repository import (
+    SessionNotFoundError,
+    SessionRepository,
+    StatisticValue,
+)
 
 
 class SidebarStatisticCategory(StrEnum):
@@ -21,39 +24,54 @@ class SidebarStatisticCategory(StrEnum):
     SESSION = "session"
 
 
-@dataclass(frozen=True)
-class SidebarStatisticContext:
-    agent: Agent[SessionIdentifier]
-    active_session: ActiveSession[SessionIdentifier] | None
-    session: SessionMetadata | None
+@dataclass(frozen=True, slots=True)
+class SidebarFieldDefinition:
+    """The stable display definition derived from one statistic."""
 
-    @property
-    def session_name(self) -> str | None:
-        return None if self.active_session is None else self.active_session.name
+    key: str
+    label: str
 
 
-class SaveAgentStatistic(Message, bubble=False):
-    def __init__(self, key: str, value: str, agent: Agent[SessionIdentifier]) -> None:
-        self.key, self.value, self.agent = key, value, agent
+class UpdateAgentStatistic(Message, bubble=False):
+    """A persisted agent-scoped value is ready for the matching sidebar."""
+
+    def __init__(self, key: str, value: str | None, agent_id: UUID) -> None:
+        self.key = key
+        self.value = value
+        self.agent_id = agent_id
         super().__init__()
 
 
-class SaveSessionStatistic(Message, bubble=False):
-    def __init__(self, key: str, value: str, agent: Agent[SessionIdentifier], session: ActiveSession[SessionIdentifier]) -> None:
-        self.key, self.value, self.agent, self.session = key, value, agent, session
+class UpdateSessionStatistic(Message, bubble=False):
+    """A persisted session-scoped value is ready for the matching sidebar."""
+
+    def __init__(
+        self, key: str, value: str | None, agent_id: UUID, session_name: str
+    ) -> None:
+        self.key = key
+        self.value = value
+        self.agent_id = agent_id
+        self.session_name = session_name
         super().__init__()
 
 
 class SidebarStatistic(MessagePump):
-    """One app-owned, repository-backed statistic message pump."""
+    """One shared statistic with scoped durable reads and explicit updates."""
 
     def __init__(self, key: str, label: str, category: SidebarStatisticCategory) -> None:
         super().__init__()
-        self.key, self.label, self.category = key, label, category
-        self._statistic_contexts: dict[UUID, SidebarStatisticContext] = {}
+        if not key.strip():
+            raise ValueError("Sidebar statistic key cannot be empty.")
+        self.key = key
+        self.label = label
+        self.category = category
         self._repository: SessionRepository | None = None
         self._configured_agents: dict[UUID, Agent[SessionIdentifier]] = {}
         self._connected = False
+
+    @property
+    def field(self) -> SidebarFieldDefinition:
+        return SidebarFieldDefinition(self.key, self.label)
 
     async def configure(
         self,
@@ -61,10 +79,8 @@ class SidebarStatistic(MessagePump):
         app: App[None],
         agents: Iterable[Agent[SessionIdentifier]],
     ) -> None:
-        """Attach this pump once to its owning app and configured agent set."""
-        configured_agents = {
-            agent.configuration().id: agent for agent in agents
-        }
+        """Attach the shared statistic to its repository, app, and agent lookup."""
+        configured_agents = {agent.configuration().id: agent for agent in agents}
         if self._connected:
             if (
                 self._repository is repository
@@ -73,89 +89,91 @@ class SidebarStatistic(MessagePump):
             ):
                 return
             raise RuntimeError("Sidebar statistic already has an owner.")
-        self._repository, self._configured_agents, self._parent = (
-            repository,
-            configured_agents,
-            app,
-        )
+        self._repository = repository
+        self._configured_agents = configured_agents
+        self._parent = app
         self._connected = True
         self._start_messages()
 
-    async def build(self, context: SidebarStatisticContext) -> None:
-        """Compute and commit this statistic for a lifecycle snapshot.
+    async def value(self, agent_id: UUID, session_name: str | None) -> str | None:
+        """Read the latest durable rendered value for one supplied scope.
 
-        Build is deliberately silent: sidebar maps are reloaded by the app after
-        every deterministic build pass.
+        Reads are deliberately side-effect free: selection/navigation cannot
+        create or overwrite statistic rows.
         """
-        self._require_context_owner(context)
-        self._statistic_contexts[context.agent.configuration().id] = context
-        if await self.has_initial_value(context):
-            await self._persist(await self.compute(context), context, post=False)
+        repository = self._require_repository()
+        self._require_configured_agent(agent_id)
+        if self.category is SidebarStatisticCategory.AGENT:
+            return self._value_for(await repository.agent_statistics_for(agent_id))
+        if session_name is None:
+            return None
+        return self._value_for(
+            await repository.session_statistics_for(agent_id, session_name)
+        )
 
-    async def has_initial_value(self, context: SidebarStatisticContext) -> bool:
-        """Whether this build owns an authoritative durable value.
+    async def update_agent(self, agent_id: UUID, value: str | None) -> None:
+        """Persist and publish an explicit agent-scoped update."""
+        if self.category is not SidebarStatisticCategory.AGENT:
+            raise ValueError("A session statistic cannot be updated for an agent.")
+        repository = self._require_repository()
+        self._require_configured_agent(agent_id)
+        if value is None:
+            await repository.remove_agent_statistic(agent_id, self.key)
+        else:
+            await repository.upsert_agent_statistic(
+                agent_id, StatisticValue(self.key, value)
+            )
+        self.app.post_message(UpdateAgentStatistic(self.key, value, agent_id))
 
-        Stateful statistics may return ``False`` to preserve an existing value
-        until a live event provides new data.
-        """
-        return True
-
-    async def refresh(self, context: SidebarStatisticContext) -> None:
-        """Commit a live event update before notifying the active sidebar."""
-        if not self._connected:
-            return
-        self._require_context_owner(context)
-        await self._persist(await self.compute(context), context, post=True)
+    async def update_session(
+        self, agent_id: UUID, session_name: str, value: str | None
+    ) -> None:
+        """Persist and publish an explicit session-scoped update."""
+        if self.category is not SidebarStatisticCategory.SESSION:
+            raise ValueError("An agent statistic cannot be updated for a session.")
+        repository = self._require_repository()
+        self._require_configured_agent(agent_id)
+        if value is None:
+            await repository.remove_session_statistic(agent_id, session_name, self.key)
+        else:
+            await repository.upsert_session_statistic(
+                agent_id, session_name, StatisticValue(self.key, value)
+            )
+        self.app.post_message(
+            UpdateSessionStatistic(self.key, value, agent_id, session_name)
+        )
 
     async def teardown(self) -> None:
         if self._connected:
             self._connected = False
             await self._close_messages()
 
-    async def compute(self, context: SidebarStatisticContext) -> object | None:
-        raise NotImplementedError
+    def configured_agent(self, agent_id: UUID) -> Agent[SessionIdentifier]:
+        """Return an agent from the immutable configuration lookup."""
+        return self._require_configured_agent(agent_id)
 
-    def _require_context_owner(self, context: SidebarStatisticContext) -> None:
-        agent_id = context.agent.configuration().id
-        if (
-            not self._connected
-            or self._configured_agents.get(agent_id) is not context.agent
-        ):
-            raise RuntimeError("Sidebar statistic is not configured for this agent.")
-
-    def _context_for(self, agent_id: UUID) -> SidebarStatisticContext | None:
-        return self._statistic_contexts.get(agent_id)
-
-    async def _persist(
-        self,
-        value: object | None,
-        context: SidebarStatisticContext,
-        *,
-        post: bool,
-    ) -> None:
-        repository = self._repository
-        if repository is None:
+    def _require_repository(self) -> SessionRepository:
+        if self._repository is None:
             raise RuntimeError("Sidebar statistic is not configured.")
-        agent_id = context.agent.configuration().id
-        if self.category is SidebarStatisticCategory.AGENT:
-            if value is None:
-                await repository.remove_agent_statistic(agent_id, self.key)
-                return
-            rendered = str(value)
-            await repository.upsert_agent_statistic(agent_id, StatisticValue(self.key, rendered))
-            if post:
-                self.app.post_message(SaveAgentStatistic(self.key, rendered, context.agent))
-            return
-        session = context.active_session
-        if session is None:
-            return
-        if value is None:
-            await repository.remove_session_statistic(agent_id, session.name, self.key)
-            return
-        rendered = str(value)
-        await repository.upsert_session_statistic(agent_id, session.name, StatisticValue(self.key, rendered))
-        if post:
-            self.app.post_message(SaveSessionStatistic(self.key, rendered, context.agent, session))
+        return self._repository
+
+    def _require_configured_agent(self, agent_id: UUID) -> Agent[SessionIdentifier]:
+        agent = self._configured_agents.get(agent_id)
+        if not self._connected or agent is None:
+            raise RuntimeError("Sidebar statistic is not configured for this agent.")
+        return agent
+
+    def _value_for(self, values: tuple[StatisticValue, ...]) -> str | None:
+        for value in values:
+            if value.key == self.key:
+                return value.value
+        return None
 
 
-__all__ = ["SaveAgentStatistic", "SaveSessionStatistic", "SidebarStatistic", "SidebarStatisticCategory", "SidebarStatisticContext"]
+__all__ = [
+    "SidebarFieldDefinition",
+    "SidebarStatistic",
+    "SidebarStatisticCategory",
+    "UpdateAgentStatistic",
+    "UpdateSessionStatistic",
+]

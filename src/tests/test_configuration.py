@@ -1,11 +1,12 @@
 """Agent configuration mutation and validation tests."""
 
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from pydantic import ValidationError
 
+from pairo.core.agent.agent import AGENT_ID_NAMESPACE
 from pairo.core.agent import (
     AgentConfiguration,
     ApprovalMode,
@@ -43,8 +44,9 @@ def test_agent_defaults_identity_and_collection_isolation(tmp_path: Path) -> Non
     differently_named = make_agent(tmp_path, name="other agent")
 
     assert isinstance(first.id, UUID)
-    assert first.id != equivalent.id
-    assert first.id != second.id
+    assert first.id == equivalent.id
+    assert first.id == uuid5(AGENT_ID_NAMESPACE, "agent")
+    assert first.id == second.id
     assert first.id != differently_named.id
     assert first.name == "agent"
     assert first.workspace == tmp_path.resolve()
@@ -64,6 +66,14 @@ def test_agent_defaults_identity_and_collection_isolation(tmp_path: Path) -> Non
         first.id = second.id
     with pytest.raises(ValidationError, match="frozen"):
         first.model = "direct-assignment"
+
+
+def test_agent_preserves_explicit_identity(tmp_path: Path) -> None:
+    supplied_id = uuid4()
+
+    agent = make_agent(tmp_path, id=supplied_id)
+
+    assert agent.id == supplied_id
 
 
 def test_agent_name_is_required_to_derive_its_id(tmp_path: Path) -> None:

@@ -62,7 +62,12 @@ async def run_async() -> None:
     )
     try:
         await spec_manager.boot_up()
-        await run_agents(agents, pipeline, repository)
+        await run_agents(
+            agents,
+            pipeline,
+            repository,
+            initial_session_name="Agentic Loops",
+        )
     finally:
         await event_log.close()
         await spec_manager.close()

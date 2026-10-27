@@ -21,7 +21,7 @@ from .models import (
     TranscriptEntry,
     TranscriptMetadata,
 )
-from .session_repository import SessionNotFoundError, StatisticValue
+from .session_repository import SessionNameConflictError, SessionNotFoundError, StatisticValue
 
 
 def _utc_now() -> datetime:
@@ -282,6 +282,23 @@ class SqliteSessionRepository:
         )
         return tuple(self._metadata_from(row) for row in await cursor.fetchall())
 
+    async def latest_session_for(self, agent_id: UUID) -> SessionMetadata | None:
+        """Return the most recently updated session, breaking ties by creation order."""
+        connection = await self._connect()
+        cursor = await connection.execute(
+            """
+            SELECT agent_id, session_name, identifier_json, created_at,
+                   last_message_at, last_updated_at
+            FROM sessions
+            WHERE agent_id = ?
+            ORDER BY last_updated_at DESC, session_order DESC
+            LIMIT 1
+            """,
+            (str(agent_id),),
+        )
+        row = await cursor.fetchone()
+        return self._metadata_from(row) if row is not None else None
+
     async def delete_session(self, agent_id: UUID, session_name: str) -> None:
         """Delete a session and its transcript in one committed operation."""
         connection = await self._connect()
@@ -328,6 +345,30 @@ class SqliteSessionRepository:
             (str(agent_id), statistic.key, statistic.value),
         )
         await connection.commit()
+
+    async def rename_session(
+        self, agent_id: UUID, old_name: str, new_name: str
+    ) -> SessionMetadata:
+        """Atomically move a session and its dependent durable rows to a new name."""
+        old_name = self._require_value(old_name, "old_name")
+        new_name = self._require_value(new_name, "new_name")
+        connection = await self._connect()
+        async with self.connection_lock:
+            try:
+                await connection.execute("BEGIN IMMEDIATE")
+                source = await self._session_row(agent_id, old_name)
+                if old_name != new_name:
+                    await self._reject_registered_target(agent_id, new_name)
+                    await connection.execute(
+                        "UPDATE sessions SET session_name = ? WHERE agent_id = ? AND session_name = ?",
+                        (new_name, str(agent_id), old_name),
+                    )
+                    source = await self._session_row(agent_id, new_name)
+                await connection.commit()
+            except BaseException:
+                await connection.rollback()
+                raise
+        return self._metadata_from(source)
 
     async def remove_agent_statistic(self, agent_id: UUID, key: str) -> None:
         connection = await self._connect()
@@ -450,7 +491,7 @@ class SqliteSessionRepository:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (agent_id, session_name)
                     REFERENCES sessions (agent_id, session_name)
-                    ON DELETE CASCADE,
+                    ON DELETE CASCADE ON UPDATE CASCADE,
                 UNIQUE (agent_id, session_name, entry_id)
             );
 
@@ -473,7 +514,7 @@ class SqliteSessionRepository:
                 statistic_value TEXT NOT NULL,
                 FOREIGN KEY (agent_id, session_name)
                     REFERENCES sessions (agent_id, session_name)
-                    ON DELETE CASCADE,
+                    ON DELETE CASCADE ON UPDATE CASCADE,
                 UNIQUE (agent_id, session_name, statistic_key)
             );
 
@@ -481,6 +522,16 @@ class SqliteSessionRepository:
                 ON session_statistics (agent_id, session_name, statistic_order);
             """
         )
+        try:
+            await connection.execute("BEGIN IMMEDIATE")
+            await SqliteSessionRepository._migrate_rename_foreign_keys(connection)
+            errors = await (await connection.execute("PRAGMA foreign_key_check")).fetchall()
+            if errors:
+                raise RuntimeError("The session database has invalid foreign-key relationships.")
+            await connection.commit()
+        except BaseException:
+            await connection.rollback()
+            raise
         cursor = await connection.execute("PRAGMA table_info(transcript_entries)")
         columns = {row[1] for row in await cursor.fetchall()}
         required = {"entry_id", "metadata_json"}
@@ -491,6 +542,71 @@ class SqliteSessionRepository:
             )
         await connection.commit()
 
+    @staticmethod
+    async def _migrate_rename_foreign_keys(connection: aiosqlite.Connection) -> None:
+        """Upgrade compatible child tables to cascade composite-key updates."""
+        if not await SqliteSessionRepository._has_cascading_session_rename(
+            connection, "transcript_entries"
+        ):
+            await connection.execute(
+                """CREATE TABLE transcript_entries_for_rename (
+                    entry_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_id TEXT NOT NULL, agent_id TEXT NOT NULL, session_name TEXT NOT NULL,
+                    role TEXT NOT NULL, content TEXT NOT NULL,
+                    detail_level TEXT NOT NULL CHECK (detail_level IN ('normal', 'debug')),
+                    metadata_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                    FOREIGN KEY (agent_id, session_name) REFERENCES sessions (agent_id, session_name)
+                        ON DELETE CASCADE ON UPDATE CASCADE,
+                    UNIQUE (agent_id, session_name, entry_id)
+                )"""
+            )
+            await connection.execute(
+                """INSERT INTO transcript_entries_for_rename
+                    SELECT entry_order, entry_id, agent_id, session_name, role, content,
+                           detail_level, metadata_json, created_at FROM transcript_entries"""
+            )
+            await connection.execute("DROP TABLE transcript_entries")
+            await connection.execute(
+                "ALTER TABLE transcript_entries_for_rename RENAME TO transcript_entries"
+            )
+            await connection.execute(
+                "CREATE INDEX transcript_session_order "
+                "ON transcript_entries (agent_id, session_name, entry_order)"
+            )
+        if not await SqliteSessionRepository._has_cascading_session_rename(
+            connection, "session_statistics"
+        ):
+            await connection.execute(
+                """CREATE TABLE session_statistics_for_rename (
+                    statistic_order INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id TEXT NOT NULL, session_name TEXT NOT NULL,
+                    statistic_key TEXT NOT NULL CHECK (length(statistic_key) > 0),
+                    statistic_value TEXT NOT NULL,
+                    FOREIGN KEY (agent_id, session_name) REFERENCES sessions (agent_id, session_name)
+                        ON DELETE CASCADE ON UPDATE CASCADE,
+                    UNIQUE (agent_id, session_name, statistic_key)
+                )"""
+            )
+            await connection.execute(
+                """INSERT INTO session_statistics_for_rename
+                    SELECT statistic_order, agent_id, session_name, statistic_key, statistic_value
+                    FROM session_statistics"""
+            )
+            await connection.execute("DROP TABLE session_statistics")
+            await connection.execute(
+                "ALTER TABLE session_statistics_for_rename RENAME TO session_statistics"
+            )
+            await connection.execute(
+                "CREATE INDEX session_statistic_order "
+                "ON session_statistics (agent_id, session_name, statistic_order)"
+            )
+
+    @staticmethod
+    async def _has_cascading_session_rename(
+        connection: aiosqlite.Connection, table_name: str
+    ) -> bool:
+        rows = await (await connection.execute(f"PRAGMA foreign_key_list({table_name})")).fetchall()
+        return any(row[2] == "sessions" and row[5] == "CASCADE" for row in rows)
     async def _session_row(self, agent_id: UUID, session_name: str) -> sqlite3.Row:
         connection = await self._connect()
         cursor = await connection.execute(
@@ -511,6 +627,17 @@ class SqliteSessionRepository:
 
     async def _require_registered(self, agent_id: UUID, session_name: str) -> None:
         await self._session_row(agent_id, session_name)
+
+    async def _reject_registered_target(self, agent_id: UUID, session_name: str) -> None:
+        connection = await self._connect()
+        cursor = await connection.execute(
+            "SELECT 1 FROM sessions WHERE agent_id = ? AND session_name = ?",
+            (str(agent_id), session_name),
+        )
+        if await cursor.fetchone() is not None:
+            raise SessionNameConflictError(
+                f"Session '{session_name}' is already registered for agent '{agent_id}'."
+            )
 
     def _timestamp(self) -> str:
         value = self._clock()

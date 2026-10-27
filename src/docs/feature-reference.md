@@ -237,8 +237,12 @@ configuration. Individual linked directories cannot use
 `DANGER_FULL_ACCESS`; on Windows, link creation falls back to a directory
 junction when symbolic-link privilege is unavailable.
 
-`run_agents(agents, pipeline, repository)` validates the UUID mapping, creates
-and persists initial sessions concurrently, launches the UI, and closes agents
+`run_agents(agents, pipeline, repository)` validates the UUID mapping and,
+concurrently for every agent, resumes the repository's latest durable session
+when one exists. Resuming preserves the durable session name and provider
+identifier without rewriting its metadata. When an agent has no durable
+session, it creates and persists one using `initial_session_name` (default:
+`"Conversation 1"`) as the fallback name. It launches the UI and closes agents
 and the repository even when startup or the UI fails. It does not bind or close
 the pipeline.
 
@@ -323,90 +327,39 @@ cleanup when it is the caller.
 
 ## Sidebar statistics
 
-Custom sidebar fields are now Textual message pumps rather than polling
-providers. Replace an implementation of `SidebarStatisticProvider` with a
-`SidebarStatistic` subclass, pass its stable key, label, and
-`SidebarStatisticCategory` to `super().__init__`, and implement
-`async compute(context)`. Do not subscribe to `EventPipeline` or implement the
-old `statistic(context)` method. `AgentChatApp` owns each configured statistic,
-configures each distinct module once with the repository, app, and configured
-agent set, and tears it down when the app exits. A module may serve multiple
-agents; it keeps per-agent contexts and the app preserves agent/session
-scoping. The app supplies a `SidebarStatisticContext` containing the exact
-agent, active session, and persisted session metadata.
+Sidebar statistics are one ordered shared sequence for the complete UI launch.
+Pass that sequence to `UserInterfaceConfiguration.use_sidebar_statistics`; the
+launcher supplies a fresh shared default sequence when none is configured.
+Category and render order are defined by each statistic's
+`SidebarStatisticCategory`. Keys and statistic instances must be unique.
 
-The lifecycle answers: **who computes, persists, and renders a sidebar value?**
+Each `SidebarStatistic` is configured once with its repository, the Textual app,
+and the configured-agent lookup. Its typed `value(agent_id, session_name)` read
+returns the currently rendered value for that scope without writing data. A
+`FixedStatistic` obtains agent data through that lookup and session metadata
+from its repository. Event-driven subclasses own persistence and use
+`update_agent` or `update_session`; those methods persist first and post the
+corresponding scalar `Update*Statistic` message.
 
-```mermaid
-sequenceDiagram
-    participant App as AgentChatApp
-    participant Stat as SidebarStatistic
-    participant Repo as SessionRepository
-    participant Side as AgentSidebar
-    App->>Stat: configure(repository, app, agents) once
-    loop lifecycle rebuild
-        App->>Stat: build(context)
-        Stat->>Repo: persist or remove owned value
-        App->>Repo: load ordered agent/session maps
-        App->>Side: assign render-only maps
-    end
-    Note over Stat,Repo: Live refresh persists before notifying the UI
-    Stat->>Repo: upsert or remove value
-    Stat-->>App: SaveAgentStatistic or SaveSessionStatistic
-    App->>Side: update matching active map
-```
-
-`build(context)` is an initial or reload hook and is intentionally silent;
-`AgentChatApp` reloads committed repository values after the configured
-statistics build in deterministic order. Live event handlers call `refresh()`;
-the statistic persists first and then optionally posts a scoped save message.
-Stateful statistics can override `has_initial_value(context)` and return
-`False` when they have no authoritative value for that context; this preserves
-the repository value until a live event supplies one. For example, token usage
-does not replace persisted usage with an empty-cache placeholder during reload.
-`AgentSidebar` and `AgentChatPane` only render the field definitions and maps;
-they do not configure statistics, dispatch events, or write the repository.
-
-For a callback-backed value, use `FixedStatistic` instead of writing a
-subclass:
+`AgentSidebar` owns only its visible agent/session maps. It loads them through
+statistic values on mounting and navigation, accepts an update only for a known
+key in its own agent and selected-session scope, and ignores stale updates.
+`AgentChatApp` configures/delivers events to statistics but never reads or
+writes statistic rows or mutates sidebar maps. No statistic build/rebuild,
+retained context, polling, or timer lifecycle exists.
 
 ```python
-from pairo.ui import UserInterfaceConfiguration
-from pairo.ui.widgets.sidebar_statistics import (
-    FixedStatistic,
-    SidebarStatisticContext,
-    SidebarStatistics,
+from pairo.ui.widgets.sidebar_statistics import FixedStatistic, SidebarStatisticCategory
+
+async def agent_workspace(agent, _session):
+    return str(agent.configuration().workspace)
+
+statistics = (
+    FixedStatistic("workspace", "Workspace", agent_workspace),
+    FixedStatistic("session", "Session", session_value, SidebarStatisticCategory.SESSION),
 )
-
-
-async def agent_workspace(context: SidebarStatisticContext) -> str:
-    return str(context.agent.configuration().workspace)
-
-
-statistics = SidebarStatistics(
-    agent_information=(
-        FixedStatistic("workspace", "Workspace", agent_workspace),
-    ),
-    current_session=(),
-)
-configuration = UserInterfaceConfiguration().use_sidebar_statistics(statistics)
+configuration.use_sidebar_statistics(statistics)
 ```
-
-`use_sidebar_statistics` replaces the complete default collection. Put fields
-in `agent_information` or `current_session` in display order, use
-`SidebarStatisticCategory.SESSION` for session `FixedStatistic` values, and
-keep keys unique within each category. A computed value of `None` is omitted.
-When configuring multiple agents, a shared configured module is supported and
-is connected once for the complete agent set. Duplicate keys or duplicate
-module ownership within one `SidebarStatistics` collection are rejected.
-
-For an event-driven field, add typed `@on_pairo(...)` handlers to the
-`SidebarStatistic` subclass. A relevant handler updates the statistic's owned
-state and awaits `refresh()`; the base class recomputes with the active context
-and posts the correctly scoped agent or session save message. Do not manually
-post `SaveAgentStatistic` or `SaveSessionStatistic`, and do not recreate the
-removed 250 ms polling loop.
-
 ## Constraints
 
 - Python 3.10 or newer.

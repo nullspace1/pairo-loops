@@ -13,6 +13,10 @@ class SessionNotFoundError(LookupError):
     pass
 
 
+class SessionNameConflictError(ValueError):
+    """Raised when a rename target is already registered for an agent."""
+
+
 @dataclass(frozen=True, slots=True)
 class StatisticValue:
     """One durable, display-ready sidebar value identified by its statistic key."""
@@ -56,7 +60,13 @@ class SessionRepository(Protocol):
 
     async def sessions_for(self, agent_id: UUID) -> tuple[SessionMetadata, ...]: ...
 
+    async def latest_session_for(self, agent_id: UUID) -> SessionMetadata | None: ...
+
     async def delete_session(self, agent_id: UUID, session_name: str) -> None: ...
+
+    async def rename_session(
+        self, agent_id: UUID, old_name: str, new_name: str
+    ) -> SessionMetadata: ...
 
     async def session_for_identifier(
         self, identifier: JsonObject

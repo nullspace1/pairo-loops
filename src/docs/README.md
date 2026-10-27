@@ -30,8 +30,11 @@ flowchart LR
     UI -->|persists sessions and transcripts| Repository[SessionRepository]
 ```
 
-`run_agents` creates initial sessions, persists their metadata, launches the
-Textual UI, and closes agents and the repository on exit. Each agent owns only
+`run_agents` resumes each agent's most recently updated durable session when
+one exists, preserving that session's provider identifier. For an agent with
+no durable sessions, it creates and persists a fallback named by
+`initial_session_name` (default: `"Conversation 1"`). It then launches the
+Textual UI and closes agents and the repository on exit. Each agent owns only
 its active provider session. `EventPipeline` broadcasts in-process events but
 does not retain or replay them; the repository is the durable session,
 transcript, and sidebar-statistic boundary.

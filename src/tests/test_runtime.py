@@ -1,8 +1,9 @@
 """Tests for the high-level asynchronous agent application lifecycle."""
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -14,8 +15,9 @@ from pairo.core.events import EventPipeline
 from pairo.ui import SlashCommand, app as ui_app
 from pairo.ui.app import AgentChatApp, UserInterfaceLauncher
 from pairo.ui.configuration import UserInterfaceConfiguration
+from pairo.ui.models import SessionMetadata
 from pairo.ui.transcribers import default_transcribers
-from pairo.ui.widgets.sidebar_statistics import default_sidebar_statistics
+from pairo.ui.widgets.sidebar_statistics import create_default_sidebar_statistics, default_sidebar_statistics
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
 from pairo.ui.navigation_events import AgentSwitchRequested
 
@@ -50,6 +52,13 @@ class StubAgent:
             identifier=FakeSessionIdentifier(session_id="session-1"),
         )
 
+    async def activate_session(self, name: str, identifier):
+        self.calls.append(f"activate:{name}:{identifier['session_id']}")
+        return ActiveSession(
+            name=name,
+            identifier=FakeSessionIdentifier.model_validate(identifier),
+        )
+
     async def close(self) -> None:
         self.calls.append("close:agent")
 
@@ -57,6 +66,10 @@ class StubAgent:
 class StubRepository:
     def __init__(self, calls: list[str]) -> None:
         self.calls = calls
+        self.latest_sessions: dict[UUID, SessionMetadata] = {}
+
+    async def latest_session_for(self, agent_id):
+        return self.latest_sessions.get(agent_id)
 
     async def save_session(self, _agent_id, name, _identifier) -> None:
         self.calls.append(f"save:{name}")
@@ -99,7 +112,7 @@ class QuittingTextualLauncher:
         app = AgentChatApp(
             agents, pipeline, repository,
             transcribers=default_transcribers(),
-            sidebar_statistics={agent_id: default_sidebar_statistics(agent) for agent_id, agent in agents.items()},
+            sidebar_statistics=create_default_sidebar_statistics(),
             commands=(),
         )
 
@@ -242,8 +255,10 @@ def test_ui_launcher_composes_default_commands_and_owns_only_its_repository(
         )
         repository = TrackingRepository()
         observed: list[str] = []
+        launched_statistics: list[tuple[object, ...]] = []
 
         async def fake_run_async(app):
+            launched_statistics.append(app._sidebar_statistics)
             await app._controller.execute(agent.configuration().id, "/launcher")
             observed.append("commands executed")
 
@@ -251,6 +266,9 @@ def test_ui_launcher_composes_default_commands_and_owns_only_its_repository(
         launcher = UserInterfaceLauncher()
         await launcher({agent.configuration().id: agent}, pipeline, UserInterfaceConfiguration(repository).add_command(LauncherCommand()))
         assert observed
+        assert [statistic.key for statistic in launched_statistics[0]][:2] == [
+            "name", "id"
+        ]
         assert repository.close_calls == 0
         await repository.close()
         await agent.close()
@@ -274,5 +292,117 @@ def test_ui_launcher_composes_default_commands_and_owns_only_its_repository(
         with pytest.raises(RuntimeError, match="launch failed"):
             await launcher({agent.configuration().id: agent}, pipeline)
         assert failed_repository.close_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_run_agents_resumes_latest_session_without_overwriting_identifier(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+        pipeline = EventPipeline()
+        agent = StubAgent(calls, tmp_path)
+        agent_id = agent.configuration().id
+        repository = StubRepository(calls)
+        identifier = {"provider": "fake", "session_id": "persisted-session"}
+        repository.latest_sessions[agent_id] = SessionMetadata(
+            agent_id=agent_id,
+            session_name="Most Recent",
+            identifier=identifier,
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            last_message_at=None,
+            last_updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        async def fake_run_ui(*_args) -> None:
+            calls.append("ui")
+
+        monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
+        await run_agents(
+            {agent_id: agent},
+            pipeline,
+            repository,
+            initial_session_name="Fallback",
+        )
+
+        assert "activate:Most Recent:persisted-session" in calls
+        assert not any(call.startswith("start:") or call.startswith("save:") for call in calls)
+        assert calls[-2:] == ["close:agent", "close:repository"]
+
+    asyncio.run(scenario())
+
+
+def test_run_agents_resumes_and_creates_sessions_independently(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+        pipeline = EventPipeline()
+        resumed = StubAgent(calls, tmp_path)
+        created = StubAgent(calls, tmp_path)
+        repository = StubRepository(calls)
+        resumed_id = resumed.configuration().id
+        repository.latest_sessions[resumed_id] = SessionMetadata(
+            agent_id=resumed_id,
+            session_name="Existing",
+            identifier={"provider": "fake", "session_id": "existing-id"},
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            last_message_at=None,
+            last_updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        async def fake_run_ui(*_args) -> None:
+            calls.append("ui")
+
+        monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
+        await run_agents(
+            {resumed_id: resumed, created.configuration().id: created},
+            pipeline,
+            repository,
+            initial_session_name="Fallback",
+        )
+
+        assert "activate:Existing:existing-id" in calls
+        assert calls.count("start:Fallback") == 1
+        assert calls.count("save:Fallback") == 1
+        assert calls.count("close:agent") == 2
+        assert calls[-1] == "close:repository"
+
+    asyncio.run(scenario())
+
+
+def test_run_agents_does_not_persist_fallbacks_after_partial_startup_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+        pipeline = EventPipeline()
+        successful = StubAgent(calls, tmp_path)
+        failing = StubAgent(calls, tmp_path, start_error=RuntimeError("startup failed"))
+        repository = StubRepository(calls)
+
+        async def fake_run_ui(*_args) -> None:
+            raise AssertionError("UI should not run after startup failure")
+
+        monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
+        with pytest.raises(RuntimeError, match="startup failed"):
+            await run_agents(
+                {
+                    successful.configuration().id: successful,
+                    failing.configuration().id: failing,
+                },
+                pipeline,
+                repository,
+                initial_session_name="Fallback",
+            )
+
+        assert calls.count("start:Fallback") == 2
+        assert not any(call.startswith("save:") for call in calls)
+        assert calls.count("close:agent") == 2
+        assert calls[-1] == "close:repository"
 
     asyncio.run(scenario())
