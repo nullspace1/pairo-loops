@@ -14,7 +14,7 @@ from pairo.ui.chat_commands import HelpCommand, SlashCommand
 from pairo.ui.commands import AgentCommandController
 from pairo.ui.models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry, TranscriptMetadata
 from pairo.ui.navigation_events import AgentSwitchRequested, SessionSwitchRequested
-from pairo.ui.transcript_events import TranscriptEntryAdded
+from pairo.ui.transcript_events import AddTranscriptEntry
 
 
 class RecordingEntryRepository:
@@ -45,36 +45,22 @@ def test_navigation_events_are_frozen_and_validate_their_ui_payloads() -> None:
         session_event.session_name = "Other"  # type: ignore[misc]
 
 
-def test_command_persists_before_notification_and_skips_notification_on_failure(tmp_path: Path) -> None:
+def test_command_publishes_transcript_request_without_persisting(tmp_path: Path) -> None:
     async def scenario() -> None:
         pipeline = EventPipeline()
-        repository = RecordingEntryRepository()
+        repository = RecordingEntryRepository(fail_persistence=True)
         agent = configured_agent(tmp_path, pipeline)
         active = await agent.new_session("Review")
         controller = AgentCommandController({agent.configuration().id: agent}, pipeline, repository, (HelpCommand(),))
-        received: list[TranscriptEntryAdded] = []
-
-        def receive(event: TranscriptEntryAdded, _: Subscription[TranscriptEntryAdded]) -> None:
-            repository.order.append("notify")
-            received.append(event)
-
-        subscription = pipeline.subscribe(TranscriptEntryAdded, receive)
+        received: list[AddTranscriptEntry] = []
+        subscription = pipeline.subscribe(AddTranscriptEntry, lambda event, _: received.append(event))
         assert await controller.execute(agent.configuration().id, "/help") is None
         await subscription.wait_until_idle()
-        assert repository.order == ["persist", "notify"]
-        assert repository.calls[0][0:2] == (agent.configuration().id, active.name)
+        assert repository.calls == []
         assert received[0].agent_id == agent.configuration().id
         assert received[0].session_name == active.name
-
-        failing = RecordingEntryRepository(fail_persistence=True)
-        failed_controller = AgentCommandController({agent.configuration().id: agent}, pipeline, failing, (HelpCommand(),))
-        notifications: list[TranscriptEntryAdded] = []
-        failure_subscription = pipeline.subscribe(TranscriptEntryAdded, lambda event, _: notifications.append(event))
-        with pytest.raises(OSError, match="database unavailable"):
-            await failed_controller.execute(agent.configuration().id, "/help")
-        await failure_subscription.wait_until_idle()
-        assert failing.order == ["persist"]
-        assert notifications == []
+        assert received[0].entry.content == HelpCommand._HELP
+        pipeline.unsubscribe(subscription)
         await agent.close()
 
     asyncio.run(scenario())

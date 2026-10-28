@@ -160,6 +160,12 @@ def test_installer_configures_role_specific_skills_and_instructions(tmp_path: Pa
     assert "report_unsuccessful_work" in worker.configuration().developer_instructions
     assert "stop safely" in worker.configuration().developer_instructions
     assert "criterion ID" in worker.configuration().developer_instructions
+    assert "complete authoritative task" in worker.configuration().developer_instructions
+    assert "may call only verify_task and report_unsuccessful_work" in (
+        worker.configuration().developer_instructions
+    )
+    assert "failed command" in worker.configuration().developer_instructions
+    assert "concrete persistent blocker" in worker.configuration().developer_instructions
     assert "structured corrections" in verifier.configuration().developer_instructions
 
 

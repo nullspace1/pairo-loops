@@ -50,9 +50,9 @@ from .navigation_events import AgentSwitchRequested, SessionSwitchRequested
 from .session_repository import SessionNotFoundError, SessionRepository
 from .sqlite_session_repository import SqliteSessionRepository
 from .transcript_events import (
-    TranscriptEntryAdded,
-    TranscriptEntryDeleted,
-    TranscriptEntryUpdated,
+    AddTranscriptEntry,
+    UpdateTranscriptEntry,
+    DeleteTranscriptEntry,
 )
 from .transcribers import (
     RoutedTranscriptEntry,
@@ -169,9 +169,9 @@ class AgentChatApp(App[None]):
                     AgentResponseInterrupted,
                     AgentTokenUsageUpdated,
                     MessageSent,
-                    TranscriptEntryAdded,
-                    TranscriptEntryUpdated,
-                    TranscriptEntryDeleted,
+                    AddTranscriptEntry,
+                    UpdateTranscriptEntry,
+                    DeleteTranscriptEntry,
                     AgentSwitchRequested,
                     SessionSwitchRequested,
                     *self._transcribers.event_types,
@@ -214,7 +214,6 @@ class AgentChatApp(App[None]):
 
     async def on_mount(self) -> None:
         """Attach the application-owned ingress once the Textual loop exists."""
-        await self._transcribers.start(self.session_repository, self._event_pipeline, self)
         await self._configure_statistics()
         await self._load_repository_sessions()
         for chat in self.chats.values():
@@ -249,7 +248,6 @@ class AgentChatApp(App[None]):
         self._stop_event_delivery()
         for statistic in self._statistic_modules:
             await statistic.teardown()
-        await self._transcribers.shutdown()
         await self._delete_unused_sessions()
 
     async def _configure_statistics(self) -> None:
@@ -262,31 +260,32 @@ class AgentChatApp(App[None]):
 
     @on_pairo(BaseModel)
     async def receive_pairo_event(self, event: BaseModel) -> None:
-        """Deliver an event to stateful owners, then enqueue transcription."""
-        self._transcribers.deliver(event)
+        """Deliver statistics and persist any converted transcript entry."""
+        if self._transcribers.has_event_transcriber(event):
+            routed = self._transcribers.event_transcriber_for(event).transcribe(event)
+            await self._add_routed_entry(routed)
         for statistic in self._statistic_modules:
             statistic.post_message(PairoEvent(event))
-        if self._transcribers.has_event_transcriber(event):
-            self._transcribers.event_transcriber_for(event).request(event)
 
 
     @on(UpdateAgentStatistic)
     def route_agent_statistic(self, message: UpdateAgentStatistic) -> None:
         pane = self.chats.get(message.agent_id)
         if pane is not None:
-            pane.sidebar.post_message(
-                UpdateAgentStatistic(message.key, message.value, message.agent_id)
-            )
+            try:
+                pane.sidebar.update_agent(message)
+            except NoMatches:
+                return
 
     @on(UpdateSessionStatistic)
     def route_session_statistic(self, message: UpdateSessionStatistic) -> None:
         pane = self.chats.get(message.agent_id)
         if pane is not None:
-            pane.sidebar.post_message(
-                UpdateSessionStatistic(
-                    message.key, message.value, message.agent_id, message.session_name
-                )
-            )
+            try:
+                pane.sidebar.update_session(message)
+            except NoMatches:
+                return
+
     @on_pairo(SessionCreated)
     async def receive_session_created(self, event: SessionCreated) -> None:
         agent = self._agents.get(event.agent_id)
@@ -317,15 +316,37 @@ class AgentChatApp(App[None]):
                 # Deletion events can arrive after teardown or a later deletion.
                 return
 
-    @on_pairo(TranscriptEntryAdded)
-    async def _receive_transcript_entry_added(
-        self,
-        event: TranscriptEntryAdded,
-    ) -> None:
-        pane = self.chats.get(event.agent_id)
+    @on_pairo(AddTranscriptEntry)
+    async def _add_transcript_request(self, message: AddTranscriptEntry) -> None:
+        await self._add_routed_entry(
+            RoutedTranscriptEntry(message.agent_id, message.session_name, message.entry)
+        )
+
+    @on_pairo(UpdateTranscriptEntry)
+    async def _update_transcript_request(self, message: UpdateTranscriptEntry) -> None:
+        try:
+            await self.session_repository.update_entry(message.agent_id, message.session_name, message.entry)
+        except (LookupError, RuntimeError, ValueError):
+            self.log.error("Unable to update transcript entry")
+            return
+        pane = self.chats.get(message.agent_id)
         if pane is not None:
             try:
-                await pane.add_entry(event.session_name, event.entry)
+                await pane.update_entry(message.session_name, message.entry)
+            except NoMatches:
+                return
+
+    @on_pairo(DeleteTranscriptEntry)
+    async def _delete_transcript_request(self, message: DeleteTranscriptEntry) -> None:
+        try:
+            await self.session_repository.delete_entry(message.agent_id, message.session_name, message.entry_id)
+        except (LookupError, RuntimeError, ValueError):
+            self.log.error("Unable to delete transcript entry")
+            return
+        pane = self.chats.get(message.agent_id)
+        if pane is not None:
+            try:
+                await pane.delete_entry(message.session_name, message.entry_id)
             except NoMatches:
                 return
 
@@ -352,30 +373,6 @@ class AgentChatApp(App[None]):
             try:
                 await pane.select_session(event.session_name)
             except (NoMatches):
-                return
-
-    @on_pairo(TranscriptEntryUpdated)
-    async def _receive_transcript_entry_updated(
-        self,
-        event: TranscriptEntryUpdated,
-    ) -> None:
-        pane = self.chats.get(event.agent_id)
-        if pane is not None:
-            try:
-                await pane.update_entry(event.session_name, event.entry)
-            except NoMatches:
-                return
-
-    @on_pairo(TranscriptEntryDeleted)
-    async def _receive_transcript_entry_deleted(
-        self,
-        event: TranscriptEntryDeleted,
-    ) -> None:
-        pane = self.chats.get(event.agent_id)
-        if pane is not None:
-            try:
-                await pane.delete_entry(event.session_name, event.entry_id)
-            except NoMatches:
                 return
 
     @on(ChatEditor.Submitted)
@@ -434,10 +431,20 @@ class AgentChatApp(App[None]):
     ) -> None:
         if pane.session_name is None:
             raise RuntimeError("The selected agent has no active session.")
-        mutations = self._transcribers.mutations
-        if mutations is None:
-            raise RuntimeError("Transcript transcribers are not running.")
-        await mutations.add(RoutedTranscriptEntry(pane.agent_id, pane.session_name, entry))
+        await self._add_routed_entry(RoutedTranscriptEntry(pane.agent_id, pane.session_name, entry))
+
+    async def _add_routed_entry(self, routed: RoutedTranscriptEntry[TranscriptMetadata]) -> bool:
+        try:
+            await self.session_repository.add_entry(routed.agent_id, routed.session_name, routed.entry)
+        except SessionNotFoundError:
+            return False
+        pane = self.chats.get(routed.agent_id)
+        if pane is not None:
+            try:
+                await pane.add_entry(routed.session_name, routed.entry)
+            except NoMatches:
+                pass
+        return True
 
     def _stop_event_delivery(self) -> None:
         """Detach before teardown so no raw event can enqueue afterwards."""

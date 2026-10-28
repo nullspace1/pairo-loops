@@ -11,7 +11,7 @@ from pairo.core.events import EventPipeline
 
 from ..models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
 from ..session_repository import SessionRepository
-from ..transcript_events import TranscriptEntryAdded
+from ..transcript_events import AddTranscriptEntry
 from .base import SlashCommand
 
 
@@ -25,5 +25,4 @@ class InterruptCommand(SlashCommand):
         interrupted = await agent.interrupt()
         entry = TranscriptEntry[SystemTranscriptMetadata]("system", "Interrupt requested." if interrupted else "Agent is already idle.", EventDetailLevel.NORMAL, {"type": "system"})
         agent_id = agent.configuration().id
-        await session_repository.add_entry(agent_id, active.name, entry)
-        event_pipeline.push(TranscriptEntryAdded(agent_id=agent_id, session_name=active.name, entry=entry))
+        event_pipeline.push(AddTranscriptEntry(agent_id=agent_id, session_name=active.name, entry=entry))

@@ -19,7 +19,7 @@ from pairo.core.events import (
 )
 from pairo.ui.navigation_events import AgentSwitchRequested
 from pairo.ui.pairo_event_piper import PairoEvent, TextualEventPiper, TextualIngressPolicy
-from pairo.ui.transcript_events import TranscriptEntryAdded
+from pairo.ui.transcript_events import AddTranscriptEntry
 from pairo.ui.models import EventDetailLevel, TranscriptEntry
 
 
@@ -34,7 +34,7 @@ def test_textual_event_piper_fifo_policy_and_detach() -> None:
         agent_id = uuid4()
         policy = TextualIngressPolicy((
             MessageSent, SessionCreated, AgentError, AgentTokenUsageUpdated,
-            TranscriptEntryAdded, AgentSwitchRequested, CustomUiEvent,
+            AddTranscriptEntry, AgentSwitchRequested, CustomUiEvent,
         ))
         piper = TextualEventPiper(pipeline, lambda message: received.append(message.event) or True, policy)
         piper.attach()
@@ -43,7 +43,7 @@ def test_textual_event_piper_fifo_policy_and_detach() -> None:
             SessionCreated(agent_id=agent_id, session_name="s", identifier={}),
             AgentError(agent_id=agent_id, session_name="s", message="error"),
             AgentTokenUsageUpdated(agent_id=agent_id, session_name="s", last=TokenUsage(input_tokens=1, cached_input_tokens=0, output_tokens=1, reasoning_output_tokens=0, total_tokens=2), total=TokenUsage(input_tokens=1, cached_input_tokens=0, output_tokens=1, reasoning_output_tokens=0, total_tokens=2)),
-            TranscriptEntryAdded(agent_id=agent_id, session_name="s", entry=TranscriptEntry("system", "added", EventDetailLevel.NORMAL, {"type": "system"})),
+            AddTranscriptEntry(agent_id=agent_id, session_name="s", entry=TranscriptEntry("system", "added", EventDetailLevel.NORMAL, {"type": "system"})),
             AgentSwitchRequested(agent_id=agent_id),
             CustomUiEvent(value="custom"),
         )

@@ -31,7 +31,6 @@ from pairo.ui.session_repository import StatisticValue
 from pairo.ui import SlashCommand
 from pairo.ui.navigation_events import AgentSwitchRequested, SessionSwitchRequested
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
-from pairo.ui.transcript_events import TranscriptEntryAdded
 from pairo.ui.widgets.agent_sidebar import AgentSidebar
 from pairo.ui.widgets.chat_editor import ChatEditor
 from textual.widgets import Button, Collapsible, DataTable, Select, Static, TabbedContent
@@ -549,7 +548,6 @@ def test_mounted_transcript_adds_completed_command_without_live_card(
         agent_id = agent.configuration().id
         await repository.save_session(agent_id, active.name, active.identifier.model_dump(mode="json"))
         app = configured_app({agent_id: agent}, pipeline, repository, command_output_limit=64)
-
         async with app.run_test() as pilot:
             output = "H" * 40 + "discard" * 20 + "T" * 40
             pipeline.push(AgentCommandExecutionCompleted(
@@ -628,9 +626,9 @@ class ExternalCommand(SlashCommand):
             "system", f"external:{argument}", EventDetailLevel.NORMAL, {"type": "system"}
         )
         agent_id = agent.configuration().id
-        await session_repository.add_entry(agent_id, active.name, entry)
+        from pairo.ui.transcript_events import AddTranscriptEntry
         event_pipeline.push(
-            TranscriptEntryAdded(agent_id=agent_id, session_name=active.name, entry=entry)
+            AddTranscriptEntry(agent_id=agent_id, session_name=active.name, entry=entry)
         )
 
 
@@ -823,40 +821,61 @@ def test_agent_state_statistic_updates_visible_sidebar_from_lifecycle_events(
             await asyncio.wait_for(app.ready.wait(), 3)
             sidebar = app.chats[agent_id].sidebar
 
-            async def fields() -> tuple[tuple[str, str, str], ...]:
-                sidebar.query_one(".sidebar-information-picker", Select).value = "agent"
-                await pilot.pause()
-                return sidebar.query_one(".sidebar-information")._fields
+            from pairo.ui.widgets.sidebar_field import SidebarField
+            from pairo.ui.widgets.sidebar_statistics import SidebarStatisticCategory
 
-            assert ("state", "State", "idle") in await fields()
-            pipeline.push(
-                MessageSent(
-                    agent_id=agent_id,
-                    session_name=session.name,
-                    message="start",
-                    source="user",
-                )
-            )
+            def visible_state() -> str:
+                for field in sidebar.query(SidebarField):
+                    if field.key == "state":
+                        return str(field.query_one(".sidebar-field-value", Static).render())
+                return ""
+
+            async def wait_for_field(value: str) -> None:
+                while value not in visible_state():
+                    await asyncio.sleep(0.01)
+
             async def wait_for_value(value: str) -> None:
                 while await state.delivered.get() != value:
                     pass
 
-            async def wait_for_field(value: str) -> None:
-                while ("state", "State", value) not in await fields():
-                    await asyncio.sleep(0.01)
+            await asyncio.wait_for(wait_for_field("idle"), 3)
+            captured = asyncio.Event()
+            release = asyncio.Event()
+            original_values_for = sidebar._values_for
+            held = False
 
-            await asyncio.wait_for(wait_for_value("generating"), 3)
+            async def delayed_values(category, session_name):
+                nonlocal held
+                values = await original_values_for(category, session_name)
+                if category is SidebarStatisticCategory.AGENT and not held:
+                    held = True
+                    captured.set()
+                    await release.wait()
+                return values
+
+            sidebar._values_for = delayed_values
+            pending_load = asyncio.create_task(sidebar.load(session.name))
+            try:
+                await asyncio.wait_for(captured.wait(), 3)
+                pipeline.push(MessageSent(
+                    agent_id=agent_id, session_name=session.name,
+                    message="start", source="user",
+                ))
+                await asyncio.wait_for(wait_for_value("generating"), 3)
+                await asyncio.wait_for(wait_for_field("generating"), 3)
+            finally:
+                release.set()
+                await asyncio.wait_for(pending_load, 3)
+                sidebar._values_for = original_values_for
+
             await asyncio.wait_for(wait_for_field("generating"), 3)
-            assert ("state", "State", "generating") in await fields()
-
-            pipeline.push(
-                AgentResponseCompleted(
-                    agent_id=agent_id, session_name=session.name, message="done"
-                )
-            )
+            assert "generating" in visible_state()
+            pipeline.push(AgentResponseCompleted(
+                agent_id=agent_id, session_name=session.name, message="done"
+            ))
             await asyncio.wait_for(wait_for_value("idle"), 3)
             await asyncio.wait_for(wait_for_field("idle"), 3)
-            assert ("state", "State", "idle") in await fields()
+            assert "idle" in visible_state()
         await agent.close()
         await repository.close()
 
@@ -969,4 +988,197 @@ def test_state_events_without_state_statistic_do_not_publish_updates(tmp_path: P
             assert "state" not in app.chats[agent_id].sidebar.agent_values
             assert app.updates == []
         await agent.close(); await repository.close()
+    asyncio.run(scenario())
+
+
+def test_app_transcript_requests_commit_once_and_show_mutations(tmp_path: Path) -> None:
+    from pairo.ui.transcript_events import AddTranscriptEntry, UpdateTranscriptEntry, DeleteTranscriptEntry
+
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        session = await agent.new_session("requests")
+        agent_id = agent.configuration().id
+        app = configured_app({agent_id: agent}, pipeline, repository)
+        writes = []
+        for name in ("add_entry", "update_entry", "delete_entry"):
+            original_method = getattr(repository, name)
+            async def counted(*args, _name=name, _method=original_method):
+                writes.append(_name)
+                return await _method(*args)
+            setattr(repository, name, counted)
+        original = TranscriptEntry[SystemTranscriptMetadata]("system", "one", EventDetailLevel.NORMAL, {"type": "system"})
+        updated = TranscriptEntry[SystemTranscriptMetadata]("system", "two", EventDetailLevel.NORMAL, {"type": "system"}, original.entry_id)
+        async with app.run_test() as pilot:
+            # Queue all operations without waiting, preserving request order.
+            pipeline.push(AddTranscriptEntry(agent_id=agent_id, session_name=session.name, entry=original))
+            pipeline.push(UpdateTranscriptEntry(agent_id=agent_id, session_name=session.name, entry=updated))
+            async def wait_for_updated() -> None:
+                while app.chats[agent_id].transcript.entries != [updated]:
+                    await pilot.pause()
+            await asyncio.wait_for(wait_for_updated(), 3)
+            assert await repository.entries_for(agent_id, session.name) == (updated,)
+            pipeline.push(DeleteTranscriptEntry(agent_id=agent_id, session_name=session.name, entry_id=original.entry_id))
+            async def wait_for_deleted() -> None:
+                while app.chats[agent_id].transcript.entries:
+                    await pilot.pause()
+            await asyncio.wait_for(wait_for_deleted(), 3)
+            assert await repository.entries_for(agent_id, session.name) == ()
+            assert writes == ["add_entry", "update_entry", "delete_entry"]
+            pipeline.push(AddTranscriptEntry(agent_id=agent_id, session_name="missing", entry=original))
+            pipeline.push(UpdateTranscriptEntry(agent_id=agent_id, session_name="missing", entry=updated))
+            await pilot.pause()
+            assert app.chats[agent_id].transcript.entries == []
+        await agent.close()
+        await repository.close()
+    asyncio.run(scenario())
+
+
+def test_permission_card_decision_uses_app_boundary(tmp_path: Path) -> None:
+    from pairo.core.events import PermissionRequest, PermissionResponse
+    from pairo.core.permissions import CommandExecutionApprovalRequest
+    from pairo.ui.transcribers import PermissionRequestCard
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        session = await agent.new_session("permission")
+        agent_id = agent.configuration().id
+        app = configured_app({agent_id: agent}, pipeline, repository)
+        responses = []
+        subscription = pipeline.subscribe(PermissionResponse, lambda event, _: responses.append(event))
+        async with app.run_test() as pilot:
+            pipeline.push(PermissionRequest(request_id="p1", agent_id=agent_id, session_name=session.name, request=CommandExecutionApprovalRequest(session_identifier={}, command="echo hi")))
+            for _ in range(4):
+                await pilot.pause()
+            card = app.query_one(PermissionRequestCard)
+            card.query(Button)[0].press()
+            for _ in range(4):
+                await pilot.pause()
+            assert len(responses) == 1
+            stored = await repository.entries_for(agent_id, session.name)
+            assert stored[0].metadata["status"] == "resolved"
+            assert stored[0].metadata["decision"] == "accept"
+            assert app.chats[agent_id].transcript.entries[0] == stored[0]
+        pipeline.unsubscribe(subscription)
+        await agent.close()
+        await repository.close()
+    asyncio.run(scenario())
+
+
+
+def test_permission_card_listens_for_matching_external_response(tmp_path: Path) -> None:
+    from pairo.core.events import PermissionRequest, PermissionResponse
+    from pairo.core.permissions import CommandExecutionApprovalRequest, PermissionDecision
+    from pairo.ui.transcribers import PermissionRequestCard
+
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        session = await agent.new_session("external-permission")
+        agent_id = agent.configuration().id
+        app = configured_app({agent_id: agent}, pipeline, repository)
+        async with app.run_test() as pilot:
+            pipeline.push(PermissionRequest(request_id="external", agent_id=agent_id, session_name=session.name, request=CommandExecutionApprovalRequest(session_identifier={}, command="echo hi")))
+            for _ in range(4):
+                await pilot.pause()
+            card = app.query_one(PermissionRequestCard)
+            pipeline.push(PermissionResponse(request_id="other", agent_id=agent_id, session_name=session.name, decision=PermissionDecision.DECLINE))
+            await pilot.pause()
+            assert not card.query(Button)[0].disabled
+            pipeline.push(PermissionResponse(request_id="external", agent_id=agent_id, session_name=session.name, decision=PermissionDecision.DECLINE))
+            for _ in range(4):
+                await pilot.pause()
+            stored = await repository.entries_for(agent_id, session.name)
+            assert stored[0].metadata["decision"] == "decline"
+            assert all(button.disabled for button in app.query_one(PermissionRequestCard).query(Button))
+        await agent.close()
+        await repository.close()
+    asyncio.run(scenario())
+
+
+def test_permission_persistence_failure_keeps_decision_visible(tmp_path: Path) -> None:
+    from pairo.core.events import PermissionRequest, PermissionResponse
+    from pairo.core.permissions import CommandExecutionApprovalRequest
+    from pairo.ui.transcribers import PermissionRequestCard
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        session = await agent.new_session("permission-failure")
+        agent_id = agent.configuration().id
+        app = configured_app({agent_id: agent}, pipeline, repository)
+        responses = []
+        subscription = pipeline.subscribe(PermissionResponse, lambda event, _: responses.append(event))
+        async with app.run_test() as pilot:
+            pipeline.push(PermissionRequest(request_id="p2", agent_id=agent_id, session_name=session.name, request=CommandExecutionApprovalRequest(session_identifier={}, command="echo hi")))
+            for _ in range(4):
+                await pilot.pause()
+            async def fail_update(*args):
+                raise RuntimeError("write failed")
+            repository.update_entry = fail_update
+            card = app.query_one(PermissionRequestCard)
+            card.query(Button)[0].press()
+            for _ in range(4):
+                await pilot.pause()
+            assert len(responses) == 1
+            assert "Decision:" in str(card.query_one(".permission-decision", Static).render())
+            stored = await repository.entries_for(agent_id, session.name)
+            assert stored[0].metadata["status"] == "pending"
+            assert len(stored) == 1
+        pipeline.unsubscribe(subscription)
+        await agent.close()
+        await repository.close()
+    asyncio.run(scenario())
+
+
+def test_statistic_routes_update_sidebar_synchronously(tmp_path: Path) -> None:
+    from pairo.ui.widgets.sidebar_statistics import UpdateAgentStatistic, UpdateSessionStatistic
+
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        session = await agent.new_session("direct-sidebar")
+        agent_id = agent.configuration().id
+        app = configured_app({agent_id: agent}, pipeline, repository)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            sidebar = app.chats[agent_id].sidebar
+            app.route_agent_statistic(UpdateAgentStatistic("state", "direct", agent_id))
+            assert sidebar.agent_values["state"] == "direct"
+            app.route_session_statistic(UpdateSessionStatistic("token_usage", "123", agent_id, session.name))
+            assert sidebar.session_values["token_usage"] == "123"
+            app.route_session_statistic(UpdateSessionStatistic("token_usage", "wrong", agent_id, "other"))
+            assert sidebar.session_values["token_usage"] == "123"
+            app.route_agent_statistic(UpdateAgentStatistic("state", "wrong", uuid4()))
+            assert sidebar.agent_values["state"] == "direct"
+        await agent.close()
+        await repository.close()
+    asyncio.run(scenario())
+
+
+def test_transcript_update_request_calls_pane_before_returning(tmp_path: Path) -> None:
+    from pairo.ui.transcript_events import UpdateTranscriptEntry
+    from pairo.ui.transcribers import RoutedTranscriptEntry
+
+    async def scenario() -> None:
+        pipeline = EventPipeline()
+        repository = SqliteSessionRepository()
+        agent = make_agent(tmp_path, pipeline)
+        session = await agent.new_session("direct-update")
+        agent_id = agent.configuration().id
+        app = configured_app({agent_id: agent}, pipeline, repository)
+        entry = TranscriptEntry[SystemTranscriptMetadata]("system", "before", EventDetailLevel.NORMAL, {"type": "system"})
+        updated = TranscriptEntry[SystemTranscriptMetadata]("system", "after", EventDetailLevel.NORMAL, {"type": "system"}, entry.entry_id)
+        async with app.run_test() as pilot:
+            await app._add_routed_entry(RoutedTranscriptEntry(agent_id, session.name, entry))
+            await pilot.pause()
+            await app._update_transcript_request(UpdateTranscriptEntry(agent_id=agent_id, session_name=session.name, entry=updated))
+            assert app.chats[agent_id].transcript.entries == [updated]
+            assert await repository.entries_for(agent_id, session.name) == (updated,)
+        await agent.close()
+        await repository.close()
     asyncio.run(scenario())

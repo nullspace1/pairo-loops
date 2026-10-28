@@ -265,7 +265,7 @@ the command name is passed as `argument` without leading or trailing
 whitespace.
 
 ```python
-from pairo.ui.transcript_events import TranscriptEntryAdded
+from pairo.ui.transcript_events import AddTranscriptEntry
 
 from pairo.ui import (
     EventDetailLevel,
@@ -297,9 +297,8 @@ class EchoCommand(SlashCommand):
             {"type": "system"},
         )
         agent_id = agent.configuration().id
-        await session_repository.add_entry(agent_id, active.name, entry)
         event_pipeline.push(
-            TranscriptEntryAdded(agent_id=agent_id, session_name=active.name, entry=entry)
+            AddTranscriptEntry(agent_id=agent_id, session_name=active.name, entry=entry)
         )
 
 
@@ -307,11 +306,10 @@ configuration = UserInterfaceConfiguration().add_command(EchoCommand())
 await run_ui(agents, pipeline, configuration)
 ```
 
-Commands return `None`. Command-produced transcript entries must be persisted
-through `session_repository` before the command pushes `TranscriptEntryAdded`
-through `event_pipeline`; a persistence failure must not publish the success
-event. Commands directly push navigation and other events using the supplied
-pipeline.
+Commands return `None`. Commands publish `AddTranscriptEntry` through the event
+pipeline; the UI persists the entry and updates the matching pane. The request
+is asynchronous and does not acknowledge persistence success. Commands directly
+push navigation and other events using the supplied pipeline.
 
 By default, `run_ui` puts added commands after the standard `/agent`,
 `/session`, `/sessions`, `/compact`, `/delete`, `/interrupt`, `/image`, and

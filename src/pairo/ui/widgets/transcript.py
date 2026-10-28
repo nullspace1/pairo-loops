@@ -191,7 +191,6 @@ class Transcript(VerticalScroll):
             agent_id=self._agent_id,
             session_name=self._session_name or "",
             event_pipeline=self._event_pipeline,
-            mutations=self._transcribers.mutations,
             is_live=entry.entry_id in self._live_entry_ids,
             agent_name=self._agent_name,
         )

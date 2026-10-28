@@ -15,7 +15,7 @@ from pairo.ui.chat_commands import (AgentSelectionCommand, CompactCommand, Delet
 from pairo.ui.commands import AgentCommandController
 from pairo.ui.navigation_events import AgentSwitchRequested, SessionSwitchRequested
 from pairo.ui.sqlite_session_repository import SqliteSessionRepository
-from pairo.ui.transcript_events import TranscriptEntryAdded
+from pairo.ui.transcript_events import AddTranscriptEntry
 
 
 def default_commands() -> tuple[SlashCommand, ...]:
@@ -76,13 +76,13 @@ def test_builtin_commands_publish_navigation_transcripts_and_persistence(tmp_pat
         controller = AgentCommandController({developer_id: developer,
             reviewer.configuration().id: reviewer}, pipeline, repository, default_commands())
         navigation: list[AgentSwitchRequested | SessionSwitchRequested] = []
-        entries: list[TranscriptEntryAdded] = []
+        entries: list[AddTranscriptEntry] = []
         images: list[ImageSent] = []
 
         def record_navigation(event: AgentSwitchRequested | SessionSwitchRequested, _: Subscription) -> None:
             navigation.append(event)
 
-        def record_entry(event: TranscriptEntryAdded, _: Subscription) -> None:
+        def record_entry(event: AddTranscriptEntry, _: Subscription) -> None:
             entries.append(event)
 
         def record_image(event: ImageSent, _: Subscription) -> None:
@@ -90,7 +90,7 @@ def test_builtin_commands_publish_navigation_transcripts_and_persistence(tmp_pat
 
         subscriptions = (pipeline.subscribe(AgentSwitchRequested, record_navigation),
             pipeline.subscribe(SessionSwitchRequested, record_navigation),
-            pipeline.subscribe(TranscriptEntryAdded, record_entry), pipeline.subscribe(ImageSent, record_image))
+            pipeline.subscribe(AddTranscriptEntry, record_entry), pipeline.subscribe(ImageSent, record_image))
         for submitted in ("/help", "/compact", "/interrupt", "/sessions", "/session new Review",
             "/session switch Conversation 1", "/image ./diagram.png",
             f"/agent {reviewer.configuration().id}"):
@@ -108,8 +108,8 @@ def test_builtin_commands_publish_navigation_transcripts_and_persistence(tmp_pat
             "Agent is already idle.", "Sessions", "Created session Review.",
             "Switched to session Conversation 1.", "Image: ./diagram.png",
             f"Selected agent reviewer ({reviewer.configuration().id})."]
-        assert [entry.content for entry in await repository.entries_for(developer_id, "Review")] == ["Created session Review."]
-        assert len(await repository.entries_for(developer_id, "Conversation 1")) == 7
+        assert await repository.entries_for(developer_id, "Review") == ()
+        assert await repository.entries_for(developer_id, "Conversation 1") == ()
         await developer.close()
         await reviewer.close()
         await repository.close()
@@ -133,12 +133,15 @@ def test_delete_publishes_replacement_session_and_confirmation(tmp_path: Path) -
             deleted.append(event)
 
         subscription = pipeline.subscribe(SessionDeleted, record_deleted)
+        confirmations = []
+        requests = pipeline.subscribe(AddTranscriptEntry, lambda event, _: confirmations.append(event))
         assert await controller.execute(agent_id, "/delete Review") is None  # type: ignore[func-returns-value]
         await subscription.wait_until_idle()
         assert deleted == [SessionDeleted(agent_id=agent_id, session_name="Review",
             selected_session_name="Conversation 1")]
         assert [session.session_name for session in await repository.sessions_for(agent_id)] == ["Conversation 1"]
-        assert [entry.content for entry in await repository.entries_for(agent_id, "Conversation 1")] == ["Deleted session Review. Current session: Conversation 1."]
+        await requests.wait_until_idle()
+        assert [event.entry.content for event in confirmations] == ["Deleted session Review. Current session: Conversation 1."]
         await agent.close()
         await repository.close()
 

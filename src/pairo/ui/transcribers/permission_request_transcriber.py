@@ -13,7 +13,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Static
 
 from pairo.core.agent import JsonObject
-from pairo.core.events import PermissionRequest
+from pairo.core.events import PermissionRequest, PermissionResponse, Subscription
 from pairo.core.permissions import (
     AdditionalPermissionsApprovalRequest,
     ApprovalRequest,
@@ -27,6 +27,7 @@ from ..models import (
     SystemTranscriptMetadata,
     TranscriptEntry,
 )
+from ..transcript_events import AddTranscriptEntry, UpdateTranscriptEntry
 from ..permissions import build_permission_response
 from ..presentation import permission_request_history_content
 from .routed_transcript_entry import RoutedTranscriptEntry
@@ -165,6 +166,7 @@ class PermissionRequestCard(Vertical):
         decision_label: DecisionLabel,
         *,
         classes: str | None = None,
+        context: TranscriptRenderContext | None = None,
     ) -> None:
         super().__init__(classes=classes)
         self.entry = entry
@@ -172,6 +174,8 @@ class PermissionRequestCard(Vertical):
         self._answer = answer
         self._decision_label = decision_label
         self._decision = entry.metadata.get("decision")
+        self._render_context = context
+        self._response_subscription: Subscription[PermissionResponse] | None = None
 
     def compose(self) -> ComposeResult:
         if self._request is not None:
@@ -192,9 +196,43 @@ class PermissionRequestCard(Vertical):
             self.resolve(str(self._decision))
         elif self._request is None:
             self._set_actions_disabled(True)
-            self._set_status("Expired — this request is no longer actionable.")
+            self._set_status("Expired - this request is no longer actionable.")
         else:
             self.query_one(".permission-decision", Static).display = False
+            if self._render_context is not None:
+                self._response_subscription = self._render_context.event_pipeline.subscribe(
+                    PermissionResponse, self._receive_response
+                )
+
+    def on_unmount(self) -> None:
+        if self._render_context is not None and self._response_subscription is not None:
+            self._render_context.event_pipeline.unsubscribe(self._response_subscription)
+            self._response_subscription = None
+
+    def _receive_response(
+        self, event: PermissionResponse, subscription: Subscription[PermissionResponse]
+    ) -> None:
+        context = self._render_context
+        request = self._request
+        if context is None or request is None or self._decision is not None:
+            return
+        if (event.request_id != request.request_id or event.agent_id != request.agent_id
+                or event.session_name != request.session_name):
+            return
+        decision = event.decision.value
+        self.resolve(decision)
+        metadata = dict(self.entry.metadata)
+        metadata.update(status="resolved", decision=decision)
+        resolved = replace(
+            self.entry,
+            content=f"{self.entry.content}\n\nDecision: {self._decision_label(decision)}",
+            metadata=cast(PermissionRequestTranscriptMetadata, metadata),
+        )
+        context.event_pipeline.push(UpdateTranscriptEntry(
+            agent_id=context.agent_id, session_name=context.session_name, entry=resolved
+        ))
+        context.event_pipeline.unsubscribe(subscription)
+        self._response_subscription = None
 
     @on(Button.Pressed)
     async def decide(self, event: Button.Pressed) -> None:
@@ -275,6 +313,7 @@ class PermissionRequestTranscriber(
             answer,
             self.decision_label,
             classes="permission-card",
+            context=context,
         ))
 
     async def _answer(
@@ -296,26 +335,8 @@ class PermissionRequestTranscriber(
         except (RuntimeError, ValueError) as error:
             card.allow_retry()
             card.show_error(f"Unable to answer permission: {error}")
-            await self._publish_error(context, request_id, error)
+            await self._publish_error(card, context, request_id, error)
             return
-
-        card.resolve(decision)
-        metadata = dict(entry.metadata)
-        metadata.update(status="resolved", decision=decision)
-        resolved = replace(
-            entry,
-            content=f"{entry.content}\n\nDecision: {self.decision_label(decision)}",
-            metadata=cast(PermissionRequestTranscriptMetadata, metadata),
-        )
-        try:
-            if context.mutations is None:
-                raise RuntimeError("Transcript mutation publisher is unavailable.")
-            await context.mutations.update(RoutedTranscriptEntry(
-                context.agent_id, context.session_name, resolved
-            ))
-        except (LookupError, RuntimeError, ValueError) as error:
-            card.show_error(f"Decision sent, but history could not be updated: {error}")
-            await self._publish_error(context, request_id, error)
 
     @staticmethod
     def _live_request(
@@ -351,23 +372,23 @@ class PermissionRequestTranscriber(
 
     async def _publish_error(
         self,
+        card: PermissionRequestCard,
         context: TranscriptRenderContext,
         request_id: str,
         error: Exception,
     ) -> None:
         try:
-            if context.mutations is None:
-                return
-            await context.mutations.add(RoutedTranscriptEntry(
-                context.agent_id,
-                context.session_name,
-                TranscriptEntry[SystemTranscriptMetadata](
+            message = AddTranscriptEntry(
+                agent_id=context.agent_id,
+                session_name=context.session_name,
+                entry=TranscriptEntry[SystemTranscriptMetadata](
                     "system",
                     f"Unable to persist permission {request_id}: {error}",
                     EventDetailLevel.NORMAL,
                     {"type": "system"},
                 ),
-            ))
+            )
+            context.event_pipeline.push(message)
         except Exception:
             # The card already presents the failure. Do not recursively emit
             # another transcript event if transcript persistence is unavailable.
@@ -380,4 +401,3 @@ class PermissionRequestTranscriber(
             "acceptForSession": "Approved for session",
             "decline": "Denied",
         }.get(decision, decision)
-

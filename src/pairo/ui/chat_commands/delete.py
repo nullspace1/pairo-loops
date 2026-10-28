@@ -11,7 +11,7 @@ from pairo.core.events import EventPipeline, SessionDeleted
 
 from ..models import EventDetailLevel, SessionMetadata, SystemTranscriptMetadata, TranscriptEntry
 from ..session_repository import SessionRepository
-from ..transcript_events import TranscriptEntryAdded
+from ..transcript_events import AddTranscriptEntry
 from .base import SlashCommand
 
 
@@ -25,9 +25,8 @@ class DeleteCommand(SlashCommand):
             raise RuntimeError("The selected agent has no active session.")
         entry = TranscriptEntry[SystemTranscriptMetadata]("system", f"Deleted session {deleted}. Current session: {selected}.", EventDetailLevel.NORMAL, {"type": "system"})
         agent_id = agent.configuration().id
-        await session_repository.add_entry(agent_id, active.name, entry)
         event_pipeline.push(SessionDeleted(agent_id=agent_id, session_name=deleted, selected_session_name=selected))
-        event_pipeline.push(TranscriptEntryAdded(agent_id=agent_id, session_name=active.name, entry=entry))
+        event_pipeline.push(AddTranscriptEntry(agent_id=agent_id, session_name=active.name, entry=entry))
 
     async def _delete_session(self, agent: Agent[SessionIdentifier], repository: SessionRepository, session_name: str | None) -> tuple[str, str]:
         agent_id = agent.configuration().id

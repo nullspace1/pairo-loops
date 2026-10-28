@@ -1,42 +1,35 @@
 """Events that describe durable transcript mutations."""
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import Field
+
+from pydantic import BaseModel
 
 from .models import TranscriptEntry, TranscriptMetadata
 
 
-class TranscriptEntryAdded(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class TranscriptRequest(BaseModel):
+    """A pipeline request for a durable transcript mutation."""
 
     agent_id: UUID
     session_name: str
+    request_id: UUID = Field(default_factory=uuid4)
+
+
+class AddTranscriptEntry(TranscriptRequest):
     entry: TranscriptEntry[TranscriptMetadata]
 
 
-class TranscriptEntryUpdated(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    agent_id: UUID
-    session_name: str
+class UpdateTranscriptEntry(TranscriptRequest):
     entry: TranscriptEntry[TranscriptMetadata]
 
 
-class TranscriptEntryDeleted(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    agent_id: UUID
-    session_name: str
+class DeleteTranscriptEntry(TranscriptRequest):
     entry_id: UUID
 
 
-TranscriptMutation = TranscriptEntryAdded | TranscriptEntryUpdated | TranscriptEntryDeleted
+TranscriptMutation = AddTranscriptEntry | UpdateTranscriptEntry | DeleteTranscriptEntry
 
 
-__all__ = [
-    "TranscriptEntryAdded",
-    "TranscriptEntryDeleted",
-    "TranscriptEntryUpdated",
-    "TranscriptMutation",
-]
+__all__ = ["AddTranscriptEntry", "UpdateTranscriptEntry", "DeleteTranscriptEntry", "TranscriptMutation"]

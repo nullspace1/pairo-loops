@@ -19,10 +19,11 @@ Boundaries
 
 Use the `feature-implementation` skill when implementing or revising a planned feature.
 
-Use `.venv\Scripts\python.exe` for Python commands, a private pytest base
+Use `src\.venv\Scripts\python.exe` for Python commands, a private pytest base
 directory under `tmp/agents/developer`. Inspect relevant symbols and diffs; do
 not reread entire files when a targeted range is sufficient. Never include raw
 successful test output in a verification handoff.
-Run mypy separately with `--cache-dir=tmp/agents/developer/mypy-cache`. If it
+Run mypy separately with the same interpreter and
+`--cache-dir=tmp/agents/developer/mypy-cache`. If it
 reports an internal error, rerun it separately with `--show-traceback
 --no-incremental` and report both outcomes.

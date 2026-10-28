@@ -58,6 +58,7 @@ class AgentSidebar(Vertical):
         self._session_name: str | None = None
         self._information_mode = self._AGENT_INFORMATION
         self._load_generation = 0
+        self._agent_revisions: dict[str, int] = {}
         self._load_lock = asyncio.Lock()
 
     def compose(self) -> ComposeResult:
@@ -82,6 +83,7 @@ class AgentSidebar(Vertical):
         async with self._load_lock:
             self._load_generation += 1
             generation = self._load_generation
+            agent_revisions = self._agent_revisions.copy()
             self._session_name = session_name
         agent_values, session_values = await asyncio.gather(
             self._values_for(SidebarStatisticCategory.AGENT, session_name),
@@ -90,6 +92,14 @@ class AgentSidebar(Vertical):
         async with self._load_lock:
             if generation != self._load_generation or session_values is None:
                 return
+            # A live update can arrive while the asynchronous snapshot is loading.
+            # Keep that newer value (including removal) rather than restoring stale data.
+            for key, revision in self._agent_revisions.items():
+                if revision != agent_revisions.get(key, 0):
+                    if key in self.agent_values:
+                        agent_values[key] = self.agent_values[key]
+                    else:
+                        agent_values.pop(key, None)
             self.agent_values = agent_values
             self.session_values = session_values
 
@@ -120,6 +130,7 @@ class AgentSidebar(Vertical):
     def update_agent(self, message: UpdateAgentStatistic) -> None:
         if message.agent_id != self._agent_id or message.key not in self._agent_keys:
             return
+        self._agent_revisions[message.key] = self._agent_revisions.get(message.key, 0) + 1
         self.agent_values = self._merged(self.agent_values, message.key, message.value)
 
     @on(UpdateSessionStatistic)

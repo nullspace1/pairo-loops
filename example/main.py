@@ -1,4 +1,4 @@
-"""Run one planner with a developer/verifier pair."""
+"""Run the coordinated agents and one standalone development agent."""
 
 import asyncio
 import datetime
@@ -16,6 +16,7 @@ if str(SOURCE_ROOT) not in sys.path:
 
 from agents.agent_documenter.agent_documenter import get_agent_documenter
 from agents.developer.developer import get_developer
+from agents.isolated_developer.isolated_developer import get_isolated_developer
 from agents.planner.planner import get_planner
 from agents.prompt_optimizer.prompt_optimizer import get_prompt_optimizer
 from agents.verifier.verifier import get_verifier
@@ -40,10 +41,16 @@ async def run_async() -> None:
         get_verifier(pipeline, repository),
         get_agent_documenter(pipeline, repository),
         get_prompt_optimizer(pipeline, repository),
+        get_isolated_developer(pipeline, repository),
     ]
-    planner, developer, verifier, _agent_documenter, _prompt_optimizer = (
-        configured_agents
-    )
+    (
+        planner,
+        developer,
+        verifier,
+        _agent_documenter,
+        _prompt_optimizer,
+        _isolated_developer,
+    ) = configured_agents
     add_github_mcp_server(
         [
             agent.configuration()

@@ -12,7 +12,7 @@ from pairo.core.events import EventPipeline
 from ..models import EventDetailLevel, SystemTranscriptMetadata, TranscriptEntry
 from ..navigation_events import AgentSwitchRequested
 from ..session_repository import SessionRepository
-from ..transcript_events import TranscriptEntryAdded
+from ..transcript_events import AddTranscriptEntry
 from .base import SlashCommand
 
 
@@ -26,8 +26,7 @@ class AgentSelectionCommand(SlashCommand):
             raise RuntimeError("The selected agent has no active session.")
         entry = TranscriptEntry[SystemTranscriptMetadata]("system", f"Selected agent {selected.configuration().name} ({selected.configuration().id}).", EventDetailLevel.NORMAL, {"type": "system"})
         agent_id = agent.configuration().id
-        await session_repository.add_entry(agent_id, active.name, entry)
-        event_pipeline.push(TranscriptEntryAdded(agent_id=agent_id, session_name=active.name, entry=entry))
+        event_pipeline.push(AddTranscriptEntry(agent_id=agent_id, session_name=active.name, entry=entry))
         event_pipeline.push(AgentSwitchRequested(agent_id=selected.configuration().id))
 
     def _selected_agent(self, agents: Mapping[UUID, Agent[SessionIdentifier]], argument: str) -> Agent[SessionIdentifier]:
