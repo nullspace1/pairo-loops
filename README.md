@@ -1,32 +1,25 @@
-# Pairo Loops
+﻿# Pairo Loops
 
-Pairo Loops is an asyncio-native orchestration layer and Textual interface for
-provider-neutral development agents. An `AgentConfiguration` describes a
-provider persona; an `Agent` owns one active provider session and turn; the
-session repository remains the authoritative catalog of durable sessions.
+Pairo Loops is a Python library for building and running development agents. It combines an asynchronous agent runtime with a Textual terminal interface and a Codex provider, so developers can configure agents, interact with them, and resume their conversations.
 
-Use the [documentation map](src/docs/README.md) to choose an overview,
-provider-specific architecture, feature reference, or contributor guide.
+## Features
 
-## Setup
+- Configure agents with their own instructions, workspace, model, sandbox, approval policy, skills, and MCP servers.
+- Run multiple agents in a terminal UI, with activity transcripts and interactive permission requests.
+- Persist sessions and transcripts in SQLite and switch between conversations.
+- Connect agents through an event pipeline; optional tools support event logging, chatrooms, and workspace isolation.
+- Use a fake agent for testing and a Codex adapter for real sessions.
 
-Python 3.10 or later and the local Codex CLI are required. From the repository
-root, create the project environment under `src` and install the package:
+## Getting started
+
+You need Python 3.10 or newer and an installed, authenticated Codex CLI for Codex-backed agents. Choose a model available to your Codex account. From the repository root, create an environment and install the project dependencies (PowerShell):
 
 ```powershell
-cd src
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .
+py -m venv src\.venv
+.\src\.venv\Scripts\python.exe -m pip install -r src\requirements.txt aiosqlite
 ```
 
-Authenticate the local Codex CLI before starting Codex-backed agents.
-
-> **Packaging status:** `src/pyproject.toml` currently declares a colocated
-> `README.md`, but `src/README.md` is absent. The editable-install command above
-> is the intended workflow, not yet a verified clean installation, until that
-> packaging metadata is corrected.
-
-## Example
+The package lives in `src`. To run the following example from the repository root, save it as `src\quickstart.py` and run `.\src\.venv\Scripts\python.exe src\quickstart.py`:
 
 ```python
 import asyncio
@@ -35,10 +28,10 @@ from pairo import (
     AgentConfiguration,
     ApprovalMode,
     CodexAgent,
+    EventPipeline,
     SandboxPermission,
     run_agents,
 )
-from pairo.core.events import EventPipeline
 from pairo.ui import SqliteSessionRepository, TextualPermissionRequester
 
 
@@ -48,9 +41,9 @@ async def main() -> None:
     permissions = TextualPermissionRequester(pipeline, repository)
     configuration = AgentConfiguration(
         name="reviewer",
-        sandbox=SandboxPermission.WORKSPACE_WRITE,
         workspace=".",
-        model="gpt-5.6",
+        model="YOUR_CODEX_MODEL",
+        sandbox=SandboxPermission.WORKSPACE_WRITE,
         approval_mode=ApprovalMode.USER,
         permission_requester=permissions,
     )
@@ -61,64 +54,28 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`run_agents` creates and persists each initial session concurrently, launches
-the UI, and closes agents and persistence on success or failure. The pipeline
-has no lifecycle of its own.
+Replace `YOUR_CODEX_MODEL` with an available model. The workspace is resolved from the current directory and must exist. The UI starts with a persisted session; use `/help` to see available commands, including `/sessions`, `/session new [NAME]`, and `/interrupt`.
 
-The repository's multi-agent example also includes an example-local
-[SpecManager component workflow](example/SPEC_MANAGER_WORKFLOW.md) for
-planner-owned task decomposition, component verification, and approved
-specification changes. It is not part of the reusable `pairo` package.
+For a larger example, run `.\src\.venv\Scripts\python.exe example\main.py` from the repository root. It configures several agents and a [specification management workflow](example/SPEC_MANAGER_WORKFLOW.md). Its GitHub MCP integration uses Docker and the GitHub MCP server; its agent models and workspace configuration may need adjustment for your environment.
 
-## Sessions and commands
+## Documentation and help
 
-Only the active session is retained by an agent. The SQLite repository stores
-all session metadata and resolves a session switch before calling
-`agent.activate_session(...)`.
+- [Documentation index and system overview](src/docs/README.md)
+- [Feature reference](src/docs/feature-reference.md) for configuration, sessions, commands, and integrations
+- [Codex provider architecture](src/docs/codex-agent.md)
+- [Quality gate](src/docs/quality-gates.md) and [project invariants](src/INVARIANTS.md)
 
-- `/session new [NAME]` creates and selects a session.
-- `/session switch NAME` activates a persisted session.
-- `/sessions` lists repository sessions.
-- `/compact` compacts the current idle session.
-- `/delete [NAME]` deletes metadata and transcript history, then selects or
-  creates a replacement when necessary.
-- `/interrupt` requests interruption of the active generation.
+For questions or defects, use the repository's issue tracker and include enough context to reproduce the problem.
 
-Provider identifiers are intentionally opaque outside their agent adapter.
-Codex persists only `thread_id`; fake sessions persist only `session_id`.
+## Contributing
 
-## Events and approvals
-
-Construct `EventPipeline` on the running principal asyncio loop. `subscribe()`
-creates an independent buffered subscription task, `push()` queues an event for
-every matching subscription without waiting, and `listen()` is a one-event
-convenience built from a temporary subscription. Delivery is FIFO within one
-subscription; separate subscriptions may run concurrently. Events are
-transient and are neither retained nor replayed.
-
-`Subscription.wait_until_cancelled()` allows a coroutine to wait for another
-callback or owner to unsubscribe it.
-
-`SynchronousEventPipeline` is the separate SDK-thread bridge. Its `push()`
-schedules publication with `call_soon_threadsafe()`, while `run()` submits a
-coroutine to the principal loop and blocks only the external calling thread.
-
-The Codex SDK invokes approval callbacks synchronously on its own callback
-thread. `CodexAgent` translates the provider request into a typed command,
-file-change, or additional-permissions request, runs the configured asynchronous
-`PermissionRequester`, and translates its decision back to Codex. Permission
-cards show only the fields needed to decide; provider bookkeeping and unknown
-payload fields are not displayed.
-`CodexAgent` owns the `SynchronousEventPipeline` used for the UI-specific
-handoff while the SDK callback thread waits for the asynchronous requester's
-decision.
-
-## Tests
-
-From `src`, always run checks with the project interpreter:
+Contributions are welcome through issues and pull requests. Review the [project invariants](src/INVARIANTS.md) and [quality gate documentation](src/docs/quality-gates.md) before making changes using agents. From `src`, run the checks with the project interpreter:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider --basetemp=.verify-tmp\pytest
+New-Item -ItemType Directory -Force .verify-readme | Out-Null
+.\.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider --basetemp=.verify-readme\pytest
 .\.venv\Scripts\python.exe -m mypy
 .\.venv\Scripts\python.exe scripts\quality_gate.py
 ```
+
+Use a unique existing parent directory for each test run or agent. The repository does not currently identify individual maintainers or include a separate contribution guide or license file; consult the repository for its current ownership and contribution process.
