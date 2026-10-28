@@ -227,3 +227,4 @@ tmp/*
 .log/*
 .db/*
 *.db
+.codex
