@@ -5,6 +5,7 @@ import datetime
 from pathlib import Path
 import sys
 
+from pairo.core.agent.session_identifier import SessionIdentifier
 from pairo.tools.conversation_event_log import (
     ConversationEventLog,
     DiagnosticEventLogPolicy,
@@ -20,7 +21,7 @@ from agents.isolated_developer.isolated_developer import get_isolated_developer
 from agents.planner.planner import get_planner
 from agents.prompt_optimizer.prompt_optimizer import get_prompt_optimizer
 from agents.verifier.verifier import get_verifier
-from pairo import run_agents
+from pairo import Agent, run_agents
 from pairo.core.events import EventPipeline
 from pairo.mcp.github import add_github_mcp_server
 from pairo.ui import SqliteSessionRepository
@@ -35,7 +36,7 @@ async def run_async() -> None:
         Path("./.log/events" + str(datetime.datetime.now().timestamp()) + ".jsonl"),
         DiagnosticEventLogPolicy(),
     )
-    configured_agents = [
+    configured_agents : list[Agent[SessionIdentifier]] = [
         get_planner(pipeline, repository),
         get_developer("developer", pipeline, repository),
         get_verifier(pipeline, repository),
@@ -57,12 +58,9 @@ async def run_async() -> None:
             for agent in (planner, developer, verifier)
         ]
     )
-    agents = {
-        agent.configuration().id: agent for agent in configured_agents
-    }
     spec_manager = install_spec_manager(
         folder=Path("./tmp"),
-        agents=agents,
+        agents=configured_agents,
         director=planner,
         pairs=[WorkerVerifierPair("pair-1", developer, verifier)],
         documenter=_agent_documenter,
@@ -70,7 +68,7 @@ async def run_async() -> None:
     try:
         await spec_manager.boot_up()
         await run_agents(
-            agents,
+            configured_agents,
             pipeline,
             repository,
             initial_session_name="Agentic Loops",

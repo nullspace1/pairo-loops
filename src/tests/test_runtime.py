@@ -13,8 +13,7 @@ from pairo.core.agent import AgentConfiguration, SandboxPermission
 from pairo.core.clients import ActiveSession, AgentStatus, FakeAgent, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
 from pairo.ui import SlashCommand, app as ui_app
-from pairo.ui.app import AgentChatApp, UserInterfaceLauncher
-from pairo.ui.configuration import UserInterfaceConfiguration
+from pairo.ui.app import AgentChatApp, run_ui
 from pairo.ui.models import SessionMetadata
 from pairo.ui.transcribers import default_transcribers
 from pairo.ui.widgets.sidebar_statistics import create_default_sidebar_statistics, default_sidebar_statistics
@@ -108,7 +107,7 @@ class QuittingTextualLauncher:
     def __init__(self) -> None:
         self.returned = False
 
-    async def __call__(self, agents, pipeline, repository) -> None:
+    async def __call__(self, agents, pipeline, repository, **_kwargs) -> None:
         app = AgentChatApp(
             agents, pipeline, repository,
             transcribers=default_transcribers(),
@@ -132,11 +131,11 @@ def test_run_agents_manages_complete_application_lifecycle(
         calls: list[str] = []
         pipeline = EventPipeline()
         agent = StubAgent(calls, tmp_path)
-        agents = {agent.configuration().id: agent}
+        agents = [agent]
         repository = StubRepository(calls)
 
-        async def fake_run_ui(received_agents, received_pipeline, received_repository):
-            assert received_agents == agents
+        async def fake_run_ui(received_agents, received_pipeline, received_repository, **_kwargs):
+            assert received_agents == {agent.configuration().id: agent}
             assert received_pipeline is pipeline
             assert received_repository is repository
             calls.append("ui")
@@ -152,6 +151,38 @@ def test_run_agents_manages_complete_application_lifecycle(
             "close:repository",
         ]
         assert not hasattr(pipeline, "_closed")
+
+    asyncio.run(scenario())
+
+
+def test_run_agents_forwards_ui_options_and_closes_default_repository(monkeypatch, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+        agent = StubAgent(calls, tmp_path)
+        repository = StubRepository(calls)
+        transcribers = default_transcribers()
+        statistics = list(create_default_sidebar_statistics())
+        monkeypatch.setattr(runtime, "SqliteSessionRepository", lambda: repository)
+
+        async def fake_ui(agents, pipeline, received_repository, *, transcribers, sidebar_statistics):
+            assert received_repository is repository
+            assert transcribers is registry
+            assert sidebar_statistics is statistics
+            calls.append("ui")
+
+        registry = transcribers
+        monkeypatch.setattr(runtime, "run_ui", fake_ui)
+        await run_agents([agent], EventPipeline(), transcribers=registry, sidebar_statistics=statistics)
+        assert calls[-2:] == ["close:agent", "close:repository"]
+
+    asyncio.run(scenario())
+
+
+def test_run_agents_rejects_duplicate_agent_ids(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        agent = StubAgent([], tmp_path)
+        with pytest.raises(ValueError, match="Agent IDs must be unique"):
+            await run_agents([agent, agent], EventPipeline(), StubRepository([]))
 
     asyncio.run(scenario())
 
@@ -177,7 +208,7 @@ def test_textual_quit_returns_run_agents_and_releases_idle_resources(
         monkeypatch.setattr(runtime, "run_ui", launcher)
 
         await asyncio.wait_for(
-            run_agents({configuration.id: agent}, pipeline, repository),
+            run_agents([agent], pipeline, repository),
             timeout=1,
         )
 
@@ -215,7 +246,7 @@ def test_run_agents_releases_resources_after_failures(
         agent = StubAgent(calls, tmp_path, start_error=start_error)
         repository = StubRepository(calls)
 
-        async def fake_run_ui(*_args):
+        async def fake_run_ui(*_args, **_kwargs):
             if ui_error is not None:
                 raise ui_error
             raise AssertionError("UI should not run after startup failure")
@@ -223,7 +254,7 @@ def test_run_agents_releases_resources_after_failures(
         monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
         with pytest.raises(RuntimeError, match=expected):
             await run_agents(
-                {agent.configuration().id: agent},
+                [agent],
                 pipeline,
                 repository,
             )
@@ -255,7 +286,7 @@ def test_ui_launcher_composes_default_commands_and_owns_only_its_repository(
         )
         repository = TrackingRepository()
         observed: list[str] = []
-        launched_statistics: list[tuple[object, ...]] = []
+        launched_statistics: list[list[object]] = []
 
         async def fake_run_async(app):
             launched_statistics.append(app._sidebar_statistics)
@@ -263,8 +294,8 @@ def test_ui_launcher_composes_default_commands_and_owns_only_its_repository(
             observed.append("commands executed")
 
         monkeypatch.setattr(AgentChatApp, "run_async", fake_run_async)
-        launcher = UserInterfaceLauncher()
-        await launcher({agent.configuration().id: agent}, pipeline, UserInterfaceConfiguration(repository).add_command(LauncherCommand()))
+        launcher = run_ui
+        await launcher({agent.configuration().id: agent}, pipeline, repository, commands=[LauncherCommand()])
         assert observed
         assert [statistic.key for statistic in launched_statistics[0]][:2] == [
             "name", "id"
@@ -316,12 +347,12 @@ def test_run_agents_resumes_latest_session_without_overwriting_identifier(
             last_updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
         )
 
-        async def fake_run_ui(*_args) -> None:
+        async def fake_run_ui(*_args, **_kwargs) -> None:
             calls.append("ui")
 
         monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
         await run_agents(
-            {agent_id: agent},
+            [agent],
             pipeline,
             repository,
             initial_session_name="Fallback",
@@ -354,12 +385,12 @@ def test_run_agents_resumes_and_creates_sessions_independently(
             last_updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
         )
 
-        async def fake_run_ui(*_args) -> None:
+        async def fake_run_ui(*_args, **_kwargs) -> None:
             calls.append("ui")
 
         monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
         await run_agents(
-            {resumed_id: resumed, created.configuration().id: created},
+            [resumed, created],
             pipeline,
             repository,
             initial_session_name="Fallback",
@@ -397,16 +428,13 @@ def test_run_agents_does_not_persist_fallbacks_after_partial_startup_failure(
         failing = ConcurrentAgent(calls, tmp_path, start_error=RuntimeError("startup failed"))
         repository = StubRepository(calls)
 
-        async def fake_run_ui(*_args) -> None:
+        async def fake_run_ui(*_args, **_kwargs) -> None:
             raise AssertionError("UI should not run after startup failure")
 
         monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
         with pytest.raises(RuntimeError, match="startup failed"):
             await run_agents(
-                {
-                    successful.configuration().id: successful,
-                    failing.configuration().id: failing,
-                },
+                [successful, failing],
                 pipeline,
                 repository,
                 initial_session_name="Fallback",
@@ -453,15 +481,15 @@ def test_run_agents_falls_back_once_after_resume_failure(
             last_updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
         )
 
-        async def fake_run_ui(*_args) -> None:
+        async def fake_run_ui(*_args, **_kwargs) -> None:
             calls.append("ui")
 
         monkeypatch.setattr(runtime, "run_ui", fake_run_ui)
         if creation_fails:
             with pytest.raises(RuntimeError, match="creation failed"):
-                await run_agents({agent_id: agent}, EventPipeline(), repository)
+                await run_agents([agent], EventPipeline(), repository)
         else:
-            await run_agents({agent_id: agent}, EventPipeline(), repository)
+            await run_agents([agent], EventPipeline(), repository)
 
         assert calls.count("start:Conversation 1") == 1
         assert ("activate:Existing" in calls) == (failure_stage == "activation")

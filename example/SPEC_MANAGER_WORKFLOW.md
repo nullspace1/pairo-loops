@@ -9,7 +9,7 @@ not exported by the reusable `pairo` package.
 
 - Configure one planner as the director and at least one distinct
   developer/verifier pair in the agent mapping.
-- Call `install_spec_manager(...)`, start the returned manager before
+- Call `install_spec_manager(...)` with a list of agents, start the returned manager before
   `run_agents(...)`, and close it during shutdown. The verified integration is
   in [`main.py`](main.py).
 - Optionally register a separate documenter. A documenter cannot also hold a

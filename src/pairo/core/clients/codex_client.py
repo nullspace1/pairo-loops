@@ -93,9 +93,6 @@ class _ApprovalAwareAsyncCodexClient(AsyncCodexClient):
     """Add approval injection missing from the SDK's async constructor."""
 
     def __init__(self, approval_handler: ApprovalHandler) -> None:
-        # The SDK async client is a thin wrapper over this field in 0.159.x.
-        # Keeping the compatibility dependency here makes an SDK change fail
-        # one focused contract test instead of leaking into CodexAgent.
         self._sync = CodexClient(approval_handler=approval_handler)
 
 

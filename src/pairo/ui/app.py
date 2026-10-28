@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -39,7 +39,6 @@ from .chat_commands import (
     SlashCommand,
 )
 from .commands import AgentCommandController
-from .configuration import UserInterfaceConfiguration
 from .models import (
     EventDetailLevel,
     SystemTranscriptMetadata,
@@ -128,11 +127,11 @@ class AgentChatApp(App[None]):
         session_repository: SessionRepository,
         *,
         transcribers: TranscriberRegistry,
-        sidebar_statistics: Sequence[SidebarStatistic],
-        commands: Sequence[SlashCommand],
+        sidebar_statistics: list[SidebarStatistic],
+        commands: list[SlashCommand],
     ) -> None:
         super().__init__()
-        configured_agents = tuple(agents.values())
+        configured_agents = list(agents.values())
         configured_ids = [agent.configuration().id for agent in configured_agents]
         duplicate_ids = {
             agent_id for agent_id in configured_ids if configured_ids.count(agent_id) > 1
@@ -148,7 +147,7 @@ class AgentChatApp(App[None]):
             duplicates = ", ".join(sorted(duplicate_names))
             raise ValueError(f"Agent names must be unique; duplicated: {duplicates}.")
         agents_by_id = dict(agents)
-        self._sidebar_statistics = tuple(sidebar_statistics)
+        self._sidebar_statistics = list(sidebar_statistics)
         self._agents = agents_by_id
         self._event_pipeline = event_pipeline
         self.session_repository = session_repository
@@ -462,60 +461,44 @@ class AgentChatApp(App[None]):
                         agent.configuration().id, session.session_name
                 )
 
-class UserInterfaceLauncher:
-    """Callable entry point for the default Textual interface."""
-
-    async def __call__(
-        self,
-        agents: Mapping[UUID, Agent[SessionIdentifier]],
-        event_pipeline: EventPipeline,
-        configuration: UserInterfaceConfiguration | SessionRepository | None = None,
-    ) -> None:
-        configured = self._configuration(configuration)
-        repository = configured.session_repository
-        owns_repository = repository is None
-        if repository is None:
-            repository = SqliteSessionRepository()
-        try:
-            await AgentChatApp(
-                agents,
-                event_pipeline,
-                repository,
-                transcribers=(configured.transcribers or default_transcribers()),
-                sidebar_statistics=self._sidebar_statistics(configured),
-                commands=self._commands(configured),
-            ).run_async()
-        finally:
-            if owns_repository:
-                await repository.close()
-
-    def _configuration(
-        self,
-        configuration: UserInterfaceConfiguration | SessionRepository | None,
-    ) -> UserInterfaceConfiguration:
-        if isinstance(configuration, UserInterfaceConfiguration):
-            return configuration
-        return UserInterfaceConfiguration(configuration)
-
-    def _commands(
-        self, configuration: UserInterfaceConfiguration
-    ) -> tuple[SlashCommand, ...]:
-        defaults: tuple[SlashCommand, ...] = ()
-        if configuration.include_default_commands:
-            defaults = (
+async def run_ui(
+    agents: Mapping[UUID, Agent[SessionIdentifier]],
+    event_pipeline: EventPipeline,
+    session_repository: SessionRepository | None = None,
+    *,
+    transcribers: TranscriberRegistry | None = None,
+    sidebar_statistics: list[SidebarStatistic] | None = None,
+    commands: list[SlashCommand] | None = None,
+    include_default_commands: bool = True,
+) -> None:
+    """Launch the default Textual interface."""
+    repository = session_repository
+    owns_repository = repository is None
+    if repository is None:
+        repository = SqliteSessionRepository()
+    try:
+        configured_commands: list[SlashCommand] = []
+        if include_default_commands:
+            configured_commands = [
                 HelpCommand(), AgentSelectionCommand(), SessionCommand(),
                 SessionsCommand(), CompactCommand(), DeleteCommand(),
                 InterruptCommand(), ImageCommand(),
-            )
-        return defaults + tuple(configuration.commands)
-
-    def _sidebar_statistics(
-        self, configuration: UserInterfaceConfiguration
-    ) -> tuple[SidebarStatistic, ...]:
-        if configuration.sidebar_statistics is not None:
-            return configuration.sidebar_statistics
-        return create_default_sidebar_statistics()
-    
-
-
-run_ui = UserInterfaceLauncher()
+            ]
+        if commands is not None:
+            configured_commands.extend(commands)
+        statistics = (
+            list(sidebar_statistics)
+            if sidebar_statistics is not None
+            else list(create_default_sidebar_statistics())
+        )
+        await AgentChatApp(
+            agents,
+            event_pipeline,
+            repository,
+            transcribers=transcribers if transcribers is not None else default_transcribers(),
+            sidebar_statistics=statistics,
+            commands=configured_commands,
+        ).run_async()
+    finally:
+        if owns_repository:
+            await repository.close()

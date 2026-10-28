@@ -127,10 +127,7 @@ def setup_manager(
     director = AgentStub(tmp_path, "director")
     worker = AgentStub(tmp_path, "worker")
     verifier = AgentStub(tmp_path, "verifier")
-    agents = {
-        agent.configuration().id: agent
-        for agent in (director, worker, verifier)
-    }
+    agents = [director, worker, verifier]
     pair = WorkerVerifierPair("pair-1", worker, verifier)
     manager = install_spec_manager(
         tmp_path,
@@ -142,6 +139,17 @@ def setup_manager(
         handoff_poll_interval=0.001,
     )
     return manager, agents, director, worker, verifier
+
+
+def test_installer_rejects_duplicate_agent_ids(tmp_path: Path) -> None:
+    director = AgentStub(tmp_path, "director")
+    worker = AgentStub(tmp_path, "worker")
+    verifier = AgentStub(tmp_path, "verifier")
+    with pytest.raises(ValueError, match="Agent IDs must be unique"):
+        install_spec_manager(
+            tmp_path, [director, worker, verifier, worker], director,
+            [WorkerVerifierPair("pair-1", worker, verifier)],
+        )
 
 
 def test_installer_configures_role_specific_skills_and_instructions(tmp_path: Path) -> None:
@@ -245,10 +253,7 @@ def test_accepted_feature_history_is_referenced_to_documenter_after_batch(
         worker = AgentStub(tmp_path, "worker")
         verifier = AgentStub(tmp_path, "verifier")
         documenter = AgentStub(tmp_path, "documenter")
-        agents = {
-            agent.configuration().id: agent
-            for agent in (director, worker, verifier, documenter)
-        }
+        agents = [director, worker, verifier, documenter]
         manager = install_spec_manager(
             tmp_path,
             agents,
@@ -669,9 +674,7 @@ def test_reloaded_rejection_can_be_constructed_outside_an_event_loop(
     director = AgentStub(tmp_path, "director")
     worker = AgentStub(tmp_path, "worker")
     verifier = AgentStub(tmp_path, "verifier")
-    agents = {
-        agent.configuration().id: agent for agent in (director, worker, verifier)
-    }
+    agents = [director, worker, verifier]
     pair = WorkerVerifierPair("pair-1", worker, verifier)
 
     async def seed_rejection() -> None:
@@ -718,9 +721,7 @@ def test_reloaded_verification_recovers_to_the_owned_worker_pair(tmp_path: Path)
     director = AgentStub(tmp_path, "director")
     worker = AgentStub(tmp_path, "worker")
     verifier = AgentStub(tmp_path, "verifier")
-    agents = {
-        agent.configuration().id: agent for agent in (director, worker, verifier)
-    }
+    agents = [director, worker, verifier]
     pair = WorkerVerifierPair("pair-1", worker, verifier)
 
     async def seed_verification() -> None:

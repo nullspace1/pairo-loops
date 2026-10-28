@@ -55,7 +55,7 @@ async def main() -> None:
         permission_requester=permissions,
     )
     agent = CodexAgent(configuration, pipeline)
-    await run_agents({configuration.id: agent}, pipeline, repository)
+    await run_agents([agent], pipeline, repository)
 
 
 asyncio.run(main())

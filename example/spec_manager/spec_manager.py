@@ -458,7 +458,7 @@ class SpecManager(MCPHttpWrapper):
     def __init__(
         self,
         folder: str | Path,
-        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        agents: list[Agent[SessionIdentifier]],
         director: Agent[SessionIdentifier],
         pairs: Sequence[WorkerVerifierPair],
         port: int = 8082,
@@ -474,8 +474,11 @@ class SpecManager(MCPHttpWrapper):
             raise ValueError("Verification timeout must be greater than zero.")
         if handoff_timeout <= 0 or handoff_poll_interval <= 0:
             raise ValueError("Handoff timeout and polling interval must be greater than zero.")
-        self._validate_registration(agents, director, pairs)
-        self._validate_documenter_registration(agents, documenter, director, pairs)
+        agents_by_id = {agent.configuration().id: agent for agent in agents}
+        if len(agents_by_id) != len(agents):
+            raise ValueError("Agent IDs must be unique.")
+        self._validate_registration(agents_by_id, director, pairs)
+        self._validate_documenter_registration(agents_by_id, documenter, director, pairs)
         self._director = director
         self._documenter = documenter
         self._pairs = {pair.pair_id: pair for pair in pairs}
@@ -1347,7 +1350,7 @@ class SpecManagerInstaller:
     def __call__(
         self,
         folder: str | Path,
-        agents: Mapping[UUID, Agent[SessionIdentifier]],
+        agents: list[Agent[SessionIdentifier]],
         director: Agent[SessionIdentifier],
         pairs: Sequence[WorkerVerifierPair],
         port: int = 8082,

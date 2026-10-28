@@ -13,9 +13,7 @@ from .widgets.sidebar_statistics import SidebarStatistic
 class UserInterfaceConfiguration:
     """Mutable builder for collaborators installed into one UI launch.
 
-    Registrations are snapshotted by :class:`UserInterfaceLauncher`; configure
-    this object before starting the launcher rather than mutating it while the
-    UI is running.
+    Values can be inspected and passed to the UI entry point explicitly.
     """
 
     def __init__(

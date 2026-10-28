@@ -244,8 +244,7 @@ configuration. Individual linked directories cannot use
 `DANGER_FULL_ACCESS`; on Windows, link creation falls back to a directory
 junction when symbolic-link privilege is unavailable.
 
-`run_agents(agents, pipeline, repository)` validates the UUID mapping and,
-concurrently for every agent, resumes the repository's latest durable session
+`run_agents(agents, pipeline, repository)` accepts a list of agents, validates their unique IDs, and concurrently for every agent, resumes the repository's latest durable session
 when one exists. Resuming preserves the durable session name and provider
 identifier without rewriting its metadata. When an agent has no durable
 session, it creates and persists one using `initial_session_name` (default:
@@ -255,8 +254,7 @@ the pipeline.
 
 ## UI command composition
 
-Use `UserInterfaceConfiguration` to add a slash command without modifying
-Pairo. A command supplies its slash-prefixed `name` and implements the async
+Pass commands to `run_ui` to add slash commands without modifying Pairo. A command supplies its slash-prefixed `name` and implements the async
 `invoke(event_pipeline, agent, agents, session_repository, argument)` method.
 Each invocation receives the UI event pipeline, the configured agent that owned
 the submitted command, the complete configured UUID-to-agent mapping, and the
@@ -271,7 +269,6 @@ from pairo.ui import (
     EventDetailLevel,
     SlashCommand,
     TranscriptEntry,
-    UserInterfaceConfiguration,
     run_ui,
 )
 
@@ -302,8 +299,7 @@ class EchoCommand(SlashCommand):
         )
 
 
-configuration = UserInterfaceConfiguration().add_command(EchoCommand())
-await run_ui(agents, pipeline, configuration)
+await run_ui(agents, pipeline, commands=[EchoCommand()])
 ```
 
 Commands return `None`. Commands publish `AddTranscriptEntry` through the event
@@ -314,7 +310,7 @@ push navigation and other events using the supplied pipeline.
 By default, `run_ui` puts added commands after the standard `/agent`,
 `/session`, `/sessions`, `/compact`, `/delete`, `/interrupt`, `/image`, and
 `/help` commands. It also supplies the default repository, transcribers, and
-sidebar statistics. Call `without_default_commands()` when the added commands
+sidebar statistics. Pass `include_default_commands=False` when the added commands
 must be the complete command set. Names must be unique across the resulting
 set; duplicates raise `ValueError` when the UI is constructed.
 
@@ -324,8 +320,7 @@ exact ordered `commands` sequence; it does not add defaults. The app snapshots
 the command sequence during construction, so later mutations to the source
 sequence do not change dispatch.
 
-Use `use_session_repository`, `use_transcribers`, and
-`use_sidebar_statistics` to replace launcher defaults. The launcher closes a
+Pass `session_repository`, `transcribers`, and `sidebar_statistics` to replace launcher defaults. The launcher closes a
 repository only when it created that repository. The caller remains
 responsible for closing a supplied repository; `run_agents` performs that
 cleanup when it is the caller.
@@ -333,7 +328,7 @@ cleanup when it is the caller.
 ## Sidebar statistics
 
 Sidebar statistics are one ordered shared sequence for the complete UI launch.
-Pass that sequence to `UserInterfaceConfiguration.use_sidebar_statistics`; the
+Pass that list as `sidebar_statistics` to `run_ui` or `run_agents`; the
 launcher supplies a fresh shared default sequence when none is configured.
 Category and render order are defined by each statistic's
 `SidebarStatisticCategory`. Keys and statistic instances must be unique.
@@ -359,11 +354,11 @@ from pairo.ui.widgets.sidebar_statistics import FixedStatistic, SidebarStatistic
 async def agent_workspace(agent, _session):
     return str(agent.configuration().workspace)
 
-statistics = (
+statistics = [
     FixedStatistic("workspace", "Workspace", agent_workspace),
     FixedStatistic("session", "Session", session_value, SidebarStatisticCategory.SESSION),
-)
-configuration.use_sidebar_statistics(statistics)
+]
+await run_ui(agents, pipeline, sidebar_statistics=statistics)
 ```
 ## Constraints
 

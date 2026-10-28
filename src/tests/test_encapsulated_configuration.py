@@ -10,7 +10,7 @@ from pairo.core.clients import ActiveSession, AgentStatus, FakeSessionIdentifier
 from pairo.core.events import EventPipeline
 from pairo.core.mcp.servers import StdioMCPServer
 from pairo.mcp._agent_configuration import MCPServerAttacher
-from pairo.runtime import RuntimeLauncher
+from pairo import runtime
 from pairo.ui.widgets.sidebar_statistics.default_sidebar_statistics import (
     TimestampFormatter,
     default_sidebar_statistics,
@@ -57,7 +57,7 @@ class _Repository:
         self.calls.append("close:repository")
 
 
-def test_runtime_launcher_uses_its_injected_ui_launcher() -> None:
+def test_run_agents_uses_ui_launcher(monkeypatch) -> None:
     async def scenario() -> None:
         calls: list[str] = []
         pipeline = EventPipeline()
@@ -69,16 +69,17 @@ def test_runtime_launcher_uses_its_injected_ui_launcher() -> None:
             workspace=Path.cwd(),
         )
         agent = _Agent(calls, configured)
-        agents = {configured.id: agent}
+        agents = [agent]
         repository = _Repository(calls)
 
-        async def launch_ui(received_agents, received_pipeline, received_repository) -> None:
-            assert received_agents == agents
+        async def launch_ui(received_agents, received_pipeline, received_repository, **_kwargs) -> None:
+            assert received_agents == {configured.id: agent}
             assert received_pipeline is pipeline
             assert received_repository is repository
             calls.append("ui")
 
-        await RuntimeLauncher(agents, pipeline, repository, launch_ui).launch("Initial")
+        monkeypatch.setattr(runtime, "run_ui", launch_ui)
+        await runtime.run_agents(agents, pipeline, repository, initial_session_name="Initial")
 
         assert calls == [
             "start:Initial",
